@@ -1,0 +1,110 @@
+name: build-publish
+
+# Build the analysis image on every commit and publish it to GHCR.
+# Layer caching (type=gha) keeps docs-only commits cheap: unchanged layers are
+# reused, so only the final tag/push runs. Downstream (HPC/Apptainer) should pull
+# the image BY DIGEST, which this workflow records via build provenance.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write        # push to GHCR
+  id-token: write        # OIDC for SLSA provenance attestation
+  attestations: write    # attach build provenance to the image
+
+jobs:
+  lint:
+    # Advisory only — does NOT gate publishing. A genuinely broken Dockerfile
+    # fails the build job below on its own.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck pipeline scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./pipeline
+          severity: error
+      - name: Hadolint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+  build-publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64          # HPC is amd64; slivar/VEP ARM support is uneven
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: ${{ github.event_name != 'pull_request' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+
+      - name: Attest build provenance (SLSA)
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Published image";
+            echo '```';
+            echo "${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}";
+            echo '```';
+            echo "Pull on HPC with:";
+            echo '```';
+            echo "apptainer pull docker://${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
