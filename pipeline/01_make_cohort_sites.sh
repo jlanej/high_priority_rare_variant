@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# =============================================================================
+# 01_make_cohort_sites.sh  —  Pipeline Step 1: cohort site-only union VCF
+#
+# Build a normalized, SITE-ONLY union of variant loci across all per-trio VCFs.
+# See docs/cohort_construction.md and docs/pipeline_design.md (Step 1).
+#
+# WHY site-only union, not `bcftools merge`:
+#   These trios were NOT jointly genotyped. Merging them fabricates hom-ref
+#   genotypes (absent != hom-ref), so any internal AC/AN is fiction. We therefore
+#   drop genotypes and build a union of *loci only*. Population frequency comes
+#   from external gnomAD downstream — never from this file.
+#
+# Per trio:  keep PASS -> norm (split multiallelic + left-align) -> drop GT ->
+#            strip per-trio INFO (incomparable across trios) -> index
+# Union:     concat -a -D (dedup identical) -> sort -> norm -d exact (collapse
+#            residual duplicate representations) -> index
+#
+# Usage:
+#   01_make_cohort_sites.sh --manifest M.tsv --ref GRCh38.fa --out cohort.sites.vcf.gz \
+#       [--tmpdir DIR] [--threads N] [--filter 'PASS,.']
+#
+# Manifest: TSV with a header line; columns include at least `trio_id` and `vcf`.
+# =============================================================================
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$HERE/lib/common.sh"
+
+MANIFEST="" REF="" OUT="" THREADS="${HPRV_THREADS:-4}" FILTER="PASS,."
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --manifest) MANIFEST="$2"; shift 2;;
+        --ref)      REF="$2"; shift 2;;
+        --out)      OUT="$2"; shift 2;;
+        --tmpdir)   HPRV_TMPDIR="$2"; shift 2;;
+        --threads)  THREADS="$2"; shift 2;;
+        --filter)   FILTER="$2"; shift 2;;
+        -h|--help)  grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+        *) die "unknown arg: $1";;
+    esac
+done
+[[ -n "$MANIFEST" && -n "$REF" && -n "$OUT" ]] || die "need --manifest, --ref, and --out"
+[[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+[[ -f "$REF" ]] || die "reference FASTA not found: $REF"
+
+if is_done "$OUT"; then log "Step 1 already complete: $OUT (skipping)"; exit 0; fi
+
+workdir="$(abspath_dir "$OUT")/sites_work"
+mkdir -p "$workdir"
+
+# --- resolve trio_id / vcf columns from the manifest header ---
+read -r header < "$MANIFEST"
+idcol=0; vcfcol=0; i=0
+IFS=$'\t' read -ra cols <<< "$header"
+for c in "${cols[@]}"; do
+    i=$((i+1))
+    case "$c" in trio_id) idcol=$i;; vcf) vcfcol=$i;; esac
+done
+[[ $idcol -gt 0 && $vcfcol -gt 0 ]] || die "manifest must have tab-separated 'trio_id' and 'vcf' header columns"
+
+# --- collect inputs and build the bind set (dirs every tool call must see) ---
+declare -a site_files=()
+binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF")"
+mapfile -t rows < <(tail -n +2 "$MANIFEST")
+[[ ${#rows[@]} -gt 0 ]] || die "manifest has no data rows"
+
+for row in "${rows[@]}"; do
+    [[ -z "$row" || "$row" == \#* ]] && continue
+    IFS=$'\t' read -ra f <<< "$row"
+    trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
+    [[ -n "$trio" && -n "$vcf" ]] || { warn "skipping malformed row: $row"; continue; }
+    [[ -f "$vcf" ]] || die "trio VCF not found for $trio: $vcf"
+    binds+=" $(abspath_dir "$vcf")"
+done
+# Deduplicate bind dirs and export for common.sh so all tool calls can see them.
+HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"
+export HPRV_BIND
+
+log "Step 1: building cohort site-only union from ${#rows[@]} trios"
+log "  reference: $REF"
+log "  output:    $OUT"
+
+# --- per-trio: PASS -> norm -> site-only -> strip INFO -> index ---
+for row in "${rows[@]}"; do
+    [[ -z "$row" || "$row" == \#* ]] && continue
+    IFS=$'\t' read -ra f <<< "$row"
+    trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
+    [[ -n "$trio" && -n "$vcf" ]] || continue
+    site="$workdir/${trio}.sites.norm.vcf.gz"
+
+    if is_done "$site"; then
+        log "  [$trio] cached"
+        site_files+=("$site"); continue
+    fi
+    log "  [$trio] normalizing + dropping genotypes"
+    bcftools view --threads "$THREADS" -f "$FILTER" -Ou "$vcf" \
+        | bcftools norm -m- -f "$REF" -c s -Ou - \
+        | bcftools view -G -Ou - \
+        | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
+    index_vcf "$site"
+    require_intact_bgzip "$site"
+    mark_done "$site"
+    site_files+=("$site")
+done
+[[ ${#site_files[@]} -gt 0 ]] || die "no per-trio site files were produced"
+
+# --- union: concat (dedup) -> sort -> norm -d exact -> index ---
+log "Step 1: unioning ${#site_files[@]} per-trio site files"
+tmp_sort="$HPRV_TMPDIR/sort"; mkdir -p "$tmp_sort"
+bcftools concat -a -D --threads "$THREADS" -Ou "${site_files[@]}" \
+    | bcftools sort -T "$tmp_sort" -Ou - \
+    | bcftools norm -d exact -f "$REF" --threads "$THREADS" -Oz -o "$OUT" -
+index_vcf "$OUT"
+require_intact_bgzip "$OUT"
+mark_done "$OUT"
+
+n="$(count_variants "$OUT")"
+log "Step 1 complete: $OUT ($n unique sites)"
