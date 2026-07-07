@@ -1,31 +1,55 @@
-# Cross-Pedigree Gene-Burden Screening
+# Cross-Pedigree Gene Consolidation (Recurrence-Based)
 
-Finds genes carrying more qualifying rare variants than a null expectation across the trio cohort, so recurrent gene-level signal can nominate candidates beyond single-family analysis.
+Finds genes where rare, functional **inherited** variants recur across multiple independent individuals in the cohort, so recurrent gene-level signal can nominate candidates beyond single-family analysis.
 
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
 ## TL;DR
 
-- **Primary signal is de novo enrichment**, not case-vs-control burden. Test observed DNM counts per gene against a **Samocha-2014** trinucleotide mutation-rate expectation (Poisson), using **denovolyzeR**. It needs only trios and is robust to cohort batch effects.
-- **The non-joint per-trio design forbids an internal cohort allele frequency.** Absent genotypes are ambiguous (no-call vs hom-ref), so there is no valid internal AC/AN. This is the single fact that shapes every method choice here.
-- **Corroborative signal is TRAPD** vs **ancestry-matched, coverage-intersected gnomAD v4.1 exomes** — feasible from summary counts, but stratification/coverage-sensitive, so it is secondary.
-- **Calibrate with synonymous variants: expect λ ≈ 1.0.** Report the synonymous-class λ and per-gene expected-vs-observed as standing QC for both the de novo and TRAPD arms.
-- **Rarity gate for qualifying variants uses gnomAD v4.1 grpmax `faf95`** (< 1e-4 for de novo candidates), never the point-estimate popmax AF.
-- **Exome-wide significance P < 2.5e-6** (~0.05 / 20,000 protein-coding genes); **BH q < 0.05** for candidate discovery. Combine masks/tiers per gene via **ACAT/Cauchy** to one p-value before thresholding.
-- **Rank nominated genes by constraint** — a gene tolerant of damaging variation is not interesting even if nominally enriched.
-- **Defer SAIGE-GENE+ / regenie** until a true joint call set exists; both require a joint genotype matrix this pipeline does not have.
+- **Primary signal is recurrence-based gene consolidation** across the cohort, focused on **inherited germline variation**. For each gene, tally the number of **distinct individuals** carrying a qualifying variant under each inheritance model — **dominant** (rare inherited het), **biallelic** (homozygous + compound het), and **X-linked**. A gene is **recurrent** at **≥ `min_carriers` (default 2)** distinct individuals.
+- **The key new signal is recurrence of inherited heterozygous variants.** A rare (grpmax `faf95` < 1e-4), functional, inherited het is only weakly interesting in one family, but becomes compelling when it **recurs across multiple individuals in the same gene**.
+- **Rank recurrent genes first, weighted by gene constraint** (LOEUF / pLI / `s_het`). A recurrent het in a **haploinsufficient** gene is the most compelling result; a gene tolerant of damaging variation is de-prioritized even when recurrent.
+- **De novo enrichment is an OPTIONAL SECONDARY signal only.** De novo filtering **and review are handled by separate dedicated machinery**; here de novo is carried as a lightweight cross-reference column (GATK `hiConfDeNovo`, child-membership checked). When a mutation-rate table is supplied, an optional Samocha-2014 Poisson enrichment (denovolyzeR-style) is reported — **exome-wide P < 2.5e-6, BH q < 0.05** — but it is not the driver.
+- **The non-joint per-trio design forbids an internal cohort allele frequency.** Absent genotypes are ambiguous (no-call vs hom-ref), so there is no valid internal AC/AN. Internal recurrence here means *distinct-individual carrier counts of qualifying variants*, not a population frequency.
+- **TRAPD** vs **ancestry-matched, coverage-intersected gnomAD v4.1 exomes** remains an **optional corroboration** (not yet implemented) — stratification/coverage-sensitive, never a standalone discovery engine.
+- **Rarity gate for qualifying variants uses gnomAD v4.1 grpmax `faf95`** (< 1e-4 for dominant/de novo candidates), never the point-estimate popmax AF.
+- **Defer SAIGE-GENE+ / regenie** until a true joint call set exists; both require a joint genotype matrix this pipeline does not have. mtDNA heteroplasmy is out of scope here (handled by a separate dedicated pipeline).
 
 ## Why the non-joint design constrains the method
 
 These VCFs are GATK Genotype-Refinement output, refined **per family** (CalculateGenotypePosteriors CGP posteriors), and **not jointly genotyped across the cohort**. Two consequences follow:
 
-1. **No cohort allele-frequency table.** Without a joint call set you cannot compute a defensible internal AF. An absent genotype is ambiguous — it may be a genuine hom-ref or an uncalled site with no coverage. Internal recurrence is therefore usable only as an **artifact/blocklist signal**, never as a population frequency. (See [allele_frequency.md](allele_frequency.md) and [cohort_construction.md](cohort_construction.md).)
-2. **Two orthogonal, design-appropriate signal sources remain:**
-   - **De novo enrichment** vs a per-gene mutation-rate model — needs only trios, insensitive to cohort-level batch effects. **This is the primary signal.**
-   - **Case-vs-external-control burden** (TRAPD-style vs gnomAD) — powerful but stratification- and coverage-sensitive; **corroborative only.**
+1. **No cohort allele-frequency table.** Without a joint call set you cannot compute a defensible internal AF. An absent genotype is ambiguous — it may be a genuine hom-ref or an uncalled site with no coverage. So "recurrence" here is **not** a population frequency: it is a tally of **distinct individuals carrying a qualifying variant** in a gene, each independently vetted by the same genotype-QC and rarity gates. (See [allele_frequency.md](allele_frequency.md) and [cohort_construction.md](cohort_construction.md).)
+2. **Design-appropriate signal sources:**
+   - **Recurrence-based gene consolidation** — distinct-individual carrier counts per gene, per inheritance model, ranked recurrent-first and weighted by constraint. **This is the primary signal**, and it centres on **inherited germline variation** (dominant het, biallelic, X-linked).
+   - **De novo Poisson enrichment** vs a per-gene mutation-rate model — needs only trios, insensitive to cohort-level batch effects, but **optional and secondary** here (de novo filtering/review live in separate machinery).
+   - **Case-vs-external-control burden** (TRAPD-style vs gnomAD) — powerful but stratification- and coverage-sensitive; **optional corroboration, not yet implemented.**
 
-## Primary signal: de novo enrichment vs a mutation model
+## Primary signal: recurrence-based gene consolidation
+
+### Distinct-individual carrier counts per gene, by inheritance model
+
+Step 6 aggregates the per-family candidate calls (from the inheritance screen, see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)) into a per-gene tally. For each gene it counts the number of **distinct individuals** carrying a qualifying variant under each model:
+
+| Model | What is counted | Rarity gate |
+| --- | --- | --- |
+| **Dominant (inherited het)** | Rare, functional **heterozygous** variant transmitted from ≥ 1 parent (parent-of-origin recorded: maternal / paternal / both), **not** part of a compound-het pair | `faf95` < 1e-4 |
+| **Biallelic** | Homozygous **or** compound het (two rare hets, same gene, in *trans*) | `faf95` < 1e-2 (permissive) / 1e-3 (high-confidence) per allele |
+| **X-linked recessive** | Male hemizygous + carrier mother; sex-aware ploidy | `faf95` < 1e-4 |
+| **De novo (secondary)** | GATK `hiConfDeNovo`, child-membership checked (`annotations.is_hiconf_denovo_for`) | counted in a **separate** column, not part of the recurrence driver |
+
+The dominant-het count is the **key new signal**: individually a rare inherited het is weak evidence, but a gene that accumulates such hets across **multiple distinct individuals** is a strong nomination.
+
+### Recurrence flag and ranking
+
+- A gene is **recurrent** when its distinct-individual carrier count reaches **`min_carriers` (default 2)**.
+- Genes are ranked **recurrent-first**, then **constraint-weighted** (constrained = LOEUF < 0.35 **or** pLI ≥ 0.9), then by carrier / dominant-het counts. A recurrent het in a **haploinsufficient** gene ranks highest.
+- De novo carrier counts and the optional de novo enrichment p-value are carried as **secondary columns** used only to break ties after the recurrence and constraint keys.
+
+## Optional secondary signal: de novo enrichment vs a mutation model
+
+> **De novo filtering and review are handled by separate dedicated machinery.** In this pipeline de novo is retained only as a **lightweight cross-reference** (detected via GATK `hiConfDeNovo`, child-membership checked via `annotations.is_hiconf_denovo_for`). The enrichment test below runs **only when a mutation-rate table is supplied** and is never the primary nomination signal.
 
 ### The Samocha framework
 
@@ -35,7 +59,7 @@ Samocha et al. (*Nat Genet* 2014) derive per-gene, per-consequence-class expecte
 
 | Tool | Method | Fit for this pipeline |
 | --- | --- | --- |
-| **denovolyzeR** (R) | Per-gene / gene-set Poisson enrichment for LoF, missense, synonymous; CCDS-level exome-wide test | **Default.** Simplest, well-suited to a modest trio cohort. |
+| **denovolyzeR** (R) | Per-gene / gene-set Poisson enrichment for LoF, missense, synonymous; CCDS-level exome-wide test | **Default for the optional de novo arm.** Simplest, well-suited to a modest trio cohort. |
 | DeNovoWEST (Kaplanis 2020) | Unified severity-weighted simulation test adding missense-clustering | Higher power on large NDD cohorts; heavier inputs. |
 | extTADA / TADA (Nguyen 2017) | Bayesian integration of de novo + case-control counts; per-gene BF/FDR | Useful only if combining both signal arms. |
 
@@ -57,7 +81,9 @@ DNMs feeding the burden test are drawn from the same genotype-QC gates as the re
 
 **Known failure mode to guard against:** gnomAD priors in CalculateGenotypePosteriors can push a genuine ultra-rare pathogenic call toward hom-ref, suppressing a real de novo. For top candidates, cross-check the pre-refinement PL/GT before counting or discarding.
 
-## Corroborative signal: case-vs-external-control burden (TRAPD)
+## Optional corroboration: case-vs-external-control burden (TRAPD)
+
+> **Not yet implemented.** TRAPD is documented here as an optional corroboration of recurrent-gene nominations, not an active default.
 
 **TRAPD** (Guo et al., *AJHG* 2018) counts qualifying-variant carriers per gene in cases and compares to gnomAD genotype/allele counts by Fisher/binomial. It needs only summary counts, so it is feasible **without joint genotyping**. Its correctness depends entirely on controlling four confounders:
 
@@ -68,7 +94,7 @@ DNMs feeding the burden test are drawn from the same genotype-QC gates as the re
 
 **RV-EXCALIBER** (*Nat Commun* 2021) supplies individual- and gene-level correction factors that explicitly de-bias gnomAD-as-control stratification and can be layered on TRAPD counts.
 
-Because the non-joint design already denies a valid internal AF, treat TRAPD as **corroboration of de novo nominations**, not a standalone discovery engine.
+Because the non-joint design already denies a valid internal AF, treat TRAPD as **optional corroboration of recurrent-gene nominations**, not a standalone discovery engine.
 
 ## Variant qualification (masks)
 
@@ -79,13 +105,13 @@ A **mask** defines which variants qualify per gene. Consequence classes come fro
 | **M1 — pLoF** | LOFTEE **HC, no flags** |
 | **M2 — pLoF + damaging missense** | M1 ∪ (REVEL ≥ 0.5 **or** AlphaMissense likely_pathogenic **or** CADD ≥ 20) |
 
-AAF tiers: **≤ 1e-4** (de novo candidate default) and a stricter **≤ 1e-2 / 1e-3** tier reused from the recessive discovery gates. Multiple masks × AAF tiers improve power but must be paid for in correction (see below). All qualifying variants additionally require FILTER = PASS and the genotype-QC gates above.
+AAF tiers: **≤ 1e-4** (dominant / de novo candidate default) and a **≤ 1e-2 / 1e-3** tier reused from the recessive (biallelic) discovery gates. Multiple masks × AAF tiers improve power but must be paid for in correction where the optional statistical tests are used (see below). All qualifying variants additionally require FILTER = PASS and the genotype-QC gates above.
 
 > The rarity field is **grpmax `faf95`** (95% CI lower bound), not the point-estimate popmax/grpmax AF. The research brief phrased the burden filter on point-estimate popmax; the pipeline standard is faf95, consistent with every other frequency filter in this repo.
 
 ## Statistical test menu (reference)
 
-These are the standard collapsing and variance-component tests. Only the Poisson (de novo) and Fisher (TRAPD) arms are active defaults here; the rest are documented for context and for the future joint-call-set case.
+These are the standard collapsing and variance-component tests, documented for context and for the future joint-call-set case. The active primary method here is **recurrence-based gene consolidation** (distinct-individual carrier counts, not a formal association test); the optional Poisson (de novo) and Fisher (TRAPD) arms are secondary/corroborative. The remaining tests require a joint genotype matrix this pipeline does not have.
 
 | Test | Character | When it wins |
 | --- | --- | --- |
@@ -102,7 +128,9 @@ These are the standard collapsing and variance-component tests. Only the Poisson
 
 Both **require a joint genotype matrix** and are therefore **not applicable to unmerged per-trio VCFs**. Defer until a true cohort joint call set exists.
 
-## Multiple-testing correction
+## Multiple-testing correction (optional de novo arm)
+
+The primary recurrence tally produces carrier counts and a recurrence flag, not p-values, so it needs no multiple-testing correction. The thresholds below apply to the **optional secondary de novo enrichment** (and any future TRAPD/statistical arm):
 
 - **Exome-wide gene-based threshold: P < 2.5e-6** (≈ 0.05 / ~20,000 protein-coding genes). The literature also expresses this as a class-specific Bonferroni; the canonical default here is the single ~2.5e-6 line.
 - If **not** using a single omnibus p-value, divide further by the number of masks × AAF tiers × tests. Combining masks/tiers per gene via **ACAT/Cauchy (ACAT-O)** collapses them into one p-value and **avoids that penalty** — the preferred route.
@@ -111,10 +139,10 @@ Both **require a joint genotype matrix** and are therefore **not applicable to u
 
 ## Ranking and interpretation
 
-A statistically enriched gene is only interesting if it is **intolerant of the class of variation showing the excess**. Weight and rank nominated genes by constraint (see [gene_constraint.md](gene_constraint.md)):
+A recurrent gene is only interesting if it is **intolerant of the class of variation showing the recurrence**. Weight and rank nominated genes by constraint (see [gene_constraint.md](gene_constraint.md)):
 
-- pLoF-mask nominations → gnomAD **v2.1.1** LOEUF (established; v4 flagged experimental), pLI, `s_het` (Zeng 2024) for short genes.
-- A gene tolerant of damaging variation is **de-prioritized even when nominally enriched** — it is more likely an artifact than a discovery.
+- pLoF-mask nominations → gnomAD **v2.1.1** LOEUF (established; v4 flagged experimental), pLI, `s_het` (Zeng 2024) for short genes. In code, "constrained" = **LOEUF < 0.35 or pLI ≥ 0.9**.
+- A recurrent **dominant het in a haploinsufficient gene is the most compelling** result; a gene tolerant of damaging variation is **de-prioritized even when recurrent** — it is more likely an artifact than a discovery.
 - Cross-reference a-priori gene lists and phenotype priors as **tiers, never hard filters** (never-drop rule; see [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md)), and germline cancer predisposition genes via [pediatric_cancer.md](pediatric_cancer.md).
 
 ## Pitfalls

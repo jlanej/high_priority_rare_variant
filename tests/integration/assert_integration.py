@@ -68,13 +68,18 @@ def main(argv=None) -> int:
     check(has("CH_A", "hom_recessive", "chr1", 8000, "GENE2"), "CH_A hom recessive GENE2")
     ch = [r for r in calls if r["trio_id"] == "CH_A" and r["mode"] == "compound_het"]
     check(len(ch) == 2 and all(r["symbol"] == "GENE3" for r in ch), "CH_A compound het pair in GENE3")
-    check(has("CH_B", "denovo", "chr1", 5100, "GENE1"), "CH_B de novo GENE1 (recurrent)")
+    check(has("CH_B", "denovo", "chr1", 5100, "GENE1"), "CH_B de novo GENE1 (secondary)")
     check(has("CH_B", "x_linked_recessive", "chrX", 2781600, "GENEX"), "CH_B X-linked recessive GENEX")
     check(not has("CH_A", "denovo", "chr1", 15000), "low-GQ pseudo-de-novo NOT called (QC gate)")
+    # dominant model: rare functional inherited het, recurrent across individuals
+    check(has("CH_A", "dominant", "chr2", 10000, "GENED"), "CH_A dominant inherited het GENED")
+    check(has("CH_B", "dominant", "chr2", 10000, "GENED"), "CH_B dominant inherited het GENED")
 
-    # --- Step 6: recurrent-gene burden ---
+    # --- Step 6: recurrence-based gene consolidation ---
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}
-    check(genes.get("GENE1", {}).get("obs_denovo") == "2", "GENE1 has 2 de novo across trios")
+    check(genes.get("GENED", {}).get("n_dominant") == "2", "GENED has 2 dominant carriers")
+    check(genes.get("GENED", {}).get("recurrent") == "1", "GENED flagged recurrent")
+    check(genes.get("GENE1", {}).get("n_denovo") == "2", "GENE1 has 2 de novo carriers (secondary)")
 
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")

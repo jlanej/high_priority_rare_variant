@@ -29,14 +29,19 @@ defensible:
 3. **The "subset merged VCF" (step 3) must not become a cohort genotype matrix used for
    frequency.** Keep **per-trio** subset VCFs as the authoritative unit for inheritance; the
    only legitimate cohort frequency is **external gnomAD v4.1 faf95**.
-4. **"Genes with more variants than expected" (step 5) is a statistical statement, not a raw
-   count.** Expectation must come from a **per-gene mutation-rate model** (de novo enrichment)
-   and/or an ancestry/coverage-matched external-control burden test, calibrated so the
-   synonymous class shows no enrichment (λ ≈ 1). Weight nominees by **gene constraint**.
+4. **"Genes with more variants than expected" (step 5) means recurrence across individuals.**
+   The focus is **inherited** variation: the primary signal is a gene where rare functional
+   variants — especially **dominant heterozygous** ones — recur across multiple independent
+   individuals. We tally distinct individuals per gene by model (dominant / biallelic / X-linked),
+   flag genes with ≥ `min_carriers` carriers as recurrent, and **weight by gene constraint** (a
+   recurrent het in a haploinsufficient gene is most compelling). A per-gene mutation-rate
+   (Samocha) de novo enrichment is retained only as an **optional secondary** signal.
 
-Add two things the original flow omits: a **QC gate 0** (per-trio sex/relatedness/Mendelian-error
-checks — garbage in, garbage out) and an honest statement of **scope limitations** (SNV/indel
-only; CNV/SV, pseudogene regions, and proband mosaicism are known blind spots).
+**Scope.** This pipeline focuses on **inherited** variation. **De novo** filtering/review and
+**mtDNA heteroplasmy** are handled by separate dedicated machinery — de novo is detected here only
+as a lightweight cross-reference, mtDNA is out of scope. The original flow also omits a **QC gate
+0** (per-trio sex/relatedness/Mendelian-error checks — garbage in, garbage out), which we add.
+Known blind spots: SNV/indel only (CNV/SV), pseudogene/seg-dup regions.
 
 ---
 
@@ -47,8 +52,8 @@ only; CNV/SV, pseudogene regions, and proband mosaicism are known blind spots).
 | 1 | Site-only VCF per input → merge + sort → cohort site-only VCF; VEP-annotate the merge | **Keep — efficient & correct in spirit** | Normalize each trio first (`norm -m- -f`); build the union with `view -G` + `concat -a -D` (**not** `merge`); strip incomparable per-trio `INFO`/`FILTER`; annotate once with the full stack (VEP + gnomAD faf95 + dbNSFP + SpliceAI + LOFTEE + ClinVar + constraint + gene-lists), not VEP alone |
 | 2 | Select variants meeting minimal biological plausibility (AF, MODERATE+ impact, CADD, pathogenic, a-priori genes; exclude non-PASS) → plausible merged VCF | **Keep** | Make it **inheritance-agnostic** and use the **permissive-union** rarity gate (looser of dominant/recessive) so nothing needed by *some* mode is dropped early; exclude only clearly-benign (BA1 faf95 ≥ 0.05, or benign in-silico with no clinical flag); **always keep ClinVar P/LP** regardless of impact; treat a-priori gene lists as a *prior/tier*, never a hard include/exclude ("never-drop rule") |
 | 3 | Extract these variants from individual files → subset merged VCF of variants of interest | **Keep the extraction; change the "merge"** | Extract plausible-site genotypes from each trio's **refined** VCF (recovers real `PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`); **transfer annotations** onto each trio with `bcftools annotate -a cohort.sites.annotated`; keep **per-trio** subset VCFs as the unit — do **not** compute frequency from a genotype-merged cohort VCF |
-| 4 | Screen each pedigree with pedigree-aware inheritance + basic genotype QC → candidate variants | **Keep — this is the core** | Use refined `PP`-derived GQ; per-mode genotype rules (de novo / AR-hom / comp-het-in-trans / X-linked) with GQ ≥ 20, DP ≥ 10, het AB 0.25–0.75; de novo = `hiConfDeNovo` **re-verified** with DP/AB + parental cleanliness; add the **gnomAD-prior suppression cross-check** for top candidates |
-| 5 | Screen across pedigrees for genes with multiple candidates, accounting for constraint | **Keep the goal; sharpen the statistics** | Replace raw counting with **de novo enrichment vs Samocha per-gene mutation model** (denovolyzeR; primary) + **TRAPD** vs ancestry/coverage-matched gnomAD (corroborative); **calibrate** with synonymous λ ≈ 1; correct for multiple testing (2.5e-6 / BH q < 0.05); **rank/weight by constraint** (a gene tolerant of damage is uninteresting) |
+| 4 | Screen each pedigree with pedigree-aware inheritance + basic genotype QC → candidate variants | **Keep — this is the core** | Use refined `PP`-derived GQ; per-mode rules focused on **inherited** variation: **dominant** (rare functional inherited het), AR-hom, comp-het-in-trans, X-linked, with GQ ≥ 20 / DP ≥ 10 / het AB 0.25–0.75. De novo is retained as a **secondary cross-reference** (`hiConfDeNovo`, child-membership checked); review handled by separate machinery |
+| 5 | Screen across pedigrees for genes with multiple candidates, accounting for constraint | **Keep the goal; make it recurrence-based** | Tally **distinct individuals** per gene by model (**dominant het** / biallelic / X-linked); flag genes with ≥ `min_carriers` carriers as **recurrent**; **rank/weight by constraint** (a recurrent het in a haploinsufficient gene is most compelling; a gene tolerant of damage is uninteresting). De novo Poisson enrichment (Samocha) is an **optional secondary** signal |
 
 **Efficiency logic (why this ordering is right):** annotation (VEP + plugins) is the most
 expensive operation and its cost scales with the number of *distinct sites*, not samples.
@@ -92,13 +97,13 @@ flowchart TD
     end
 
     E3 --> S5
-    subgraph S5[Step 5 — Per-trio inheritance screen]
-      I1[de novo / AR-hom / comp-het trans / X-linked<br/>GQ>=20 DP>=10 AB gates<br/>hiConfDeNovo re-verified + prior cross-check] --> I2[(per-trio candidate calls + inheritance tag)]
+    subgraph S5[Step 5 — Per-trio inheritance screen inherited-focus]
+      I1[dominant inherited het / AR-hom / comp-het trans / X-linked<br/>GQ>=20 DP>=10 AB gates<br/>de novo = secondary cross-ref] --> I2[(per-trio candidate calls + inheritance mode)]
     end
 
     I2 --> S6
-    subgraph S6[Step 6 — Cross-pedigree gene screen]
-      B1[de novo enrichment vs Samocha model denovolyzeR<br/>+ TRAPD vs matched gnomAD<br/>synonymous lambda approx 1; FDR; constraint weight] --> B2[(nominated genes)]
+    subgraph S6[Step 6 — Cross-pedigree gene consolidation]
+      B1[tally distinct individuals per gene per model<br/>dominant het + biallelic recurrence<br/>constraint-weighted; de novo enrichment secondary] --> B2[(recurrence-ranked genes)]
     end
 
     I2 --> S7
@@ -119,7 +124,7 @@ flowchart TD
 | 3 | `plausible.sites.vcf.gz` | the target list of loci worth genotyping per trio |
 | 4 | per-trio `*.candidates.annotated.vcf.gz` | real per-trio genotypes (`PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`) at plausible sites, annotation-carrying |
 | 5 | per-trio candidate call tables (with inheritance mode) | diagnostic per-family findings |
-| 6 | nominated-gene table (enrichment stats + constraint) | cross-pedigree discovery signal |
+| 6 | recurrence-ranked gene table (distinct-individual carriers per model + constraint) | cross-pedigree discovery signal |
 | 7 | tiered report + SF overlay + phenotype ranking | human review |
 
 **Why per-trio VCFs stay the unit through step 5:** each trio was called and genotype-refined
@@ -176,13 +181,15 @@ synthesized genotype matrix.
 
 ## Known scope limitations (stated honestly, not hidden)
 
-- **SNV / indel only, initially.** CNV/SV are a real blind spot: 10–15% of pediatric-cancer and
-  rare-disease diagnoses are CNV/SV (single-exon *RB1* / *SMARCB1* / *DICER1* / *NF1* deletions,
-  *PMS2* rearrangements). A future module adds GATK-gCNV / Manta / ExomeDepth.
+- **Handled by separate dedicated pipelines (out of scope here).** **De novo** variant filtering
+  and review — the group has bespoke machinery for this; de novo is detected here only as a
+  lightweight cross-reference (via GATK `hiConfDeNovo`), never the driver. **mtDNA heteroplasmy**
+  — a dedicated pipeline covers it; chrM is not analyzed here.
+- **SNV / indel only.** CNV/SV are a real blind spot: 10–15% of pediatric-cancer and rare-disease
+  diagnoses are CNV/SV (single-exon *RB1* / *SMARCB1* / *DICER1* / *NF1* deletions, *PMS2*
+  rearrangements). A future module adds GATK-gCNV / Manta / ExomeDepth.
 - **Pseudogene / segmental-duplication genes** (*PMS2*/*PMS2CL*, *CYP21A2*, *SMN1/2*, *NEB*,
   *GBA*) are unreliable from short reads — those regions are flagged low-confidence.
-- **Proband post-zygotic mosaicism** (e.g. *NF1*, overgrowth) produces low-VAF calls that fall
-  outside the het AB 0.25–0.75 band and need a dedicated mosaic tier.
 - **Phenotype layer depends on HPO** terms per proband, which are variably populated in
   consortium data; the pipeline degrades gracefully when phenotype is sparse/absent.
 - **A proper joint call set is superior.** If per-trio **gVCFs** are ever available, joint

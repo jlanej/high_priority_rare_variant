@@ -91,7 +91,7 @@ add(file="A", chrom="chr1", pos=17000, gene="GENE6", csq="stop_gained", impact="
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 8) ClinVar P/LP but LOW impact (synonymous) -> kept at Step 3 via clinvar_plp override
 add(file="A", chrom="chr2", pos=8000, gene="GENE7", csq="synonymous_variant", impact="LOW",
-    faf95=1e-4, clnsig="Pathogenic",
+    faf95=2e-4, clnsig="Pathogenic",  # > dominant_max: kept via ClinVar but not a dominant call
     clnrevstat="criteria_provided,_multiple_submitters,_no_conflicts",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
@@ -112,6 +112,16 @@ for i, p in enumerate((2781700, 2781800, 2781900)):
         faf95=0.3,
         gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 99, 40),
              "SIB_B": ("0/1", 99, 40)})
+
+# --- DOMINANT RECURRENCE: same rare functional inherited het in GENED, in BOTH trios
+#     (CH_A inherits from dad, CH_B from mom) -> Step 6 nominates GENED (n_dominant=2) ---
+add(file="A", chrom="chr2", pos=10000, gene="GENED", csq="missense_variant", impact="MODERATE",
+    revel="0.90", faf95=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+add(file="B", chrom="chr2", pos=10000, gene="GENED", csq="missense_variant", impact="MODERATE",
+    revel="0.90", faf95=5e-5,
+    gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
+         "SIB_B": ("0/0", 99, 40)})
 
 # --- Trio C: duo only (mom MO_C absent everywhere) -> resolver unresolved ---
 add(file="C", chrom="chr1", pos=9000, gene="GENE8", csq="missense_variant", impact="MODERATE",
@@ -240,6 +250,7 @@ def main(argv=None) -> int:
     with open(os.path.join(W, "constraint.tsv"), "w") as fh:
         fh.write("gene\toe_lof_upper\tpli\ts_het\n")
         fh.write("GENE1\t0.2\t0.98\t0.15\n")
+        fh.write("GENED\t0.25\t0.95\t0.12\n")
 
     # trios file (#kid dad mom); C is unresolvable (MO_C absent everywhere)
     with open(os.path.join(W, "trios.tsv"), "w") as fh:

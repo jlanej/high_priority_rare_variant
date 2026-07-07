@@ -7,9 +7,16 @@ Orientation for anyone (human or Claude) extending this repository. Read this fi
 ## What this is
 
 A container-based pipeline that screens **GMKF Kids First per-trio VCFs** (GRCh38, GATK
-genotype-refinement output, **not** jointly genotyped across the cohort) for high-priority rare
-variants and for genes carrying more rare variants than expected, targeting **rare disease and
-germline pediatric cancer**. Runs under Apptainer on HPC.
+genotype-refinement output, **not** jointly genotyped across the cohort) for high-priority
+**inherited** rare variants, and consolidates **genes where rare functional variants recur across
+individuals**, targeting **rare disease and germline pediatric cancer**. Runs under Apptainer on HPC.
+
+**Scope / focus (important):** the emphasis is **inherited** germline variation —
+**dominant** (a rare functional inherited het that recurs across individuals), **recessive**
+(hom / compound-het-in-trans), and **X-linked**. **De novo** filtering/review and **mtDNA
+heteroplasmy** are handled by **separate dedicated machinery** (the shared `.sh` orchestration and
+a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cross-reference
+(`inheritance.emit_denovo`, default on but secondary); chrM is out of scope.
 
 ## Golden rules (do not violate)
 
@@ -74,8 +81,13 @@ germline pediatric cancer**. Runs under Apptainer on HPC.
 - **Step 4 output**: per-trio `*.candidates.annotated.vcf.gz` + `trios.candidates.tsv`
   (`trio_id  candidates_vcf  ped`). Per-trio VCFs are the authoritative unit — no cohort genotype
   matrix is ever built.
-- **Step 5 output**: `candidates.calls.tsv` (one row per candidate; comp-het pairs share a
-  `pair_id`). **Step 6 output**: `genes.ranked.tsv`.
+- **Step 5 output**: `candidates.calls.tsv` (one row per candidate; `mode` ∈ `dominant`
+  (inherited het; `flags=origin=mat|pat|both`), `hom_recessive`, `compound_het` (pairs share a
+  `pair_id`), `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). Modes are configured in
+  `inheritance.emit_dominant` / `inheritance.emit_denovo`. **Step 6 output**: `genes.ranked.tsv` —
+  distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
+  `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), constraint columns; ranked
+  recurrent-first, constraint-weighted.
 
 ## Gotchas that WILL bite you
 
@@ -118,21 +130,25 @@ germline pediatric cancer**. Runs under Apptainer on HPC.
   calls (`assert_integration.py`). Runs in CI on host bcftools — no image build needed. To run
   locally you need bcftools/samtools/bgzip/tabix + a python with cyvcf2/pysam/scipy/pyyaml on PATH.
 - **Validation (TODO):** GIAB/CMRG truth sets + a positive-control variant panel to measure
-  sensitivity/precision of de novo and prioritization logic; extend the synonymous-λ≈1
-  calibration pipeline-wide.
+  sensitivity/precision of the inheritance-model and recurrence logic on real data.
+
+## Out of scope here (handled by separate machinery)
+
+- **De novo** filtering/review — bespoke machinery (the shared `.sh` orchestration). De novo is a
+  secondary cross-reference here (`inheritance.emit_denovo`), never the driver.
+- **mtDNA heteroplasmy** — a dedicated pipeline; chrM is not analyzed.
 
 ## Open TODOs
 
 - **CNV/SV module** (GATK-gCNV / Manta / ExomeDepth) — the biggest coverage gap.
 - **Pseudogene/seg-dup handling** (PMS2/PMS2CL, CYP21A2, SMN1/2, NEB, GBA) — flag/annotate.
-- **Proband mosaicism tier** (low-VAF calls outside the het AB band).
+- **Dominant-recurrence corroboration** — add TRAPD (case-vs-gnomAD carrier frequency) as an
+  optional external-control check on recurrent-gene nominations.
 - **Phenotype layer** — Exomiser/LIRICAL HPO ranking as a *prior* (never-drop), plus HPO ingestion
   that degrades gracefully when phenotype is sparse.
-- **Burden calibration** — supply an unfiltered synonymous de novo count so Step 6 can verify
-  λ ≈ 1; add TRAPD as the corroborative case-vs-gnomAD signal.
 - **Pediatric-cancer overlay** — implement the ACMG SF v3.3 / PanelApp-green tiering and
   second-hit boost as a reporting overlay.
-- **conda-lock + digest-pinned base image**; **real-data validation**.
+- **conda-lock + digest-pinned base image**; **real-data validation** (GIAB/CMRG + positive controls).
 
 ## Commit conventions
 

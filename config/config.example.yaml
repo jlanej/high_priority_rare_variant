@@ -129,7 +129,9 @@ filters:
     require_pass: true
 
   denovo:
-    use_hiconf_tag: true          # GATK hiConfDeNovo as the primary screen
+    # De novo detection is SECONDARY here (retained only for cross-reference).
+    # Dedicated de novo filtering + review lives in separate bespoke machinery.
+    use_hiconf_tag: true          # GATK hiConfDeNovo (child-membership checked)
     parent_max_alt_ad: 1          # parental "cleanliness"
     parent_min_dp: 10
     require_gnomad_absent_or_singleton: true
@@ -143,18 +145,27 @@ filters:
     phaplo_min: 0.86
     downweight_recessive_by_lof_constraint: false   # never do this
 
-# --- Cross-pedigree gene burden ("more rare variants than expected") ---
+# --- Inheritance modes (Step 5). Focus = INHERITED germline variation. ---
+inheritance:
+  emit_dominant: true             # rare functional INHERITED het (transmitted from >=1 parent);
+                                  #   the recurrence signal Step 6 consolidates across individuals
+  emit_denovo: true               # SECONDARY / cross-reference only (review handled elsewhere);
+                                  #   set false to omit de novo rows entirely
+  # (recessive: homozygous + compound-het-in-trans, and X-linked recessive, are always emitted)
+
+# --- Cross-pedigree gene consolidation (Step 6): recurrence across individuals ---
+# A gene is of interest when rare functional variants RECUR across independent individuals.
+# DOMINANT model: multiple individuals each carrying a qualifying rare functional HET.
+# RECESSIVE model: multiple individuals with a biallelic hit. Weighted by constraint
+# (a recurrent het in a haploinsufficient gene is far more compelling).
 burden:
-  primary: denovo_enrichment      # Samocha per-gene mutation model (denovolyzeR-style Poisson)
-  corroborative: trapd            # vs ancestry/coverage-matched gnomAD exomes
-  masks:
-    - {name: plof, criteria: "loftee_hc"}
-    - {name: plof_damaging_missense, criteria: "loftee_hc OR revel>=0.5 OR alphamissense_lp OR cadd>=20"}
-  aaf_tiers: [1.0e-3, 1.0e-4]
-  exome_wide_p: 2.5e-6
+  min_carriers: 2                 # a gene is "recurrent" at >= this many distinct individuals
+  weight_by_constraint: true      # rank recurrent+constrained genes highest
+  # OPTIONAL secondary signals (reported, not the primary rank):
+  denovo_enrichment: true         # Samocha per-gene Poisson if a mutation_rate_table is given
+  corroborative_trapd: false      # vs ancestry/coverage-matched gnomAD (not yet implemented)
+  exome_wide_p: 2.5e-6            # threshold for the secondary de novo enrichment p-value
   fdr_q: 0.05
-  require_synonymous_lambda_near_1: true   # calibration QC (expect ~1.0)
-  weight_by_constraint: true
 
 # --- Pediatric-cancer overlay & phenotype priors (tiers/priors, never hard filters) ---
 overlays:

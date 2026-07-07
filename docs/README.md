@@ -25,7 +25,7 @@ the single source of truth; if a document ever disagrees with it, the table wins
 | [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md) | Genotype-refinement outputs, per-mode trio logic, genotype & sample QC, trio tools |
 | [pediatric_cancer.md](pediatric_cancer.md) | Germline predisposition prevalence, genes, two-hit model, cancer gene lists |
 | [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md) | OMIM/PanelApp/ClinGen/COSMIC/ACMG-SF, HPO/Exomiser priors, tiering |
-| [gene_burden.md](gene_burden.md) | De novo enrichment & external-control burden for "excess rare variants" |
+| [gene_burden.md](gene_burden.md) | Recurrence-based gene consolidation (dominant het + biallelic across individuals); de novo enrichment as secondary |
 | [tooling_and_reproducibility.md](tooling_and_reproducibility.md) | Container/conda-lock, GHCR CI, Apptainer, PHI-safe repo |
 
 ---
@@ -73,14 +73,18 @@ PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity
   experimental). Prefer **s_het (Zeng 2024) ≥ 0.1** for short genes. pHaplo ≥ 0.86 / ClinGen HI = 3.
 - **Do not** down-weight recessive candidates by pLoF constraint.
 
-### Genotype & sample QC (GATK-refined trios)
-- Trust **refined `PP`-derived GQ**. GQ ≥ 20; DP ≥ 10 (≥ 20 for de novo); het AB 0.25–0.75;
-  hom-alt AB ≥ 0.90; hom-ref AB ≤ 0.10 (AB from AD); FILTER = PASS only.
-- **De novo**: `hiConfDeNovo` screen → re-verify DP/AB + parental cleanliness (parent alt AD ≤ 1,
-  DP ≥ 10) + gnomAD absent/singleton; IGV for reportables.
-- **Comp-het**: two rare hets, same gene, in **trans** (parent-of-origin or WhatsHap).
-- **X/hemizygous**: sex-aware ploidy; drop male non-PAR chrX/Y het calls.
-- **Sample QC**: Peddy (sex, relatedness IBS0 ≈ 0 / rel ≈ 0.5); Mendelian-error < 2%; UPDhmm.
+### Inheritance models (Step 5) & genotype QC (GATK-refined trios)
+- Trust **refined `PP`-derived GQ**. GQ ≥ 20; DP ≥ 10; het AB 0.25–0.75; hom-alt AB ≥ 0.90;
+  hom-ref AB ≤ 0.10 (AB from AD); FILTER = PASS only.
+- **Dominant** (inherited): rare (`faf95 < 1e-4`), functional **het** transmitted from ≥ 1 parent
+  (origin recorded) — the recurrence signal Step 6 consolidates.
+- **Recessive**: homozygous, or **compound het** = two rare hets, same gene, in **trans**
+  (parent-of-origin; WhatsHap fallback).
+- **X-linked recessive**: male hemizygous + carrier mother; sex-aware ploidy, drop male non-PAR
+  het calls; kid sex inferred from chrX heterozygosity when the PED is unknown.
+- **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
+  machinery): `hiConfDeNovo` (child-membership checked) → re-verify DP/AB + parental cleanliness.
+- **Sample QC**: Peddy/somalier (sex, relatedness); Mendelian-error < 2%.
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 
@@ -92,10 +96,14 @@ PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity
   tier; second hit (LOH / DICER1 hotspot) = tier **boost**, never a filter. **PMS2** needs
   pseudogene-aware handling.
 
-### Cross-pedigree gene burden ("more rare variants than expected")
-- Primary = **de novo enrichment** vs Samocha-2014 mutation model (**denovolyzeR**), Poisson;
-  validate **synonymous λ ≈ 1**. Corroborative = **TRAPD** vs ancestry/coverage-matched gnomAD.
-- Significance exome-wide **P < 2.5e-6**; BH **q < 0.05** for discovery. **Rank by constraint.**
+### Cross-pedigree gene consolidation (recurrence across individuals)
+- Tally **distinct individuals** per gene by model: **dominant** (qualifying rare functional het),
+  **biallelic** (hom / comp-het), **X-linked**; de novo counted separately (secondary).
+- A gene is **recurrent** at ≥ **min_carriers** (default **2**) distinct individuals; rank
+  recurrent-first, **weighted by constraint** (LOEUF / pLI / s_het — a recurrent het in a
+  haploinsufficient gene is the most compelling).
+- OPTIONAL secondary: de novo Poisson enrichment vs the Samocha model (exome-wide **P < 2.5e-6**,
+  BH **q < 0.05**) when a mutation-rate table is supplied.
 
 ### A-priori gene lists & phenotype — priors/tiers, never hard include/exclude (**never-drop rule**)
 - Tier 1 known gene → lenient thresholds; Tier 2 strong candidate (constraint/expression); Tier 3
@@ -110,10 +118,12 @@ PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity
   (buildx, provenance + SBOM, tag by SHA, amd64). Apptainer: real-disk `TMPDIR`, **no
   `--containall`**, `--cleanenv`. **No hard paths / no PHI / dbGaP-safe.**
 
-### Known scope limitations
-SNV/indel only initially (CNV/SV is a real blind spot); pseudogene/seg-dup regions flagged
-low-confidence; proband mosaicism needs a dedicated tier; calibrate with GIAB/CMRG truth sets +
-synonymous λ + positive controls. See [pipeline_design.md](pipeline_design.md#known-scope-limitations-stated-honestly-not-hidden).
+### Scope boundaries & known limitations
+**De novo** filtering/review and **mtDNA heteroplasmy** are handled by **separate dedicated
+pipelines** (de novo is a cross-reference here; mtDNA is out of scope). Within scope: SNV/indel
+only (CNV/SV is a real blind spot); pseudogene/seg-dup regions flagged low-confidence; phenotype
+(Exomiser/HPO) prior planned; validate with GIAB/CMRG truth sets + positive controls. See
+[pipeline_design.md](pipeline_design.md#known-scope-limitations-stated-honestly-not-hidden).
 
 ---
 

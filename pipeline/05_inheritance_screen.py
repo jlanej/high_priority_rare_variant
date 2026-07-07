@@ -82,14 +82,20 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     require_hiconf = bool(get(cfg, "filters.denovo.use_hiconf_tag", True))
     require_absent = bool(get(cfg, "filters.denovo.require_gnomad_absent_or_singleton", True))
     crosscheck = bool(get(cfg, "filters.denovo.crosscheck_prerefinement_pl", True))
+    # Focus is INHERITED variation. De novo detection is retained for cross-reference
+    # only (dedicated de novo filtering/review lives in separate machinery); the
+    # dominant model — recurrent inherited rare functional hets — is the new emphasis.
+    emit_denovo = bool(get(cfg, "inheritance.emit_denovo", True))
+    emit_dominant = bool(get(cfg, "inheritance.emit_dominant", True))
 
     def rare(v, limit):
         fr = A.frequency(v)
         return fr is None or fr < limit
 
     rows = []
-    # gene -> list of (origin, variant, key) for compound-het pairing
-    comphet = {}
+    # gene -> list of (origin, variant, key); origin in {mat, pat, both, denovo}.
+    # Feeds both compound-het pairing (recessive) and dominant (inherited het) calls.
+    hets = {}
 
     for v in vcf:
         c, d, m = gt.c, gt.d, gt.m
@@ -99,11 +105,11 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         # --- male non-PAR X het is a QC red flag: do not call het modes there ---
         male_x = xnonpar and gt.child_male
 
-        # ---- de novo (autosomal het, or X-hemizygous in a male) ----
+        # ---- de novo (SECONDARY / cross-reference only; review handled elsewhere) ----
         denovo_hit = False
-        if not male_x and gc == G.HET and gd == G.HOM_REF and gmm == G.HOM_REF:
+        if emit_denovo and not male_x and gc == G.HET and gd == G.HOM_REF and gmm == G.HOM_REF:
             denovo_hit = True
-        elif male_x and gc == G.HOM_ALT and gd == G.HOM_REF and gmm == G.HOM_REF:
+        elif emit_denovo and male_x and gc == G.HOM_ALT and gd == G.HOM_REF and gmm == G.HOM_REF:
             denovo_hit = True
         if denovo_hit:
             child_kind = "denovo_child" if not male_x else "hom_alt"
@@ -137,38 +143,49 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     and rare(v, rec_max)):
                 rows.append(base_row(trio_id, v, gt, "x_linked_recessive"))
 
-        # ---- collect compound-het candidates (het child, rare, parent-of-origin) ----
+        # ---- collect het candidates (het child, rare, parent-of-origin) ----
         if not male_x and gc == G.HET and G.sample_qc(v, c, thr, "het") and rare(v, rec_max):
             gene = A._str(v, "gene") or A.symbol(v)
             if gene:
-                origin = None
-                if gd == G.HOM_REF and gmm == G.HOM_REF:
+                mom_c = gmm in (G.HET, G.HOM_ALT)
+                dad_c = gd in (G.HET, G.HOM_ALT)
+                if not mom_c and not dad_c:
                     origin = "denovo"
-                elif gmm in (G.HET, G.HOM_ALT) and gd == G.HOM_REF:
+                elif mom_c and dad_c:
+                    origin = "both"
+                elif mom_c:
                     origin = "mat"
-                elif gd in (G.HET, G.HOM_ALT) and gmm == G.HOM_REF:
+                else:
                     origin = "pat"
-                if origin:
-                    comphet.setdefault(gene, []).append((origin, v, f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"))
+                key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
+                hets.setdefault(gene, []).append((origin, v, key))
 
-    # ---- compound-het pairing: emit trans pairs (mat×pat, mat×denovo, pat×denovo) ----
+    # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
+    consumed = set()
     pair_n = 0
-    for gene, cands in comphet.items():
-        by = {"mat": [], "pat": [], "denovo": []}
+    for gene, cands in hets.items():
+        by = {"mat": [], "pat": [], "denovo": [], "both": []}
         for origin, v, key in cands:
             by[origin].append((v, key))
-        pairs = []
-        for a in by["mat"]:
-            for b in by["pat"] + by["denovo"]:
-                pairs.append((a, b))
-        for a in by["pat"]:
-            for b in by["denovo"]:
-                pairs.append((a, b))
+        pairs = [(a, b) for a in by["mat"] for b in by["pat"] + by["denovo"]]
+        pairs += [(a, b) for a in by["pat"] for b in by["denovo"]]
         for (va, ka), (vb, kb) in pairs:
             pair_n += 1
             pid = f"{trio_id}:CH{pair_n}"
+            consumed.add(ka)
+            consumed.add(kb)
             for v in (va, vb):
                 rows.append(base_row(trio_id, v, gt, "compound_het", pid))
+
+    # ---- dominant (inherited het): rare, functional, transmitted from >=1 parent,
+    #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----
+    if emit_dominant:
+        for gene, cands in hets.items():
+            for origin, v, key in cands:
+                if origin in ("mat", "pat", "both") and key not in consumed and rare(v, dom_max):
+                    r = base_row(trio_id, v, gt, "dominant")
+                    r["flags"] = f"origin={origin}"
+                    rows.append(r)
     return rows
 
 
