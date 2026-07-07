@@ -1,0 +1,5 @@
+# Example trio PED (template — placeholder IDs only, no real subjects).
+# columns: family  individual  paternal  maternal  sex(1=M,2=F)  phenotype(1=unaff,2=aff)
+TRIO001	TRIO001_CHILD	TRIO001_FATHER	TRIO001_MOTHER	1	2
+TRIO001	TRIO001_FATHER	0	0	1	1
+TRIO001	TRIO001_MOTHER	0	0	2	1
