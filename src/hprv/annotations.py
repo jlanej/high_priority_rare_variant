@@ -48,6 +48,10 @@ F = {
     "clnsig": "hprv_clnsig",
     "clnrevstat": "hprv_clnrevstat",
     "clnsigconf": "hprv_clnsigconf",
+    # GATK PossibleDeNovo tags carried from the source trio VCF (value = comma-delimited
+    # list of child sample IDs for which this is a candidate de novo).
+    "hiconf_denovo": "hiConfDeNovo",
+    "loconf_denovo": "loConfDeNovo",
 }
 
 # HIGH-impact / loss-of-function VEP consequence terms.
@@ -186,3 +190,17 @@ def clinvar_stars(variant) -> int:
     if not s:
         return 0
     return _STAR.get(s.strip().lower(), 0)
+
+
+# --- GATK de novo tags (child-membership aware) ------------------------------
+def hiconf_denovo_children(variant):
+    """Set of child sample IDs listed in hiConfDeNovo, or None if the tag is absent."""
+    s = _str(variant, "hiconf_denovo")
+    if s is None:
+        return None
+    return {x.strip() for x in s.split(",") if x.strip()}
+
+
+def is_hiconf_denovo_for(variant, child_id) -> bool:
+    kids = hiconf_denovo_children(variant)
+    return bool(kids) and child_id in kids

@@ -24,9 +24,10 @@ set -euo pipefail
 # do NOT bake an owner path into scripts beyond this single overridable default.
 : "${HPRV_IMAGE:=ghcr.io/jlanej/high_priority_rare_variant:latest}"
 
-# Container runtime: auto-detect unless HPRV_RUNTIME is set (apptainer|singularity|docker|native).
-# "native" runs tools directly on the host (useful only if you built the env locally).
-: "${HPRV_RUNTIME:=auto}"
+# Container runtime: auto-detect unless set (apptainer|singularity|docker|native).
+# Honors HPRV_ENGINE (the config key runtime.engine) as an alias. "native" runs tools
+# directly on the host / inside the container (tools already on PATH).
+: "${HPRV_RUNTIME:=${HPRV_ENGINE:-auto}}"
 
 # Extra bind mounts (space-separated absolute dirs) always applied, e.g. a shared
 # scratch or resources root. Per-call binds are added with `hprv_run --bind DIR`.
@@ -107,7 +108,9 @@ hprv_run() {
                 "$HPRV_IMAGE" "$@"
             ;;
         native)
-            "$@"
+            # `command` bypasses the bcftools()/bedtools() convenience FUNCTIONS below,
+            # which would otherwise re-enter hprv_run and recurse infinitely.
+            command "$@"
             ;;
         *) die "hprv_run: unknown runtime '$runtime'";;
     esac

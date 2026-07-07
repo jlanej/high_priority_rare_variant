@@ -62,7 +62,8 @@ done
 # --- collect inputs and build the bind set (dirs every tool call must see) ---
 declare -a site_files=()
 binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF")"
-mapfile -t rows < <(tail -n +2 "$MANIFEST")
+rows=()
+while IFS= read -r _line || [[ -n "$_line" ]]; do rows+=("$_line"); done < <(tail -n +2 "$MANIFEST")
 [[ ${#rows[@]} -gt 0 ]] || die "manifest has no data rows"
 
 for row in "${rows[@]}"; do

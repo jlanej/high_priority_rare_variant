@@ -108,10 +108,15 @@ germline pediatric cancer**. Runs under Apptainer on HPC.
 
 ## Testing
 
-- **Host, no heavy deps:** `python3 -m py_compile` all scripts; `bash -n` all shell; pure-logic
-  checks for `config`, `ped`, `annotations._STAR`, and the Step-6 helpers (`bh_fdr`, `classify`).
-- **In-container integration** (TODO): add a tiny synthetic trio fixture under `tests/data/` and
-  run the flow end-to-end inside the built image in CI.
+- **Host, no heavy deps:** `python3 -m py_compile` all scripts; `bash -n` all shell;
+  `python3 tests/test_pure.py` (pure-logic: config, ped, trios-file parsing, annotation getters,
+  genotype QC, selection funnel, Step-6 helpers).
+- **End-to-end integration** (`tests/integration/`): `run_integration.sh` generates a tiny
+  self-consistent mock genome + trios (`make_mock_data.py`) engineered to exercise every mode
+  and filter path, runs resolve + Steps 0,1,3,4,5,6 with REAL bcftools + the python steps (only
+  Step 2's VEP call is mocked via `mock_annotate.py`), and asserts the resolution, funnel, and
+  calls (`assert_integration.py`). Runs in CI on host bcftools — no image build needed. To run
+  locally you need bcftools/samtools/bgzip/tabix + a python with cyvcf2/pysam/scipy/pyyaml on PATH.
 - **Validation (TODO):** GIAB/CMRG truth sets + a positive-control variant panel to measure
   sensitivity/precision of de novo and prioritization logic; extend the synonymous-λ≈1
   calibration pipeline-wide.

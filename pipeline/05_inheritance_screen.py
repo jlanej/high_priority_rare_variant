@@ -49,6 +49,7 @@ class Trio:
             if ped[role] not in idx:
                 raise KeyError(f"PED {role} {ped[role]!r} not in VCF samples {samples}")
         self.c, self.d, self.m = idx[ped["child"]], idx[ped["father"]], idx[ped["mother"]]
+        self.child_name = ped["child"]
         self.child_male = str(ped["sex"]) == "1"
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
 
@@ -69,16 +70,9 @@ def base_row(trio_id, v, gt, mode, pair_id=""):
         "child_ab": fmt(G.allele_balance(v, gt.c)),
         "mother_gt": (v.gt_bases[gt.m] if v.gt_bases is not None else ""),
         "father_gt": (v.gt_bases[gt.d] if v.gt_bases is not None else ""),
-        "hiConfDeNovo": ("1" if _has_flag(v, "hiConfDeNovo") else ""),
+        "hiConfDeNovo": ("1" if A.is_hiconf_denovo_for(v, gt.child_name) else ""),
         "review_prior_crosscheck": "", "flags": "",
     }
-
-
-def _has_flag(v, name):
-    try:
-        return v.INFO.get(name) is not None
-    except KeyError:
-        return False
 
 
 def screen_trio(trio_id, vcf, gt: Trio, cfg):
@@ -120,8 +114,8 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             nh = A.nhomalt(v)
             if require_absent and nh is not None and nh > 1:
                 ok = False
-            if require_hiconf and gt.has_hiconf and not _has_flag(v, "hiConfDeNovo"):
-                ok = False  # tag exists in this callset but not on this variant
+            if require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name):
+                ok = False  # tag exists in this callset but not a hiConf de novo for THIS child
             if ok:
                 r = base_row(trio_id, v, gt, "denovo_x_hemi" if male_x else "denovo")
                 if crosscheck:

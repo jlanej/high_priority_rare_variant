@@ -50,7 +50,8 @@ for c in "${cols[@]}"; do i=$((i+1)); case "$c" in trio_id) idcol=$i;; vcf) vcfc
 
 # bind set
 binds="$OUTDIR $trio_dir $(abspath_dir "$PLAUSIBLE") $(abspath_dir "$REF")"
-mapfile -t rows < <(tail -n +2 "$MANIFEST")
+rows=()
+while IFS= read -r _line || [[ -n "$_line" ]]; do rows+=("$_line"); done < <(tail -n +2 "$MANIFEST")
 for row in "${rows[@]}"; do
     [[ -z "$row" || "$row" == \#* ]] && continue
     IFS=$'\t' read -ra f <<< "$row"
