@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# high_priority_rare_variant — .gitignore
+#
+# This is a PUBLIC repository. Nothing that identifies a subject, a real
+# filesystem path, or a controlled-access dataset may ever be committed.
+# Keep all data, resources, and site-specific config out of version control.
+# ---------------------------------------------------------------------------
+
+# --- Genomic data (never commit; controlled-access / PHI-adjacent) ---
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.csi
+*.bcf
+*.bam
+*.bai
+*.cram
+*.crai
+*.fasta
+*.fa
+*.fa.gz
+*.fai
+*.dict
+*.ped
+*.fam
+*.bed
+*.g.vcf.gz
+# ...but DO keep small example/test fixtures explicitly opted-in:
+!tests/**/*.vcf
+!tests/**/*.vcf.gz
+!tests/**/*.ped
+
+# --- Reference resources / annotation caches (large, versioned externally) ---
+resources/
+vep_cache/
+*.sif                     # Apptainer/Singularity images
+*.tsv.gz                  # CADD/dbNSFP style annotation tables
+*.tsv.gz.tbi
+
+# --- Site-specific / secret config (only *.example.* is tracked) ---
+config/*.yaml
+config/*.yml
+config/*.local.*
+!config/*.example.yaml
+!config/*.example.yml
+.env
+*.secret
+
+# --- Run outputs & logs ---
+work/
+results/
+logs/
+*.log
+*.done
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

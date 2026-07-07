@@ -1,0 +1,24 @@
+# Keep the Docker build context tiny and free of data/secrets.
+.git
+.github
+docs
+tests/data
+results
+work
+logs
+resources
+vep_cache
+*.sif
+*.vcf
+*.vcf.gz
+*.bam
+*.cram
+*.fasta
+*.fa
+config/*.yaml
+!config/*.example.yaml
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.DS_Store
