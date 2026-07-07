@@ -21,7 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/common.sh"
 export PYTHONPATH="${PYTHONPATH:-}:${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src"
 
-CFG="" FROM=0 TO=6
+CFG="" FROM=0 TO=8
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) CFG="$2"; shift 2;;
@@ -112,10 +112,26 @@ if run_step 6; then
         --out "$W/genes.ranked.tsv" --config "$CFG" --n-trios "$n_trios" "${extra[@]}"
 fi
 
+if run_step 7 && [[ "$(cfg_get outputs.xlsx true)" != "false" ]]; then
+    log "== Step 7: consolidated xlsx summary =="
+    python3 "$HERE/07_report_xlsx.py" --work "$W" --config "$CFG" \
+        --out "$W/hprv_summary.xlsx" --label "$(basename "$W")"
+fi
+
+if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
+    log "== Step 8: igv.js variant-review export =="
+    pad="$(cfg_get outputs.igv.padding 1000)"
+    ig=(--work "$W" --ref "$HPRV_REF_FASTA" --padding "$pad")
+    cm="$(cfg_get resources.cram_map)"
+    is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
+    bash "$HERE/08_igv_export.sh" "${ig[@]}"
+fi
+
 # Assemble the run audit summary (what went where, and why).
 python3 -m hprv.audit --dir "$HPRV_AUDIT_DIR" --out "$HPRV_AUDIT_DIR/summary.md" >/dev/null || true
 
 log "Pipeline complete. Key outputs in $W:"
 log "  trios.resolved.tsv  trio_resolution.tsv  qc_report.tsv"
-log "  candidates.calls.tsv  genes.ranked.tsv"
+log "  candidates.calls.tsv  genes.ranked.tsv  hprv_summary.xlsx"
+log "  igv/variants.tsv (+ crams/ vcfs/ trios.tsv curation.json)"
 log "  audit/summary.md  audit/counts.tsv"

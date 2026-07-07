@@ -35,6 +35,8 @@ for the vetted design and the artifact each step produces):
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
 | 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
 | 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint | `genes.ranked.tsv` |
+| 7 | Consolidated **.xlsx** supplemental-table summary (documented: gene consolidation, calls, resolution, QC, audit) | `hprv_summary.xlsx` |
+| 8 | **igv.js** trio variant-review export: `variants.tsv` + mini-CRAM slices (child/mother/father) + per-trio VCF tracks | `igv/` |
 
 Every step records input/output counts and funnel tallies to `audit/counts.tsv`, assembled into
 `audit/summary.md` — a global + per-trio "what went where and why" (see [Auditing](#auditing)).
@@ -90,6 +92,14 @@ balance bands from `AD`):
 by **gene constraint** (LOEUF / pLI / s\_het) — a recurrent het in a haploinsufficient gene is far
 more compelling than one in a constraint-tolerant gene. An optional de novo Poisson enrichment vs
 a Samocha mutation model is reported as a secondary column when a mutation-rate table is supplied.
+
+**7. Outputs for review.** A single documented **`.xlsx`** workbook consolidates the run
+(gene consolidation, candidate calls, trio resolution, QC, audit) as a supplemental table. An
+**igv.js** export produces a `variants.tsv` (the fork's variant-review schema — `chrom/pos/ref/alt`
++ inheritance mode + genotypes + our annotations as filterable columns), plus **mini-CRAM** slices
+(±1 kb) for child/mother/father around each candidate locus (from a `sample→CRAM` map) and per-trio
+VCF tracks — ready to serve with the [jlanej/igv.js](https://github.com/jlanej/igv.js) trio
+variant-review server.
 
 ## Design principles
 
@@ -158,8 +168,8 @@ docs/            source-cited methods reference + vetted pipeline design
 config/          config.example.yaml (the contract; every tunable, no real paths)
 env/             environment.yml (pinned conda toolchain layered onto the VEP image)
 Dockerfile       one image: Ensembl VEP 115 base + bcftools/slivar/somalier/python...
-pipeline/        resolve_trios.py + step scripts (00..06) + run_pipeline.sh + lib/common.sh
-src/hprv/        shared python: config, annotations, genotype QC, ped, selection, audit
+pipeline/        resolve_trios.py + step scripts (00..08) + run_pipeline.sh + lib/common.sh
+src/hprv/        shared python: config, annotations, genotype QC, ped, selection, audit, report, igv
 .github/workflows build + publish to GHCR on every commit (provenance + SBOM)
 ```
 

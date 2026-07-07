@@ -197,6 +197,41 @@ def write_sites(path, header_info, want):
             fh.write(f"{v['chrom']}\t{v['pos']}\t.\t{ref}\t{alt}\t.\t.\t{info}\n")
 
 
+def write_source_sams(W):
+    """Write a tiny per-sample SAM (a few reads over each of the sample's variants,
+    coordinate-sorted) and return {sample: cram_path}. run_integration.sh converts each
+    SAM to a sorted+indexed CRAM so Step 8 can slice mini-CRAMs from it."""
+    sam_dir = os.path.join(W, "crams_src")
+    os.makedirs(sam_dir, exist_ok=True)
+    L = 60
+    per_sample = {}  # sample -> list of (contig_idx, pos, samline)
+    counter = 0
+    for fk, samples in FILES.items():
+        for v in [x for x in V if x["file"] == fk]:
+            cidx = list(CONTIGS).index(v["chrom"])
+            start = max(1, v["pos"] - 30)
+            for s in samples:
+                for _ in range(4):
+                    counter += 1
+                    line = (f"r{counter}\t0\t{v['chrom']}\t{start}\t60\t{L}M\t*\t0\t0\t"
+                            f"{'A' * L}\t{'I' * L}")
+                    per_sample.setdefault(s, []).append((cidx, start, line))
+    cram_map = {}
+    for s, reads in per_sample.items():
+        reads.sort(key=lambda x: (x[0], x[1]))
+        path = os.path.join(sam_dir, f"{s}.sam")
+        with open(path, "w") as fh:
+            fh.write("@HD\tVN:1.6\tSO:coordinate\n")
+            for c, n in CONTIGS.items():
+                fh.write(f"@SQ\tSN:{c}\tLN:{n}\n")
+            for _, _, line in reads:
+                fh.write(line + "\n")
+        cram_map[s] = os.path.join(sam_dir, f"{s}.cram")  # produced from the SAM by the runner
+    with open(os.path.join(W, "cram_map.tsv"), "w") as fh:
+        for s, p in sorted(cram_map.items()):
+            fh.write(f"{s}\t{p}\n")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True)
@@ -205,6 +240,7 @@ def main(argv=None) -> int:
     os.makedirs(os.path.join(W, "vcfs"), exist_ok=True)
 
     write_reference(os.path.join(W, "reference.fa"))
+    write_source_sams(W)
     for fk, samples in FILES.items():
         write_vcf(os.path.join(W, "vcfs", f"file{fk}.vcf"), samples,
                   [v for v in V if v["file"] == fk])
@@ -264,10 +300,14 @@ reference: {{fasta: {W}/reference.fa}}
 resources:
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
+  cram_map: {W}/cram_map.tsv
 inputs:
   trios_file: {W}/trios.tsv
   vcf_dir: {W}/vcfs
   vcf_list: ""
+outputs:
+  xlsx: true
+  igv: {{enabled: true, padding: 200, genome: hg38}}
 """)
     print(f"mock data written to {W}")
     return 0

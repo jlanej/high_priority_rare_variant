@@ -67,6 +67,10 @@ resources:
     panelapp_version: "REPLACE_WITH_PANEL_VERSION"
     recessive_cpg: ${RECESSIVE_CPG_LIST}           # MMR/FANC*/ATM/DIS3L2/BLM etc.
   mutation_rate_table: ${MUTRATE_TABLE}            # Samocha per-gene, per-consequence rates
+  # Source CRAMs for the IGV review export (Step 8). TSV: sample<TAB>cram_path.
+  # Mini-CRAMs are sliced around candidate loci for each trio member. Optional —
+  # without it, variants.tsv is still produced (no alignment tracks).
+  cram_map: ${CRAM_MAP}
 
 inputs:
   # Trio pedigree (git-ignored, user-supplied): tab-separated with a HEADER naming the
@@ -179,6 +183,14 @@ overlays:
     enabled: false                          # requires per-proband HPO terms
     hpo_terms_tsv: ${HPO_TERMS}             # trio_id -> HPO term list; degrade gracefully if absent
     ranker: exomiser                        # ranking PRIOR only (never-drop rule)
+
+# --- Outputs (Steps 7-8) ---
+outputs:
+  xlsx: true                      # consolidated .xlsx supplemental-table summary (Step 7)
+  igv:
+    enabled: true                 # igv.js trio variant-review export (Step 8)
+    padding: 1000                 # bp flank around each candidate locus for mini-CRAM slicing
+    genome: hg38                  # reference name passed to the igv.js server
 
 # --- Honest scope limitations (documented, enforced as warnings) ---
 scope:

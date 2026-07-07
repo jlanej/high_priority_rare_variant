@@ -121,6 +121,7 @@ hprv_run() {
 # --------------------------------------------------------------------------- #
 bcftools() { hprv_run -- bcftools "$@"; }
 bedtools() { hprv_run -- bedtools "$@"; }
+samtools() { hprv_run -- samtools "$@"; }
 tabix()    { hprv_run -- tabix "$@"; }
 bgzip()    { hprv_run -- bgzip "$@"; }
 

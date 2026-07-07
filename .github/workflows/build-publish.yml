@@ -61,10 +61,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install bcftools / samtools / htslib
-        run: sudo apt-get update && sudo apt-get install -y bcftools samtools tabix
+      - name: Install bcftools / samtools / bedtools / htslib
+        run: sudo apt-get update && sudo apt-get install -y bcftools samtools bedtools tabix
       - name: Install python deps
-        run: pip install cyvcf2 pysam numpy scipy pyyaml
+        run: pip install cyvcf2 pysam numpy scipy pyyaml openpyxl
       - name: Run integration test
         run: bash tests/integration/run_integration.sh
 

@@ -80,6 +80,7 @@ SH_MAP = {
     "HPRV_GNOMAD_GRPMAX_AF_TAG": "resources.gnomad.grpmax_af_tag",
     "HPRV_GNOMAD_FAF95_TAG": "resources.gnomad.faf95_tag",
     "HPRV_GNOMAD_NHOMALT_TAG": "resources.gnomad.nhomalt_tag",
+    "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CLINVAR_VCF": "resources.clinvar.vcf",
     "HPRV_CLINVAR_SIG_TAG": "resources.clinvar.sig_tag",
     "HPRV_CLINVAR_REVSTAT_TAG": "resources.clinvar.revstat_tag",

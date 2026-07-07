@@ -16,6 +16,7 @@ def check(cond, msg):
     print(("PASS " if cond else "FAIL ") + msg)
     if not cond:
         FAILS.append(msg)
+    return cond
 
 
 def rows(path):
@@ -86,6 +87,31 @@ def main(argv=None) -> int:
     counts = rows(os.path.join(W, "audit", "counts.tsv"))
     check(any(r["step"] == "resolve" and r["metric"] == "trios_resolved" and r["value"] == "2"
               for r in counts), "audit records 2 resolved trios")
+
+    # --- Step 7: xlsx summary ---
+    xlsx = os.path.join(W, "hprv_summary.xlsx")
+    if check(os.path.exists(xlsx), "xlsx summary written"):
+        from openpyxl import load_workbook
+        wb = load_workbook(xlsx, read_only=True)
+        for sh in ("About", "Gene consolidation", "Candidate calls"):
+            check(sh in wb.sheetnames, f"xlsx has '{sh}' sheet")
+
+    # --- Step 8: igv.js variant-review export ---
+    vpath = os.path.join(W, "igv", "variants.tsv")
+    if check(os.path.exists(vpath), "igv variants.tsv written"):
+        vh, vrows = None, []
+        with open(vpath) as fh:
+            rr = list(csv.reader(fh, delimiter="\t"))
+        vh, vrows = rr[0], rr[1:]
+        for col in ("chrom", "pos", "ref", "alt", "inheritance", "child_file", "child_gt"):
+            check(col in vh, f"variants.tsv has '{col}' column")
+        check(len(vrows) == len(calls), f"variants.tsv rows == candidate calls ({len(calls)})")
+        fi = vh.index("child_file")
+        check(any(r[fi] for r in vrows), "at least one child_file (mini-CRAM) populated")
+    check(os.path.exists(os.path.join(W, "igv", "crams", "CH_A", "CH_A.cram")),
+          "CH_A mini-CRAM extracted")
+    check(os.path.exists(os.path.join(W, "igv", "trios.tsv")), "igv trios.tsv written")
+    check(os.path.exists(os.path.join(W, "igv", "curation.json")), "igv curation.json written")
 
     if FAILS:
         sys.stderr.write(f"\n{len(FAILS)} assertion(s) FAILED\n")

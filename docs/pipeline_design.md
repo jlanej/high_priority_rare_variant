@@ -125,6 +125,8 @@ flowchart TD
 | 4 | per-trio `*.candidates.annotated.vcf.gz` | real per-trio genotypes (`PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`) at plausible sites, annotation-carrying |
 | 5 | per-trio candidate call tables (with inheritance mode) | diagnostic per-family findings |
 | 6 | recurrence-ranked gene table (distinct-individual carriers per model + constraint) | cross-pedigree discovery signal |
+| 7 | `hprv_summary.xlsx` (documented supplemental table) | consolidated human-readable summary |
+| 8 | `igv/` (variants.tsv + mini-CRAMs + per-trio VCF tracks + trios.tsv + curation.json) | jlanej/igv.js trio variant-review ingestion |
 | 7 | tiered report + SF overlay + phenotype ranking | human review |
 
 **Why per-trio VCFs stay the unit through step 5:** each trio was called and genotype-refined

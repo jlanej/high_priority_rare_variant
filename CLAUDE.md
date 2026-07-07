@@ -88,6 +88,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
   `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), constraint columns; ranked
   recurrent-first, constraint-weighted.
+- **Step 7 output**: `hprv_summary.xlsx` (openpyxl; `src/hprv/report.py`) — documented workbook:
+  About/legend + Gene consolidation + Candidate calls + Trio resolution + QC + Audit counts.
+- **Step 8 output**: `igv/` for the jlanej/igv.js variant-review server (`src/hprv/igv.py` +
+  `08_igv_export.sh`): `variants.tsv` (only `chrom/pos/ref/alt` required; extra columns are
+  filterable; per-member `*_file`/`*_index` + `*_vcf*` track paths are RELATIVE to the data-dir
+  `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
+  map (`resources.cram_map`; `samtools view -C -T ref --regions-file bed`, ± `outputs.igv.padding`),
+  per-trio VCF tracks `vcfs/<trio>.vcf.gz`, `trios.tsv`, `sample_qc.tsv`, empty `curation.json`.
 
 ## Gotchas that WILL bite you
 

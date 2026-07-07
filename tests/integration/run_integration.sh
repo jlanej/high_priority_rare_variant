@@ -23,6 +23,12 @@ echo "== mock data root: $W =="
 python3 "$HERE/make_mock_data.py" --out "$W"
 samtools faidx "$W/reference.fa"
 for f in "$W"/vcfs/*.vcf; do bgzip -f "$f"; tabix -f -p vcf "$f.gz"; done
+# source SAMs -> sorted+indexed CRAMs (for Step 8 mini-CRAM slicing)
+for s in "$W"/crams_src/*.sam; do
+    b="${s%.sam}"
+    samtools sort -O cram --reference "$W/reference.fa" -o "$b.cram" "$s"
+    samtools index "$b.cram"
+done
 bgzip -f "$W/gnomad.sites.vcf"; tabix -f -p vcf "$W/gnomad.sites.vcf.gz"
 bgzip -f "$W/clinvar.vcf";      tabix -f -p vcf "$W/clinvar.vcf.gz"
 
@@ -46,8 +52,8 @@ bcftools annotate -a "$W/clinvar.vcf.gz" \
 tabix -f -p vcf "$WORK/cohort.sites.annotated.vcf.gz"
 touch "$WORK/cohort.sites.annotated.vcf.gz.done"
 
-# --- Steps 3-6 ---
-bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 3 --to 6
+# --- Steps 3-8 (includes xlsx summary + igv export) ---
+bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 3 --to 8
 
 # --- assertions ---
 python3 "$HERE/assert_integration.py" --work "$WORK"

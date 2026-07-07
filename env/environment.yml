@@ -46,3 +46,4 @@ dependencies:
   - scipy>=1.13             # Poisson enrichment test for the gene-burden step
   - pyyaml=6.*              # config parsing
   - click=8.*               # CLI ergonomics for the python steps
+  - openpyxl=3.*            # consolidated xlsx supplemental-table summary
