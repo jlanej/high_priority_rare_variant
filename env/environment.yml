@@ -1,0 +1,44 @@
+# =============================================================================
+# Pinned conda environment for the high_priority_rare_variant analysis toolchain.
+#
+# These packages are layered on top of the Ensembl VEP base image (see Dockerfile),
+# so ensembl-vep itself is NOT listed here — VEP comes from the validated base image.
+#
+# Reproducibility: version-pinned for repeatable builds. For byte-identical rebuilds,
+# generate and commit a lock file and point the Dockerfile at it:
+#     conda-lock lock -f env/environment.yml -p linux-64 --lockfile env/conda-lock.yml
+# (conda-lock pins each package with a hash; environment.yml pins only versions.)
+#
+# The env is intentionally PERL-FREE so nothing here shadows the base image's Perl,
+# which VEP depends on.
+# =============================================================================
+name: hprv
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  # --- htslib family: keep all three on the SAME release ---
+  - bcftools=1.22
+  - samtools=1.22
+  - htslib=1.22
+
+  # --- interval / annotation transfer ---
+  - bedtools=2.31.1
+  - vcfanno=0.3.3
+
+  # --- Mendelian / trio / phasing ---
+  - slivar=0.3.4            # trio + comp-het + denovo expression engine (static binary)
+  - somalier=0.2.19         # sample/pedigree QC: sex, relatedness, ancestry (static binary;
+                            #   modern, container-friendly successor to peddy for this purpose)
+  - whatshap=2.3            # read-backed + pedigree phasing for compound-het trans resolution
+
+  # --- Python analysis environment ---
+  - python=3.11
+  - cyvcf2=0.31.1           # fast VCF iteration for the inheritance + burden logic
+  - pysam=0.22.1
+  - numpy=1.26.*
+  - pandas=2.2.*
+  - scipy=1.13.*            # Poisson enrichment test for the gene-burden step
+  - pyyaml=6.*              # config parsing
+  - click=8.*               # CLI ergonomics for the python steps
