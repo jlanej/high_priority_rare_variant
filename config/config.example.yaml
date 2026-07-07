@@ -1,0 +1,168 @@
+# =============================================================================
+# high_priority_rare_variant — EXAMPLE configuration
+#
+# Copy to config/config.yaml (git-ignored) and fill in the ${...} placeholders.
+# Every default threshold below matches docs/README.md#canonical-defaults.
+#
+# PUBLIC-REPO RULE: this example contains NO real paths and NO identifiers. All
+# filesystem locations are ${ENV_VAR} placeholders resolved at runtime, so nothing
+# machine- or subject-specific is ever committed. Keep it that way in config.yaml
+# too (prefer env vars over literal paths), and never commit config.yaml or data.
+# =============================================================================
+
+project:
+  name: hprv_screen
+  genome_build: GRCh38            # this pipeline is GRCh38-only
+  output_dir: ${HPRV_WORK}        # run outputs (git-ignored); e.g. a scratch dir
+
+runtime:
+  image: ${HPRV_IMAGE}            # e.g. ghcr.io/<owner>/high_priority_rare_variant@sha256:...
+  engine: auto                    # auto | apptainer | singularity | docker | native
+  tmpdir: ${HPRV_TMPDIR}          # MUST be real disk, not tmpfs (avoids --containall OOM)
+  threads: 4
+
+reference:
+  fasta: ${REF_FASTA}             # the exact GRCh38 FASTA the trios were called against
+  # .fai is expected alongside (samtools faidx)
+
+# --- External, version-pinned, bind-mounted resources (never baked into the image) ---
+# Provide the ones you have; steps that need a missing resource fail loudly with a
+# clear message rather than silently skipping annotation.
+resources:
+  vep:
+    cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
+    version: 115
+    plugins_dir: ${VEP_PLUGINS}   # dir holding LOFTEE, dbNSFP, SpliceAI, CADD plugin code
+    fasta: ${REF_FASTA}
+    cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
+    cadd_indel: ${CADD_INDEL}     # gnomad indel CADD tsv.gz (+ .tbi)
+    dbnsfp: ${DBNSFP}             # dbNSFP academic build (REVEL/AlphaMissense/MPC/CADD/...)
+    spliceai_snv: ${SPLICEAI_SNV}
+    spliceai_indel: ${SPLICEAI_INDEL}
+    loftee_data: ${LOFTEE_DATA}   # human_ancestor.fa.gz, conservation db, etc. (GRCh38 fork)
+  gnomad:
+    version: "4.1"
+    sites_vcf: ${GNOMAD_SITES}    # gnomAD v4.1 joint sites VCF with AF/faf95 (GRCh38)
+    # INFO tag names in YOUR gnomAD file. Defaults below match gnomAD v4.1 *joint*
+    # release conventions — VERIFY with `bcftools view -h $GNOMAD_SITES | grep INFO`.
+    af_tag: AF_joint
+    grpmax_af_tag: AF_grpmax_joint
+    faf95_tag: fafmax_faf95_max_joint
+    nhomalt_tag: nhomalt_joint
+  clinvar:
+    vcf: ${CLINVAR_VCF}           # dated ClinVar VCF (GRCh38)
+    release_date: "REPLACE_WITH_DOWNLOAD_DATE"   # pin for reproducibility
+    sig_tag: CLNSIG
+    revstat_tag: CLNREVSTAT
+    sigconf_tag: CLNSIGCONF
+  constraint:
+    gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF per gene (established v2.1.1)
+    shet: ${SHET_TABLE}                            # Zeng 2024 s_het per gene (short-gene rescue)
+  gene_lists:
+    # All provided as simple gene-symbol lists / TSVs; version-pin and record below.
+    acmg_sf: ${ACMG_SF_LIST}
+    acmg_sf_version: "v3.3"
+    panelapp_childhood_solid: ${PANELAPP_243}
+    panelapp_adult_susceptibility: ${PANELAPP_245}
+    panelapp_version: "REPLACE_WITH_PANEL_VERSION"
+    recessive_cpg: ${RECESSIVE_CPG_LIST}           # MMR/FANC*/ATM/DIS3L2/BLM etc.
+  mutation_rate_table: ${MUTRATE_TABLE}            # Samocha per-gene, per-consequence rates
+
+inputs:
+  # TSV (git-ignored, user-supplied): columns trio_id, vcf, ped
+  #   trio_id   <id>
+  #   vcf       path to the per-trio refined VCF (.vcf.gz, indexed)
+  #   ped       path to the trio PED/FAM
+  trio_manifest: ${TRIO_MANIFEST}
+
+# --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
+filters:
+  rarity:
+    field: grpmax_faf95           # NOT the point-estimate popmax AF
+    dominant_max: 1.0e-4          # dominant / de novo candidate
+    recessive_max: 1.0e-2         # recessive / comp-het per-allele (permissive discovery)
+    recessive_strict: 1.0e-3      # high-confidence recessive tier
+    benign_ba1: 0.05              # drop, never rescue (ClinGen BA1)
+    use_discordance_flag: true    # respect gnomAD v4.1 exome/genome discordance flag
+
+  functional:
+    keep_impacts: [HIGH, MODERATE]  # coarse VEP tier; splice handled separately below
+    loftee_require_hc: true         # HC-no-flag pLoF for PVS1-eligibility
+    # REVEL (primary missense predictor; Pejaver 2022 calibrated) — report ONE predictor
+    revel_pp3_supporting: 0.644
+    revel_pp3_moderate:   0.773
+    revel_pp3_strong:     0.932
+    revel_bp4_supporting: 0.290
+    revel_bp4_moderate:   0.183
+    # AlphaMissense (orthogonal support)
+    alphamissense_lp: 0.564
+    alphamissense_lb: 0.34
+    # SpliceAI (masked; Walker 2023 calibrated)
+    spliceai_pp3: 0.2             # supporting
+    spliceai_high: 0.5           # canonical-splice high tier
+    spliceai_bp4: 0.1
+    # regional / genome-wide fallbacks
+    mpc_strong: 2.0
+    cadd_phred_supporting: 20
+
+  clinvar:
+    auto_promote_min_stars: 2     # ≥2★, no conflicts → auto-tier
+    promote_sigs: ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]
+    flag_sigs: ["Conflicting_classifications_of_pathogenicity", "Uncertain_significance"]
+    exclude_zero_star_from_auto: true
+
+  genotype_qc:                    # applied to the REFINED (PP-derived) genotypes
+    min_gq: 20
+    min_dp: 10
+    denovo_min_dp: 20
+    het_ab_min: 0.25
+    het_ab_max: 0.75
+    homalt_ab_min: 0.90
+    homref_ab_max: 0.10
+    require_pass: true
+
+  denovo:
+    use_hiconf_tag: true          # GATK hiConfDeNovo as the primary screen
+    parent_max_alt_ad: 1          # parental "cleanliness"
+    parent_min_dp: 10
+    require_gnomad_absent_or_singleton: true
+    crosscheck_prerefinement_pl: true   # guard the gnomAD-prior suppression failure mode
+
+  constraint_weighting:           # RANKING WEIGHTS — never exclusion filters
+    loeuf_v2_tier1: 0.35
+    loeuf_v4_tier1: 0.60          # v4 flagged experimental; v2 preferred
+    pli_min: 0.90
+    shet_min: 0.10                # prefer for short genes where LOEUF is underpowered
+    phaplo_min: 0.86
+    downweight_recessive_by_lof_constraint: false   # never do this
+
+# --- Cross-pedigree gene burden ("more rare variants than expected") ---
+burden:
+  primary: denovo_enrichment      # Samocha per-gene mutation model (denovolyzeR-style Poisson)
+  corroborative: trapd            # vs ancestry/coverage-matched gnomAD exomes
+  masks:
+    - {name: plof, criteria: "loftee_hc"}
+    - {name: plof_damaging_missense, criteria: "loftee_hc OR revel>=0.5 OR alphamissense_lp OR cadd>=20"}
+  aaf_tiers: [1.0e-3, 1.0e-4]
+  exome_wide_p: 2.5e-6
+  fdr_q: 0.05
+  require_synonymous_lambda_near_1: true   # calibration QC (expect ~1.0)
+  weight_by_constraint: true
+
+# --- Pediatric-cancer overlay & phenotype priors (tiers/priors, never hard filters) ---
+overlays:
+  pediatric_cancer:
+    enabled: true
+    dominant_report_het_plp: true
+    recessive_require_biallelic: true
+    second_hit_tier_boost: true            # LOH / DICER1 hotspot boosts, never required
+    flag_pseudogene_regions: true          # PMS2/PMS2CL, CYP21A2, SMN1/2, NEB, GBA
+  phenotype:
+    enabled: false                          # requires per-proband HPO terms
+    hpo_terms_tsv: ${HPO_TERMS}             # trio_id -> HPO term list; degrade gracefully if absent
+    ranker: exomiser                        # ranking PRIOR only (never-drop rule)
+
+# --- Honest scope limitations (documented, enforced as warnings) ---
+scope:
+  snv_indel_only: true            # CNV/SV not detected here — a known blind spot
+  warn_on_low_confidence_regions: true
