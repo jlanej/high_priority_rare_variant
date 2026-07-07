@@ -1,3 +1,0 @@
-trio_id	vcf	ped
-TRIO001	/path/to/TRIO001.refined.vcf.gz	/path/to/TRIO001.ped
-TRIO002	/path/to/TRIO002.refined.vcf.gz	/path/to/TRIO002.ped

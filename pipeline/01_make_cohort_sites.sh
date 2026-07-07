@@ -49,13 +49,13 @@ if is_done "$OUT"; then log "Step 1 already complete: $OUT (skipping)"; exit 0; 
 workdir="$(abspath_dir "$OUT")/sites_work"
 mkdir -p "$workdir"
 
-# --- resolve trio_id / vcf columns from the manifest header ---
+# --- resolve trio_id / vcf / samples columns from the manifest header ---
 read -r header < "$MANIFEST"
-idcol=0; vcfcol=0; i=0
+idcol=0; vcfcol=0; scol=0; i=0
 IFS=$'\t' read -ra cols <<< "$header"
 for c in "${cols[@]}"; do
     i=$((i+1))
-    case "$c" in trio_id) idcol=$i;; vcf) vcfcol=$i;; esac
+    case "$c" in trio_id) idcol=$i;; vcf) vcfcol=$i;; samples) scol=$i;; esac
 done
 [[ $idcol -gt 0 && $vcfcol -gt 0 ]] || die "manifest must have tab-separated 'trio_id' and 'vcf' header columns"
 
@@ -86,22 +86,36 @@ for row in "${rows[@]}"; do
     [[ -z "$row" || "$row" == \#* ]] && continue
     IFS=$'\t' read -ra f <<< "$row"
     trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
+    samples=""; [[ $scol -gt 0 ]] && samples="${f[$((scol-1))]}"
     [[ -n "$trio" && -n "$vcf" ]] || continue
     site="$workdir/${trio}.sites.norm.vcf.gz"
 
     if is_done "$site"; then
         log "  [$trio] cached"
-        site_files+=("$site"); continue
+        site_files+=("$site")
+        audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
+        continue
     fi
-    log "  [$trio] normalizing + dropping genotypes"
-    bcftools view --threads "$THREADS" -f "$FILTER" -Ou "$vcf" \
-        | bcftools norm -m- -f "$REF" -c s -Ou - \
-        | bcftools view -G -Ou - \
-        | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
+    # Subset to the trio's 3 members (dropping any extra members in a multi-sample
+    # VCF) and keep only sites variant within the trio (--min-ac 1), so the union is
+    # focused on this cohort's variation. Then drop genotypes and strip per-trio INFO.
+    log "  [$trio] subsetting to trio + normalizing + dropping genotypes"
+    if [[ -n "$samples" ]]; then
+        bcftools view -s "$samples" -f "$FILTER" --min-ac 1 --threads "$THREADS" -Ou "$vcf" \
+            | bcftools norm -m- -f "$REF" -c s -Ou - \
+            | bcftools view -G -Ou - \
+            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
+    else
+        bcftools view -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+            | bcftools norm -m- -f "$REF" -c s -Ou - \
+            | bcftools view -G -Ou - \
+            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
+    fi
     index_vcf "$site"
     require_intact_bgzip "$site"
     mark_done "$site"
     site_files+=("$site")
+    audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
 done
 [[ ${#site_files[@]} -gt 0 ]] || die "no per-trio site files were produced"
 
@@ -116,4 +130,6 @@ require_intact_bgzip "$OUT"
 mark_done "$OUT"
 
 n="$(count_variants "$OUT")"
+audit 01_cohort_sites trios "${#site_files[@]}"
+audit 01_cohort_sites union_sites "$n"
 log "Step 1 complete: $OUT ($n unique sites)"

@@ -69,11 +69,18 @@ resources:
   mutation_rate_table: ${MUTRATE_TABLE}            # Samocha per-gene, per-consequence rates
 
 inputs:
-  # TSV (git-ignored, user-supplied): columns trio_id, vcf, ped
-  #   trio_id   <id>
-  #   vcf       path to the per-trio refined VCF (.vcf.gz, indexed)
-  #   ped       path to the trio PED/FAM
-  trio_manifest: ${TRIO_MANIFEST}
+  # Trio pedigree (git-ignored, user-supplied): tab-separated with a HEADER naming the
+  # kid/dad/mom columns (any order, alias-matched); values are sample IDs that match the
+  # VCFs. Example:
+  #     #kid   dad    mom
+  #     CH1    FA1    MO1
+  trios_file: ${TRIOS_FILE}
+  # Where the VCFs live. Provide a directory (globbed recursively for *.vcf.gz/*.vcf/*.bcf)
+  # and/or a file listing VCF paths (one per line). The resolver locates, for each trio,
+  # the VCF containing ALL THREE members (matched exactly by sample ID; extra members are
+  # fine) and auto-generates the internal manifest + PEDs. Set one or both.
+  vcf_dir: ${VCF_DIR}
+  vcf_list: ${VCF_LIST}
 
 # --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
 filters:

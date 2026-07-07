@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline.sh  —  end-to-end orchestrator (Steps 0-6)
+# run_pipeline.sh  —  end-to-end orchestrator (resolve + Steps 0-6)
 #
 # Runs the whole screen from a single config. Designed to run INSIDE the container
 # (tools + python env native on PATH):
@@ -9,8 +9,11 @@
 #       --bind "$REF_DIR" --bind "$VEP_CACHE" --bind "$WORK" --bind "$DATA" \
 #       hprv.sif run_pipeline.sh --config config/config.yaml
 #
-# Each step is idempotent (.done files), so a re-run resumes where it stopped.
-# See docs/pipeline_design.md for the flow and artifacts.
+# Inputs (from config): a kid/dad/mom trios file + a VCF source (dir and/or list).
+# The resolver maps each trio to the VCF containing all three members and generates
+# the internal manifest + PEDs. Each step is idempotent (.done files) and records
+# counts to the run audit; a summary is assembled at the end.
+# See docs/pipeline_design.md.
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,32 +37,48 @@ is_set() { [[ -n "${1:-}" && "$1" != *'${'* ]]; }
 cfg_get() { python3 -m hprv.config get --config "$CFG" --key "$1" --default "${2:-}"; }
 run_step() { local n="$1"; [[ "$FROM" -le "$n" && "$n" -le "$TO" ]]; }
 
-# Resolve config -> environment (HPRV_* vars). Warnings for unset placeholders go to stderr.
+# Resolve config -> environment (HPRV_* vars). Warnings for unset placeholders -> stderr.
 eval "$(python3 -m hprv.config sh --config "$CFG")"
 
-is_set "${HPRV_OUTPUT_DIR:-}"   || die "project.output_dir is unresolved — set the env var it references"
-is_set "${HPRV_REF_FASTA:-}"    || die "reference.fasta is unresolved — set the env var it references"
-is_set "${HPRV_TRIO_MANIFEST:-}" || die "inputs.trio_manifest is unresolved — set the env var it references"
-[[ -f "$HPRV_TRIO_MANIFEST" ]]  || die "trio manifest not found: $HPRV_TRIO_MANIFEST"
+is_set "${HPRV_OUTPUT_DIR:-}"  || die "project.output_dir is unresolved — set the env var it references"
+is_set "${HPRV_REF_FASTA:-}"   || die "reference.fasta is unresolved — set the env var it references"
+is_set "${HPRV_TRIOS_FILE:-}"  || die "inputs.trios_file is unresolved — set the env var it references"
+[[ -f "$HPRV_TRIOS_FILE" ]]    || die "trios file not found: $HPRV_TRIOS_FILE"
+is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf_dir and/or inputs.vcf_list"
 
 W="$HPRV_OUTPUT_DIR"; mkdir -p "$W"
 export HPRV_TMPDIR="${HPRV_TMPDIR:-$W/tmp}"; mkdir -p "$HPRV_TMPDIR"
-n_trios=$(($(grep -cve '^[[:space:]]*$' "$HPRV_TRIO_MANIFEST") - 1))
-log "Pipeline start: $n_trios trios, steps $FROM..$TO, work=$W"
+export HPRV_AUDIT_DIR="$W/audit"; mkdir -p "$HPRV_AUDIT_DIR"
+RESOLVED="$W/trios.resolved.tsv"
+
+# ---------------------------------------------------------------------------
+# Preflight: resolve trios -> VCFs + PEDs. Runs when starting from <=1 or when
+# the resolved manifest is missing (needed by steps 0/1/4).
+# ---------------------------------------------------------------------------
+if [[ "$FROM" -le 1 || ! -f "$RESOLVED" ]]; then
+    log "== Resolve: mapping trios to VCFs + generating PEDs =="
+    rargs=(--trios "$HPRV_TRIOS_FILE" --outdir "$W")
+    is_set "${HPRV_VCF_DIR:-}"  && [[ -d "$HPRV_VCF_DIR" ]]  && rargs+=(--vcf-dir "$HPRV_VCF_DIR")
+    is_set "${HPRV_VCF_LIST:-}" && [[ -f "$HPRV_VCF_LIST" ]] && rargs+=(--vcf-list "$HPRV_VCF_LIST")
+    python3 "$HERE/resolve_trios.py" "${rargs[@]}"
+fi
+[[ -f "$RESOLVED" ]] || die "resolved manifest missing: $RESOLVED"
+n_trios=$(($(grep -cve '^[[:space:]]*$' "$RESOLVED") - 1))
+log "Pipeline: $n_trios resolved trios, steps $FROM..$TO, work=$W"
 
 if run_step 0; then
     log "== Step 0: per-trio QC =="
-    python3 "$HERE/00_qc.py" --manifest "$HPRV_TRIO_MANIFEST" --config "$CFG" --out "$W/qc_report.tsv"
+    python3 "$HERE/00_qc.py" --manifest "$RESOLVED" --config "$CFG" --out "$W/qc_report.tsv"
 fi
 
 if run_step 1; then
     log "== Step 1: cohort site union =="
-    bash "$HERE/01_make_cohort_sites.sh" --manifest "$HPRV_TRIO_MANIFEST" \
+    bash "$HERE/01_make_cohort_sites.sh" --manifest "$RESOLVED" \
         --ref "$HPRV_REF_FASTA" --out "$W/cohort.sites.vcf.gz"
 fi
 
 if run_step 2; then
-    log "== Step 2: annotate sites =="
+    log "== Step 2: annotate sites (VEP once) =="
     bash "$HERE/02_annotate_sites.sh" --sites "$W/cohort.sites.vcf.gz" \
         --ref "$HPRV_REF_FASTA" --out "$W/cohort.sites.annotated.vcf.gz"
 fi
@@ -72,14 +91,14 @@ fi
 
 if run_step 4; then
     log "== Step 4: per-trio subset + annotate =="
-    bash "$HERE/04_subset_and_annotate_trios.sh" --manifest "$HPRV_TRIO_MANIFEST" \
+    bash "$HERE/04_subset_and_annotate_trios.sh" --manifest "$RESOLVED" \
         --plausible "$W/plausible.sites.vcf.gz" --ref "$HPRV_REF_FASTA" --outdir "$W"
 fi
 
 if run_step 5; then
     log "== Step 5: inheritance screen =="
     python3 "$HERE/05_inheritance_screen.py" --manifest "$W/trios.candidates.tsv" \
-        --config "$CFG" --out "$W/candidates.calls.tsv"
+        --config "$CFG" --out "$W/candidates.calls.tsv" --qc-report "$W/qc_report.tsv"
 fi
 
 if run_step 6; then
@@ -93,5 +112,10 @@ if run_step 6; then
         --out "$W/genes.ranked.tsv" --config "$CFG" --n-trios "$n_trios" "${extra[@]}"
 fi
 
+# Assemble the run audit summary (what went where, and why).
+python3 -m hprv.audit --dir "$HPRV_AUDIT_DIR" --out "$HPRV_AUDIT_DIR/summary.md" >/dev/null || true
+
 log "Pipeline complete. Key outputs in $W:"
-log "  qc_report.tsv  candidates.calls.tsv  genes.ranked.tsv"
+log "  trios.resolved.tsv  trio_resolution.tsv  qc_report.tsv"
+log "  candidates.calls.tsv  genes.ranked.tsv"
+log "  audit/summary.md  audit/counts.tsv"

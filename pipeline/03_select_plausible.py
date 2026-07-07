@@ -21,52 +21,9 @@ import sys
 
 from cyvcf2 import VCF, Writer
 
-from hprv import annotations as A
-from hprv.config import get, load_config
-
-
-def _f(cfg, key, default):
-    v = get(cfg, key, default)
-    return float(v) if v is not None else default
-
-
-def build_predicate(cfg):
-    ba1 = _f(cfg, "filters.rarity.benign_ba1", 0.05)
-    rec_max = _f(cfg, "filters.rarity.recessive_max", 1.0e-2)  # permissive-union cutoff
-    revel_sup = _f(cfg, "filters.functional.revel_pp3_supporting", 0.644)
-    am_lp = _f(cfg, "filters.functional.alphamissense_lp", 0.564)
-    spliceai_pp3 = _f(cfg, "filters.functional.spliceai_pp3", 0.2)
-    cadd_sup = _f(cfg, "filters.functional.cadd_phred_supporting", 20.0)
-    mpc_strong = _f(cfg, "filters.functional.mpc_strong", 2.0)
-    keep_impacts = set(get(cfg, "filters.functional.keep_impacts", ["HIGH", "MODERATE"]))
-
-    def is_functional(v) -> bool:
-        if (A.impact(v) or "") in keep_impacts:
-            return True
-        if A.is_loftee_hc(v):
-            return True
-        for val, thr in (
-            (A.spliceai_max(v), spliceai_pp3),
-            (A.revel(v), revel_sup),
-            (A.alphamissense(v), am_lp),
-            (A.cadd(v), cadd_sup),
-            (A.mpc(v), mpc_strong),
-        ):
-            if val is not None and val >= thr:
-                return True
-        return False
-
-    def keep(v) -> bool:
-        fr = A.frequency(v)
-        if fr is not None and fr >= ba1:            # ClinGen BA1 — never rescue
-            return False
-        plp = A.clnsig_is_plp(v) and A.clinvar_stars(v) >= 1
-        rarity_ok = (fr is None) or (fr < rec_max) or plp
-        if not rarity_ok:
-            return False
-        return plp or is_functional(v)
-
-    return keep
+from hprv import audit
+from hprv.config import load_config
+from hprv.selection import build_classifier
 
 
 def main(argv=None) -> int:
@@ -77,15 +34,23 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
-    keep = build_predicate(cfg)
+    classify = build_classifier(cfg)
 
     vcf = VCF(args.inp)
+    vcf.add_info_to_header({
+        "ID": "hprv_keep_reason", "Number": "1", "Type": "String",
+        "Description": "Why this site was retained by Step 3 (evidence category)",
+    })
     out = args.out[:-3] if args.out.endswith(".gz") else args.out  # write plain, bgzip after
     w = Writer(out, vcf)
     n_in = n_out = 0
+    reasons = {}
     for v in vcf:
         n_in += 1
-        if keep(v):
+        keep, reason = classify(v)
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if keep:
+            v.INFO["hprv_keep_reason"] = reason
             w.write_record(v)
             n_out += 1
     w.close()
@@ -96,9 +61,16 @@ def main(argv=None) -> int:
     subprocess.run(["bcftools", "index", "-t", args.out], check=True)
     subprocess.run(["rm", "-f", out], check=False)
 
+    # audit: funnel in/out + counts by reason (drops and keeps)
+    audit.record("03_select", "sites_in", n_in)
+    audit.record("03_select", "sites_plausible", n_out)
+    for r, c in sorted(reasons.items()):
+        audit.record("03_select", f"reason.{r}", c)
+
     frac = (100.0 * n_out / n_in) if n_in else 0.0
     sys.stderr.write(
         f"Step 3 complete: {n_out}/{n_in} sites plausible ({frac:.1f}%) -> {args.out}\n"
+        f"  reasons: {dict(sorted(reasons.items()))}\n"
     )
     return 0
 

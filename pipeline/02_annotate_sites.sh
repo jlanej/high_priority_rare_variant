@@ -95,7 +95,12 @@ elif is_set "${HPRV_LOFTEE_DATA:-}" && is_set "${HPRV_VEP_PLUGINS:-}"; then
     warn "Using default LOFTEE data-file names under HPRV_LOFTEE_DATA — verify they exist, or set HPRV_LOF_PLUGIN to override the whole plugin string"
 else warn "LOFTEE not configured — pLoF HC/LC confidence will be unavailable"; fi
 
-log "Step 2: VEP-annotating $(count_variants "$SITES") sites (VEP r${VEP_VERSION})"
+n_sites="$(count_variants "$SITES")"
+# VEP runs EXACTLY ONCE here, on the deduplicated cohort union — never per trio.
+# Per-trio steps (Step 4) transfer these annotations with `bcftools annotate`, they
+# do not re-run VEP. This is the single most expensive operation in the pipeline.
+log "Step 2: VEP-annotating the cohort union ONCE — $n_sites sites (VEP r${VEP_VERSION}). VEP is NOT run per trio."
+audit 02_annotate input_sites "$n_sites"
 hprv_run -- vep "${vep_args[@]}" -i "$SITES" -o "$vep_vcf"
 require_intact_bgzip "$vep_vcf"
 
@@ -141,4 +146,5 @@ else warn "ClinVar not configured — clinical evidence will be unavailable down
 
 cp "$cur" "$OUT"; index_vcf "$OUT"
 require_intact_bgzip "$OUT"; mark_done "$OUT"
+audit 02_annotate annotated_sites "$(count_variants "$OUT")"
 log "Step 2 complete: $OUT"

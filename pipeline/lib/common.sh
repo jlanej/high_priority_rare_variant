@@ -168,6 +168,20 @@ mark_done() { touch "${1}.done"; }
 abspath_dir() { cd "$(dirname "$1")" && pwd; }
 
 # --------------------------------------------------------------------------- #
+# Auditing: append (step, scope, metric, value) to $HPRV_AUDIT_DIR/counts.tsv so
+# every count is recoverable. scope = "global" or a trio_id. No-op if unset.
+#   audit STEP METRIC VALUE [SCOPE]
+# --------------------------------------------------------------------------- #
+: "${HPRV_AUDIT_DIR:=}"
+audit() {
+    [[ -n "$HPRV_AUDIT_DIR" ]] || return 0
+    mkdir -p "$HPRV_AUDIT_DIR"
+    local f="$HPRV_AUDIT_DIR/counts.tsv"
+    [[ -f "$f" ]] || printf 'timestamp\tstep\tscope\tmetric\tvalue\n' > "$f"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(_hprv_ts)" "$1" "${4:-global}" "$2" "$3" >> "$f"
+}
+
+# --------------------------------------------------------------------------- #
 # Cleanup of the per-run tmpdir on exit (best-effort; only what we created).
 # --------------------------------------------------------------------------- #
 _hprv_cleanup() { [[ -n "${HPRV_TMPDIR:-}" && -d "$HPRV_TMPDIR" ]] && rm -rf "$HPRV_TMPDIR" || true; }

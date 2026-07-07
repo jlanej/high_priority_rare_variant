@@ -30,6 +30,7 @@ import csv
 import sys
 
 from hprv import annotations as A
+from hprv import audit
 from hprv.config import get, load_config
 
 try:
@@ -202,6 +203,10 @@ def main(argv=None) -> int:
 
     sig = sum(1 for r in rows if r["exome_wide_sig"] == "1")
     fdr_sig = sum(1 for r in rows if r["q_enrich"] is not None and r["q_enrich"] < fdr_q)
+    audit.record("06_burden", "n_trios", n_trios)
+    audit.record("06_burden", "genes_nominated", len(rows))
+    audit.record("06_burden", "genes_exome_wide_sig", sig)
+    audit.record("06_burden", "genes_fdr_sig", fdr_sig)
     sys.stderr.write(
         f"Step 6 complete: {len(rows)} genes, {n_trios} trios -> {args.out}\n"
         f"  exome-wide (p<{exome_p:g}): {sig}; FDR q<{fdr_q}: {fdr_sig}\n"

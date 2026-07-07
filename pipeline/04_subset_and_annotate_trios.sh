@@ -43,9 +43,9 @@ out_manifest="$OUTDIR/trios.candidates.tsv"
 
 # manifest columns
 read -r header < "$MANIFEST"
-idcol=0; vcfcol=0; pedcol=0; i=0
+idcol=0; vcfcol=0; pedcol=0; scol=0; i=0
 IFS=$'\t' read -ra cols <<< "$header"
-for c in "${cols[@]}"; do i=$((i+1)); case "$c" in trio_id) idcol=$i;; vcf) vcfcol=$i;; ped) pedcol=$i;; esac; done
+for c in "${cols[@]}"; do i=$((i+1)); case "$c" in trio_id) idcol=$i;; vcf) vcfcol=$i;; ped) pedcol=$i;; samples) scol=$i;; esac; done
 [[ $idcol -gt 0 && $vcfcol -gt 0 ]] || die "manifest needs 'trio_id' and 'vcf' columns"
 
 # bind set
@@ -69,18 +69,28 @@ for row in "${rows[@]}"; do
     IFS=$'\t' read -ra f <<< "$row"
     trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
     ped=""; [[ $pedcol -gt 0 ]] && ped="${f[$((pedcol-1))]}"
+    samples=""; [[ $scol -gt 0 ]] && samples="${f[$((scol-1))]}"
     [[ -n "$trio" && -f "$vcf" ]] || { warn "skipping $trio (missing VCF)"; continue; }
 
     out="$trio_dir/${trio}.candidates.annotated.vcf.gz"
     if is_done "$out"; then
         log "  [$trio] cached"
-        printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"; continue
+        printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
+        audit 04_subset candidate_genotypes "$(count_variants "$out")" "$trio"
+        continue
     fi
 
     norm="$HPRV_TMPDIR/${trio}.norm.vcf.gz"
     cand="$HPRV_TMPDIR/${trio}.cand.vcf.gz"
-    log "  [$trio] norm + intersect + annotate"
-    bcftools norm -m- -f "$REF" -c s --threads "$THREADS" -Oz -o "$norm" "$vcf"
+    log "  [$trio] subset-to-trio + norm + intersect + annotate"
+    # Subset to the 3 trio members (dropping extras) so per-trio candidate VCFs carry
+    # exactly the trio genotypes, then normalize to the same representation as sites.
+    if [[ -n "$samples" ]]; then
+        bcftools view -s "$samples" --threads "$THREADS" -Ou "$vcf" \
+            | bcftools norm -m- -f "$REF" -c s --threads "$THREADS" -Oz -o "$norm" -
+    else
+        bcftools norm -m- -f "$REF" -c s --threads "$THREADS" -Oz -o "$norm" "$vcf"
+    fi
     index_vcf "$norm"
     # allele-aware intersection: trio records that match a plausible site exactly
     bcftools isec -c none -n=2 -w1 --threads "$THREADS" -Oz -o "$cand" "$norm" "$PLAUSIBLE"
@@ -92,7 +102,9 @@ for row in "${rows[@]}"; do
     rm -f "$norm" "$norm".{tbi,csi} "$cand" "$cand".{tbi,csi} 2>/dev/null || true
 
     printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
-    log "  [$trio] -> $out ($(count_variants "$out") candidate genotypes)"
+    nc="$(count_variants "$out")"
+    audit 04_subset candidate_genotypes "$nc" "$trio"
+    log "  [$trio] -> $out ($nc candidate genotypes)"
 done
 
 log "Step 4 complete. Per-trio candidate manifest: $out_manifest"

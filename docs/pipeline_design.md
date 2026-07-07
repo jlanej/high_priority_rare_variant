@@ -112,6 +112,7 @@ flowchart TD
 
 | Step | Produces | Authoritative for |
 |------|----------|-------------------|
+| resolve | `trios.resolved.tsv` (trio_id, vcf, ped, samples) + `trio_resolution.tsv` + PEDs | which VCF each trio maps to, generated from a `kid/dad/mom` file by exact sample-ID match |
 | 0 | QC report per trio; pass/flag list | which trios enter analysis |
 | 1 | `cohort.sites.vcf.gz` (site-only, normalized, de-duplicated union) | the set of loci seen anywhere in the cohort — **not** a frequency |
 | 2 | `cohort.sites.annotated.vcf.gz` | all functional/population/clinical/constraint annotation, computed once |
@@ -129,6 +130,26 @@ hom-ref calls and destroy the per-trio provenance the inheritance logic depends 
 synthesized genotype matrix.
 
 ---
+
+## Input resolution & auditing
+
+- **Trio resolution (preflight).** The user supplies a simple `kid/dad/mom` file (sample IDs
+  matching the VCFs, any column order) plus a VCF directory/list. The resolver builds a
+  sample→VCF index (header read only) and, for each trio, selects the VCF containing **all three
+  members** — matched exactly by sample ID, never by column order, extra members allowed. Ties
+  (a trio present in >1 VCF) resolve to the most trio-specific (fewest-sample) VCF; a trio present
+  in **no** VCF is reported as unresolved (which member was missing), never guessed. PEDs are
+  generated automatically. Steps 1 and 4 subset each VCF to its 3 members (`bcftools view -s`), so
+  additional members and inconsistent ordering are harmless.
+- **VEP runs exactly once**, on the cohort union (Step 2). Step 4 transfers those annotations with
+  `bcftools annotate`; VEP is never invoked per trio — the single most expensive operation scales
+  with distinct sites, not samples.
+- **Auditing.** Every step appends `(step, scope, metric, value)` to `audit/counts.tsv`
+  (`scope` = `global` or a trio_id). This yields a **global variant funnel** (union → annotated →
+  plausible, with Step-3 keep/drop reasons) and a **per-trio funnel** (candidate genotypes →
+  candidate calls by inheritance mode), assembled into `audit/summary.md`. Each retained variant
+  also carries an `hprv_keep_reason` INFO tag, so "what went where and why" is answerable end to
+  end without re-running anything.
 
 ## Cross-cutting principles
 

@@ -14,9 +14,11 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from hprv import annotations as A  # noqa: E402
+from hprv import audit  # noqa: E402
 from hprv import genotype as G  # noqa: E402
 from hprv.config import get  # noqa: E402
-from hprv.ped import parse_ped  # noqa: E402
+from hprv.ped import parse_ped, read_trios_file, write_ped  # noqa: E402
+from hprv.selection import build_classifier  # noqa: E402
 
 
 # --- tiny fakes standing in for a cyvcf2 Variant ---------------------------
@@ -97,6 +99,60 @@ def test_par_x():
     assert G.is_x_nonpar(FakeVar(CHROM="chrX", POS=50_000_000))
     assert not G.is_x_nonpar(FakeVar(CHROM="chrX", POS=1_000_000))   # PAR1
     assert not G.is_x_nonpar(FakeVar(CHROM="chr1", POS=1_000_000))
+
+
+def test_read_trios_file(tmp="/tmp/_hprv_trios.tsv"):
+    # header order must NOT matter: dad/mom located by name, not position
+    with open(tmp, "w") as fh:
+        fh.write("#kid\tmom\tdad\nCH1\tMO1\tFA1\n")   # note: mom before dad
+    trios = read_trios_file(tmp)
+    os.remove(tmp)
+    assert trios == [("CH1", "FA1", "MO1")]            # returned as (kid, dad, mom)
+
+
+def test_write_ped_roundtrip(tmp="/tmp/_hprv_gen.ped"):
+    write_ped(tmp, "CH1", "FA1", "MO1", kid_sex="2")
+    ped = parse_ped(tmp)
+    os.remove(tmp)
+    assert ped == {"child": "CH1", "father": "FA1", "mother": "MO1", "sex": "2"}
+
+
+def test_audit_record_and_summarize(tmpdir="/tmp/_hprv_audit"):
+    import shutil
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    audit.record("01_cohort_sites", "union_sites", 1000, adir=tmpdir)
+    audit.record("03_select", "sites_plausible", 120, adir=tmpdir)
+    audit.record("04_subset", "candidate_genotypes", 40, scope="CH1", adir=tmpdir)
+    audit.record("05_inheritance", "candidate_calls", 3, scope="CH1", adir=tmpdir)
+    audit.record("05_inheritance", "mode.denovo", 1, scope="CH1", adir=tmpdir)
+    md = audit.summarize(tmpdir)
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    assert "Global variant funnel" in md and "1000" in md
+    assert "plausible sites: 120" in md
+    assert "CH1" in md and "denovo=1" in md
+
+
+def test_step3_classifier():
+    cfg = {"filters": {"rarity": {"benign_ba1": 0.05, "recessive_max": 1e-2},
+                       "functional": {"revel_pp3_supporting": 0.644,
+                                      "alphamissense_lp": 0.564, "spliceai_pp3": 0.2,
+                                      "cadd_phred_supporting": 20.0, "mpc_strong": 2.0,
+                                      "keep_impacts": ["HIGH", "MODERATE"]}}}
+    classify = build_classifier(cfg)
+    # BA1-common -> dropped, never rescued
+    assert classify(FakeVar({"hprv_gnomad_faf95": "0.2"})) == (False, "ba1")
+    # rare + HIGH impact -> kept with reason
+    assert classify(FakeVar({"vep_IMPACT": "HIGH"})) == (True, "impact_high")
+    # rare + LOFTEE HC -> kept
+    assert classify(FakeVar({"vep_LoF": "HC"})) == (True, "loftee_hc")
+    # ClinVar P/LP overrides missing function (>=1 star)
+    keep, why = classify(FakeVar({"hprv_clnsig": "Pathogenic",
+                                  "hprv_clnrevstat": "criteria_provided,_single_submitter"}))
+    assert keep and why == "clinvar_plp"
+    # rare but non-functional -> dropped
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER"})) == (False, "not_functional")
+    # too common for permissive recessive gate, no P/LP -> dropped
+    assert classify(FakeVar({"hprv_gnomad_faf95": "0.02", "vep_IMPACT": "HIGH"})) == (False, "too_common")
 
 
 def _load_gb():

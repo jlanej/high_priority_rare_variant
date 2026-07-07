@@ -50,7 +50,20 @@ germline pediatric cancer**. Runs under Apptainer on HPC.
 
 ## Data contract between steps
 
-- **Trio manifest** (user-supplied, git-ignored): TSV with header `trio_id  vcf  ped`.
+- **User input** (git-ignored): a `trios_file` (TSV, header names kid/dad/mom in any order;
+  IDs match VCF samples) + a `vcf_dir`/`vcf_list`. `pipeline/resolve_trios.py` maps each trio to
+  the VCF containing all three members (exact match; picks the fewest-sample VCF on a tie; extras
+  OK), generates PEDs, and writes the **internal manifest** `trios.resolved.tsv`
+  (`trio_id  vcf  ped  samples`) that Steps 0/1/4 consume. Unresolved/ambiguous trios are reported
+  in `trio_resolution.tsv`, never guessed. Steps 1 and 4 subset each VCF to its 3 members
+  (`bcftools view -s`), so extra members and inconsistent sample order don't matter.
+- **PED sex**: the generated PED leaves kid sex unknown (`0`); Step 5 reads Step 0's inferred sex
+  (`qc_report.tsv`) so X-linked/hemizygous logic fires correctly.
+- **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
+  (step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
+  `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.
+- **VEP runs ONCE** on the cohort union (Step 2). Step 4 transfers annotations with
+  `bcftools annotate` — it never re-runs VEP. Keep it that way.
 - **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): VEP/plugin fields are
   lifted by `bcftools +split-vep` with a `vep_` prefix (`vep_Consequence`, `vep_IMPACT`,
   `vep_SYMBOL`, `vep_REVEL_score`, `vep_AlphaMissense_score`, `vep_MPC_score`, `vep_CADD_PHRED`,

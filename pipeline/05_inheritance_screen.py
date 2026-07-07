@@ -22,6 +22,7 @@ import sys
 from cyvcf2 import VCF
 
 from hprv import annotations as A
+from hprv import audit
 from hprv import genotype as G
 from hprv.config import get, load_config
 from hprv.ped import parse_ped
@@ -182,10 +183,20 @@ def main(argv=None) -> int:
     ap.add_argument("--manifest", required=True, help="trios.candidates.tsv from Step 4")
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True, help="candidate calls TSV")
+    ap.add_argument("--qc-report", default="", help="Step 0 qc_report.tsv (for inferred kid sex)")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     thr = G.GtThresholds.from_config(cfg, get)
+
+    # inferred sex per trio from Step 0 QC (used when the generated PED has sex unknown)
+    sex_map = {}
+    if args.qc_report and __import__("os").path.exists(args.qc_report):
+        import csv as _csv
+        with open(args.qc_report) as fh:
+            for r in _csv.DictReader(fh, delimiter="\t"):
+                if r.get("inferred_sex"):
+                    sex_map[r.get("trio_id")] = r["inferred_sex"]
 
     with open(args.manifest) as fh:
         header = fh.readline().rstrip("\n").split("\t")
@@ -199,6 +210,10 @@ def main(argv=None) -> int:
         if not ped:
             sys.stderr.write(f"WARN: no usable PED for {trio_id} ({ped_path!r}); skipping\n")
             continue
+        # If the generated PED has kid sex unknown, use Step 0's inferred sex so
+        # X-linked / hemizygous logic can fire correctly.
+        if str(ped.get("sex")) in ("0", "", "None") and trio_id in sex_map:
+            ped["sex"] = sex_map[trio_id]
         vcf = VCF(vcf_path)
         try:
             gt = Trio(vcf, ped, thr)
@@ -206,9 +221,17 @@ def main(argv=None) -> int:
             sys.stderr.write(f"WARN: {trio_id}: {e}; skipping\n")
             vcf.close()
             continue
-        all_rows.extend(screen_trio(trio_id, vcf, gt, cfg))
+        trio_rows = screen_trio(trio_id, vcf, gt, cfg)
         vcf.close()
         n_trios += 1
+        # per-trio audit: total calls + counts by mode
+        tmodes = {}
+        for row in trio_rows:
+            tmodes[row["mode"]] = tmodes.get(row["mode"], 0) + 1
+        audit.record("05_inheritance", "candidate_calls", len(trio_rows), scope=trio_id)
+        for mode, c in sorted(tmodes.items()):
+            audit.record("05_inheritance", f"mode.{mode}", c, scope=trio_id)
+        all_rows.extend(trio_rows)
 
     with open(args.out, "w") as out:
         out.write("\t".join(COLS) + "\n")
@@ -218,6 +241,10 @@ def main(argv=None) -> int:
     by_mode = {}
     for r in all_rows:
         by_mode[r["mode"]] = by_mode.get(r["mode"], 0) + 1
+    audit.record("05_inheritance", "trios_screened", n_trios)
+    audit.record("05_inheritance", "candidate_calls_total", len(all_rows))
+    for mode, c in sorted(by_mode.items()):
+        audit.record("05_inheritance", f"mode.{mode}", c)
     sys.stderr.write(
         f"Step 5 complete: {len(all_rows)} candidate calls across {n_trios} trios "
         f"-> {args.out}\n  by mode: {by_mode}\n"
