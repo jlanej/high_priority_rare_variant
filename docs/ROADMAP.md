@@ -43,6 +43,11 @@ empirical-null λ, discrete-aware FDR) — gated on #2, natural phase-2 after #1
 second-hit / LOH overlay** from matched Kids First tumor data (PBTA/OpenPedCan) — ~1/3 of true
 carriers show a second hit; high impact but a new matched-tumor pipeline.
 
+> **Shared dependency.** #2 (somalier), #9 (gCNV), #11 (read-backed phasing), and the true
+> verifyBamID upgrade to #3 all gate on one thing: re-accessing the source **CRAMs**. They are
+> grouped — with ordering, cost, and the CoCoRV unlock — in
+> **[docs/cram_access_phase.md](cram_access_phase.md)**. Pay the access cost once.
+
 ## Nice-to-have
 
 - **ACAT-O / Cauchy multi-mask omnibus** (Med/Low) — hard-depends on #1's per-mask p-values.
