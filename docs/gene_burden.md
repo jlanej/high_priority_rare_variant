@@ -128,9 +128,9 @@ These are the standard collapsing and variance-component tests, documented for c
 
 Both **require a joint genotype matrix** and are therefore **not applicable to unmerged per-trio VCFs**. Defer until a true cohort joint call set exists.
 
-## Multiple-testing correction (optional de novo arm)
+## Multiple-testing correction
 
-The primary recurrence tally produces carrier counts and a recurrence flag, not p-values, so it needs no multiple-testing correction. The thresholds below apply to the **optional secondary de novo enrichment** (and any future TRAPD/statistical arm):
+The primary recurrence signal is now **calibrated**: for each gene, observed distinct-individual carriers are tested against `Binomial(N_trios, p)` with `p = 1 − Π_v (1 − faf95_v)²` over the gene's qualifying inherited variants (an allele absent from gnomAD is floored at `absent_faf95_floor`, default 1e-6). This yields a per-gene `p_recurrence`, a **BH `q_recurrence`**, and an exome-wide flag — so 2 carriers of a *private* variant are genome-wide significant while 2 carriers of a common-ish variant are not. It is a **case-only approximation** using in-cohort variants; the gnomAD-derived per-gene cumulative-AF version (TRAPD/CoCoRV) is the planned upgrade. The same thresholds apply to the **optional secondary de novo enrichment**:
 
 - **Exome-wide gene-based threshold: P < 2.5e-6** (≈ 0.05 / ~20,000 protein-coding genes). The literature also expresses this as a class-specific Bonferroni; the canonical default here is the single ~2.5e-6 line.
 - If **not** using a single omnibus p-value, divide further by the number of masks × AAF tiers × tests. Combining masks/tiers per gene via **ACAT/Cauchy (ACAT-O)** collapses them into one p-value and **avoids that penalty** — the preferred route.

@@ -35,9 +35,9 @@ from hprv import audit
 from hprv.config import get, load_config
 
 try:
-    from scipy.stats import poisson
+    from scipy.stats import binom, poisson
 except ImportError:  # pragma: no cover
-    poisson = None
+    binom = poisson = None
 
 DOMINANT_MODES = {"dominant"}
 BIALLELIC_MODES = {"hom_recessive", "compound_het"}
@@ -123,6 +123,9 @@ def main(argv=None) -> int:
     phaplo_min = float(get(cfg, "filters.constraint_weighting.phaplo_min", 0.86))
     weight_by_constraint = bool(get(cfg, "burden.weight_by_constraint", True))
     do_enrich = bool(get(cfg, "burden.denovo_enrichment", True))
+    # For the recurrence null, an allele absent from gnomAD is floored at the detection
+    # limit (~1 / 2*N_gnomAD alleles) so its expected carriers are tiny but non-zero.
+    absent_floor = float(get(cfg, "burden.absent_faf95_floor", 1e-6))
 
     # --- aggregate distinct individuals per gene, by model ---
     genes, trios = {}, set()
@@ -135,9 +138,13 @@ def main(argv=None) -> int:
             trios.add(trio)
             g = genes.setdefault(gene, {
                 "dom": set(), "bi": set(), "x": set(), "dn": set(), "all": set(),
-                "denovo_lof": 0, "denovo_mis": 0,
+                "var_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
             })
             g["all"].add(trio)
+            if mode in DOMINANT_MODES or mode in BIALLELIC_MODES or mode in XLINKED_MODES:
+                # distinct qualifying INHERITED variant -> its gnomAD faf95, for the null
+                key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
+                g["var_faf"][key] = _num(r.get("faf95"))
             if mode in DOMINANT_MODES:
                 g["dom"].add(trio)
             elif mode in BIALLELIC_MODES:
@@ -170,6 +177,24 @@ def main(argv=None) -> int:
         # Recurrence counts INHERITED models only (dominant het / biallelic / X-linked);
         # de novo is tracked separately (n_denovo) and never drives the recurrence flag.
         n_carriers = len(g["dom"] | g["bi"] | g["x"])
+
+        # --- Calibrated recurrence null (PRIMARY signal): is seeing n_carriers distinct
+        # individuals surprising given the gnomAD frequencies of this gene's qualifying
+        # variants? Under HWE, P(a random individual carries >=1 of them) =
+        # 1 - prod_v (1 - q_v)^2 with q_v = faf95 (absent -> floor). Observed carriers vs
+        # this Binomial(N_trios, p) gives a per-gene p-value; BH-FDR across genes below.
+        # (Case-only approximation using in-cohort variants; a gnomAD-derived per-gene
+        # cumulative allele frequency, i.e. TRAPD/CoCoRV, is the natural upgrade.)
+        p_recurrence = exp_car = None
+        if binom is not None and n_carriers > 0 and n_trios > 0 and g["var_faf"]:
+            p_not = 1.0
+            for q in g["var_faf"].values():
+                qq = q if (q is not None and q > 0) else absent_floor
+                p_not *= (1.0 - min(max(qq, 0.0), 1.0)) ** 2
+            p_carrier = 1.0 - p_not
+            exp_car = n_trios * p_carrier
+            p_recurrence = float(binom.sf(n_carriers - 1, n_trios, p_carrier))
+
         # optional SECONDARY de novo Poisson enrichment
         p_enrich = exp = None
         if can_enrich and gene in mut:
@@ -204,29 +229,35 @@ def main(argv=None) -> int:
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
             "recurrent": "1" if n_carriers >= min_carriers else "0",
+            "exp_carriers": exp_car, "p_recurrence": p_recurrence,
             "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
             "constrained": "1" if constrained else "0",
             "dn_exp": (f"{exp:.4g}" if exp is not None else ""), "dn_p_enrich": p_enrich,
             "modes": ";".join(modes),
         })
 
-    qs = bh_fdr([r["dn_p_enrich"] for r in rows])
-    for r, q in zip(rows, qs):
+    # FDR across genes for BOTH the primary recurrence p-value and the secondary de novo one
+    for r, q in zip(rows, bh_fdr([r["p_recurrence"] for r in rows])):
+        r["q_recurrence"] = q
+        r["recurrence_exome_wide_sig"] = "1" if (r["p_recurrence"] is not None and r["p_recurrence"] < exome_p) else "0"
+    for r, q in zip(rows, bh_fdr([r["dn_p_enrich"] for r in rows])):
         r["dn_q_enrich"] = q
         r["dn_exome_wide_sig"] = "1" if (r["dn_p_enrich"] is not None and r["dn_p_enrich"] < exome_p) else "0"
 
-    # Rank: recurrent genes first, then constrained, then by carrier/dominant counts,
-    # then (secondary) de novo enrichment.
+    # Rank: recurrent genes first, then by the calibrated recurrence p-value (most
+    # surprising first), then constraint, then counts, then (secondary) de novo enrichment.
     def rank_key(r):
         con_key = (r["constrained"] != "1") if weight_by_constraint else 0
-        return (r["recurrent"] != "1", con_key, -r["n_carriers"],
+        prec = r["p_recurrence"] if r["p_recurrence"] is not None else 1.0
+        return (r["recurrent"] != "1", prec, con_key, -r["n_carriers"],
                 -r["n_dominant"], -r["n_biallelic"],
                 r["dn_p_enrich"] if r["dn_p_enrich"] is not None else 1.0)
     rows.sort(key=rank_key)
 
     out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
-                "recurrent", "loeuf", "pli", "s_het", "phaplo", "constrained", "dn_exp",
-                "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
+                "recurrent", "exp_carriers", "p_recurrence", "q_recurrence",
+                "recurrence_exome_wide_sig", "loeuf", "pli", "s_het", "phaplo", "constrained",
+                "dn_exp", "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
     with open(args.out, "w") as out:
         out.write("\t".join(out_cols) + "\n")
         for r in rows:
@@ -234,13 +265,18 @@ def main(argv=None) -> int:
 
     n_recurrent = sum(1 for r in rows if r["recurrent"] == "1")
     n_rec_con = sum(1 for r in rows if r["recurrent"] == "1" and r["constrained"] == "1")
+    n_rec_sig = sum(1 for r in rows if r.get("recurrence_exome_wide_sig") == "1")
+    n_rec_fdr = sum(1 for r in rows if r.get("q_recurrence") is not None and r["q_recurrence"] < fdr_q)
     audit.record("06_burden", "n_trios", n_trios)
     audit.record("06_burden", "genes_nominated", len(rows))
     audit.record("06_burden", "genes_recurrent", n_recurrent)
     audit.record("06_burden", "genes_recurrent_constrained", n_rec_con)
+    audit.record("06_burden", "genes_recurrence_exome_wide_sig", n_rec_sig)
+    audit.record("06_burden", "genes_recurrence_fdr_sig", n_rec_fdr)
     sys.stderr.write(
         f"Step 6 complete: {len(rows)} genes, {n_trios} trios -> {args.out}\n"
         f"  recurrent (>= {min_carriers} carriers): {n_recurrent}; recurrent+constrained: {n_rec_con}\n"
+        f"  recurrence exome-wide sig (p<{exome_p:g}): {n_rec_sig}; FDR q<{fdr_q}: {n_rec_fdr}\n"
     )
     if args.mutrate and args.syn_denovo_count < 0:
         sys.stderr.write(

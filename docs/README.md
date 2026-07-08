@@ -105,9 +105,15 @@ strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tier
 ### Cross-pedigree gene consolidation (recurrence across individuals)
 - Tally **distinct individuals** per gene by model: **dominant** (qualifying rare functional het),
   **biallelic** (hom / comp-het), **X-linked**; de novo counted separately (secondary).
+- **Calibrated recurrence null (primary signal):** observed carriers are tested against
+  `Binomial(N_trios, p)` where `p = 1 − Π_v (1 − faf95_v)²` over the gene's qualifying variants
+  (absent → floor `absent_faf95_floor`, default 1e-6) → a per-gene `p_recurrence`, BH `q`, and an
+  exome-wide flag (`p < 2.5e-6`). This makes 2 carriers of a *private* variant genome-wide
+  significant while 2 carriers of a common-ish one are not. *(Case-only approximation from
+  in-cohort variants; a gnomAD-derived per-gene cumulative-AF test — TRAPD/CoCoRV — is the upgrade.)*
 - A gene is **recurrent** at ≥ **min_carriers** (default **2**) distinct individuals; rank
-  recurrent-first, **weighted by constraint** (LOEUF / pLI / s_het — a recurrent het in a
-  haploinsufficient gene is the most compelling).
+  recurrent-first, **then by `p_recurrence`**, then **weighted by constraint** (LOEUF / pLI /
+  s_het / pHaplo — a recurrent het in a haploinsufficient gene is the most compelling).
 - OPTIONAL secondary: de novo Poisson enrichment vs the Samocha model (exome-wide **P < 2.5e-6**,
   BH **q < 0.05**) when a mutation-rate table is supplied.
 

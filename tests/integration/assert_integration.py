@@ -81,6 +81,14 @@ def main(argv=None) -> int:
     check(genes.get("GENED", {}).get("n_dominant") == "2", "GENED has 2 dominant carriers")
     check(genes.get("GENED", {}).get("recurrent") == "1", "GENED flagged recurrent")
     check(genes.get("GENE1", {}).get("n_denovo") == "2", "GENE1 has 2 de novo carriers (secondary)")
+    # calibrated recurrence null: a rare variant recurring in 2 individuals is significant
+    check(float(genes.get("GENED", {}).get("p_recurrence") or 1) < 1e-4,
+          "GENED has a small calibrated recurrence p-value")
+    check(genes.get("GENED", {}).get("recurrence_exome_wide_sig") == "1",
+          "GENED recurrence is exome-wide significant")
+    # GENE1 (de novo only) must NOT get an inherited recurrence p-value
+    check(not genes.get("GENE1", {}).get("p_recurrence"),
+          "GENE1 (de novo only) has no inherited recurrence p-value")
 
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")

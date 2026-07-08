@@ -171,6 +171,10 @@ inheritance:
 # (a recurrent het in a haploinsufficient gene is far more compelling).
 burden:
   min_carriers: 2                 # a gene is "recurrent" at >= this many distinct individuals
+  # Calibrated recurrence null: observed carriers are tested against Binomial(N_trios, p)
+  # where p = 1 - prod_v (1-faf95_v)^2 over the gene's qualifying variants (absent -> floor).
+  # This yields a per-gene p_recurrence + BH q + exome-wide flag (the PRIMARY ranked signal).
+  absent_faf95_floor: 1.0e-6      # gnomAD detection-limit floor for variants absent from gnomAD
   weight_by_constraint: true      # rank recurrent+constrained genes highest
   # OPTIONAL secondary signals (reported, not the primary rank):
   denovo_enrichment: true         # Samocha per-gene Poisson if a mutation_rate_table is given
