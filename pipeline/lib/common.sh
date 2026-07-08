@@ -94,7 +94,7 @@ hprv_run() {
             APPTAINER_TMPDIR="$HPRV_TMPDIR" SINGULARITY_TMPDIR="$HPRV_TMPDIR" \
             "$runtime" exec \
                 --workdir "$HPRV_TMPDIR" \
-                "${bindargs[@]:-}" \
+                ${bindargs[@]+"${bindargs[@]}"} \
                 "$HPRV_IMAGE" "$@"
             ;;
         docker)
@@ -104,7 +104,7 @@ hprv_run() {
                 -u "$(id -u):$(id -g)" \
                 -e HOME=/tmp \
                 -v "$PWD:$PWD" -w "$PWD" \
-                "${vargs[@]:-}" \
+                ${vargs[@]+"${vargs[@]}"} \
                 "$HPRV_IMAGE" "$@"
             ;;
         native)

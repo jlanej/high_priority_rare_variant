@@ -94,7 +94,12 @@ def emit_sh(cfg: dict) -> None:
         val = get(cfg, key, "")
         val = "" if val is None else str(val)
         if "${" in val:
+            # do NOT export an unresolved placeholder — a non-empty '${FOO}' string would
+            # shadow the shell-level `:=`/`:-` defaults in common.sh/run_pipeline.sh. Emit
+            # empty so those defaults take effect, and warn.
             unresolved.append((var, val))
+            print(f"export {var}=''")
+            continue
         print(f"export {var}={shlex.quote(val)}")
     if unresolved:
         sys.stderr.write(
@@ -123,6 +128,10 @@ def _main(argv=None) -> int:
         emit_sh(cfg)
     elif args.cmd == "get":
         val = get(cfg, args.key, args.default)
+        # normalize YAML booleans to lowercase so shell string compares (`!= "false"`) work;
+        # Python's str(True/False) is "True"/"False", which silently defeats those guards.
+        if isinstance(val, bool):
+            val = "true" if val else "false"
         print("" if val is None else val)
     return 0
 

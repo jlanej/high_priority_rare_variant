@@ -85,15 +85,21 @@ while IFS=$'\t' read -r trio vcf ped samples; do
             [[ -n "$src" && -f "$src" ]] || { warn "  [$trio] no CRAM for $role $sample"; continue; }
             odir="$DATA/crams/$trio"; mkdir -p "$odir"
             ocram="$odir/${sample}.cram"
-            hprv_run -- samtools view -C -T "$REF" --regions-file "$merged" -o "$ocram" "$src"
-            hprv_run -- samtools index "$ocram"
-            n_extracted=$((n_extracted + 1))
+            # tolerate one bad/unindexed source CRAM: warn and skip that track rather than
+            # aborting the whole export (set -e would otherwise kill Step 8 on the first failure)
+            if hprv_run -- samtools view -C -T "$REF" --regions-file "$merged" -o "$ocram" "$src" 2>/dev/null \
+               && hprv_run -- samtools index "$ocram" 2>/dev/null; then
+                n_extracted=$((n_extracted + 1))
+            else
+                warn "  [$trio] CRAM slice failed for $role $sample ($src); skipping this track"
+                rm -f "$ocram" "$ocram.crai"
+            fi
         done
     fi
 
     # per-trio VCF track (copy + index the candidate VCF under the data-dir)
     if [[ -f "$cand" ]]; then
-        cvcf="$(awk -F'\t' -v t="$trio" '$1==t{print $2}' "$cand" | head -1)"
+        cvcf="$(awk -F'\t' -v t="$trio" '$1==t{print $2; exit}' "$cand")"
         if [[ -n "$cvcf" && -f "$cvcf" ]]; then
             cp -f "$cvcf" "$DATA/vcfs/${trio}.vcf.gz"
             hprv_run --bind "$DATA" -- bcftools index -t -f "$DATA/vcfs/${trio}.vcf.gz" 2>/dev/null || true
