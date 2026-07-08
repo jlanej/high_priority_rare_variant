@@ -157,6 +157,19 @@ def test_step3_classifier():
     assert classify(FakeVar({"vep_IMPACT": "MODIFIER"})) == (False, "not_functional")
     # too common for permissive recessive gate, no P/LP -> dropped
     assert classify(FakeVar({"hprv_gnomad_faf95": "0.02", "vep_IMPACT": "HIGH"})) == (False, "too_common")
+    # --- functional-predictor keep branches (reached only when impact is not HIGH/MODERATE) ---
+    # SpliceAI Δ >= 0.2 (checked first)
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_SpliceAI_pred_DS_DL": "0.3"})) == (True, "spliceai")
+    # REVEL >= 0.644 supporting
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_REVEL_score": "0.7"})) == (True, "revel")
+    # AlphaMissense >= 0.564
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_AlphaMissense_score": "0.6"})) == (True, "alphamissense")
+    # CADD PHRED >= 25.3
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "26"})) == (True, "cadd")
+    # MPC >= 2.0
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_MPC_score": "2.5"})) == (True, "mpc")
+    # sub-threshold predictor -> dropped
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_REVEL_score": "0.5"})) == (False, "not_functional")
 
 
 def test_contamination():
@@ -174,6 +187,24 @@ def test_contamination():
     shutil.rmtree(d, ignore_errors=True)
     assert abs(fm.get("SAMP1", 0) - 0.031) < 1e-9
     assert C.read_selfsm("/no/such/dir") == {}
+
+
+def test_recurrence_null_per_model():
+    """The recurrence null must charge each inheritance model its OWN HWE probability —
+    a recessive/hemizygous carrier is not a >=1-of-two-alleles (dominant) event."""
+    gb = _load_gb()
+    floor, q = 1e-6, 1e-3
+    p_dom = gb.p_carrier_hwe([q], floor, 2)      # dominant het: 1-(1-q)^2 ~ 2q
+    p_hemi = gb.p_carrier_hwe([q], floor, 1)     # X hemizygous male: ~q
+    p_bi = gb.p_biallelic_hwe([q], floor)        # biallelic: ~q^2
+    assert abs(p_dom - (1 - (1 - q) ** 2)) < 1e-12
+    assert abs(p_hemi - q) < 1e-12
+    assert abs(p_bi - q * q) < 1e-12
+    # the recessive/hemizygous nulls are FAR smaller than the dominant one (the bug that was fixed)
+    assert p_bi < p_hemi < p_dom
+    # variants absent from gnomAD use the detection-limit floor, never zero probability
+    assert gb.p_carrier_hwe([None], floor, 2) > 0
+    assert gb.p_biallelic_hwe([None], floor) > 0
 
 
 def _load_gb():

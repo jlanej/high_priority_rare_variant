@@ -82,6 +82,33 @@ def _fmt(x):
     return f"{x:.4g}" if isinstance(x, float) else str(x)
 
 
+def _floored(q, floor):
+    return q if (q is not None and q > 0) else floor
+
+
+def p_carrier_hwe(fafs, floor, ploidy):
+    """P(a random individual carries >=1 qualifying allele) under HWE.
+
+    ploidy=2 for the autosomal dominant het model (>=1 of two alleles, ~2q per variant);
+    ploidy=1 for the X-linked hemizygous-male model (a single allele, ~q per variant).
+    """
+    p_not = 1.0
+    for q in fafs:
+        p_not *= (1.0 - min(max(_floored(q, floor), 0.0), 1.0)) ** ploidy
+    return 1.0 - p_not
+
+
+def p_biallelic_hwe(fafs, floor):
+    """P(a random individual is biallelic for this gene) ~ (sum of allele freqs)^2 under HWE.
+
+    Approximates hom + compound-het carriage by the squared cumulative alt-allele frequency.
+    Far smaller than the dominant >=1-allele probability, so recessive recurrence must NOT be
+    tested against the dominant null.
+    """
+    s = min(sum(min(max(_floored(q, floor), 0.0), 1.0) for q in fafs), 1.0)
+    return s * s
+
+
 def bh_fdr(pvals):
     idx = [i for i, p in enumerate(pvals) if p is not None]
     m = len(idx)
@@ -138,19 +165,18 @@ def main(argv=None) -> int:
             trios.add(trio)
             g = genes.setdefault(gene, {
                 "dom": set(), "bi": set(), "x": set(), "dn": set(), "all": set(),
-                "var_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
+                "dom_faf": {}, "bi_faf": {}, "x_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
             })
             g["all"].add(trio)
-            if mode in DOMINANT_MODES or mode in BIALLELIC_MODES or mode in XLINKED_MODES:
-                # distinct qualifying INHERITED variant -> its gnomAD faf95, for the null
-                key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
-                g["var_faf"][key] = _num(r.get("faf95"))
+            # distinct qualifying variant per mode -> its gnomAD faf95, for the model-appropriate null
+            key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
+            faf = _num(r.get("faf95"))
             if mode in DOMINANT_MODES:
-                g["dom"].add(trio)
+                g["dom"].add(trio); g["dom_faf"][key] = faf
             elif mode in BIALLELIC_MODES:
-                g["bi"].add(trio)
+                g["bi"].add(trio); g["bi_faf"][key] = faf
             elif mode in XLINKED_MODES:
-                g["x"].add(trio)
+                g["x"].add(trio); g["x_faf"][key] = faf
             elif mode in DENOVO_MODES:
                 g["dn"].add(trio)
                 cls = classify(r.get("consequence"))
@@ -159,7 +185,12 @@ def main(argv=None) -> int:
                 elif cls == "missense":
                     g["denovo_mis"] += 1
 
-    n_trios = args.n_trios or len(trios)
+    # N_trios is the SCREENED population, not the subset with a call. Never infer it from the
+    # calls file (that only contains trios with >=1 candidate) — that inflates significance.
+    n_trios = args.n_trios or 0
+    if not n_trios:
+        sys.stderr.write("WARN: --n-trios not provided; recurrence null + de novo enrichment "
+                         "SKIPPED (counts only). Pass the resolved-trio count for calibrated p-values.\n")
 
     mut, mcols = _open_keyed(args.mutrate, {"gene", "gene_symbol", "symbol"})
     con, ccols = _open_keyed(args.constraint, {"gene", "gene_symbol", "symbol"})
@@ -178,29 +209,39 @@ def main(argv=None) -> int:
         # de novo is tracked separately (n_denovo) and never drives the recurrence flag.
         n_carriers = len(g["dom"] | g["bi"] | g["x"])
 
-        # --- Calibrated recurrence null (PRIMARY signal): is seeing n_carriers distinct
-        # individuals surprising given the gnomAD frequencies of this gene's qualifying
-        # variants? Under HWE, P(a random individual carries >=1 of them) =
-        # 1 - prod_v (1 - q_v)^2 with q_v = faf95 (absent -> floor). Observed carriers vs
-        # this Binomial(N_trios, p) gives a per-gene p-value; BH-FDR across genes below.
+        # --- Calibrated recurrence null: is seeing this many distinct carriers surprising
+        # given the gnomAD frequencies of the gene's qualifying variants? Each inheritance
+        # model is tested against its OWN HWE null (a recessive/hemizygous carrier is NOT a
+        # >=1-of-two-alleles event, so it must not be charged the dominant probability):
+        #   dominant het  -> Binomial(N, 1 - prod_v (1-q_v)^2)      [PRIMARY headline signal]
+        #   biallelic     -> Binomial(N, (sum_v q_v)^2)
+        #   X-linked male -> Binomial(N, 1 - prod_v (1-q_v))        [hemizygous, single allele]
+        # Only defined for >= min_carriers (a single observed carrier is not "recurrence" and
+        # would be an ascertainment artifact). BH-FDR across genes on the primary p below.
         # (Case-only approximation using in-cohort variants; a gnomAD-derived per-gene
         # cumulative allele frequency, i.e. TRAPD/CoCoRV, is the natural upgrade.)
-        p_recurrence = exp_car = None
-        if binom is not None and n_carriers > 0 and n_trios > 0 and g["var_faf"]:
-            p_not = 1.0
-            for q in g["var_faf"].values():
-                qq = q if (q is not None and q > 0) else absent_floor
-                p_not *= (1.0 - min(max(qq, 0.0), 1.0)) ** 2
-            p_carrier = 1.0 - p_not
-            exp_car = n_trios * p_carrier
-            p_recurrence = float(binom.sf(n_carriers - 1, n_trios, p_carrier))
+        def _recur(n, faf_map, prob):
+            if binom is None or n_trios <= 0 or n < min_carriers or not faf_map:
+                return None, None
+            p = prob(list(faf_map.values()))
+            if not p or p <= 0:
+                return None, None
+            return n_trios * p, float(binom.sf(n - 1, n_trios, p))
+
+        exp_car, p_recurrence = _recur(len(g["dom"]), g["dom_faf"],
+                                       lambda f: p_carrier_hwe(f, absent_floor, 2))
+        _, p_rec_bi = _recur(len(g["bi"]), g["bi_faf"],
+                             lambda f: p_biallelic_hwe(f, absent_floor))
+        _, p_rec_x = _recur(len(g["x"]), g["x_faf"],
+                            lambda f: p_carrier_hwe(f, absent_floor, 1))
 
         # optional SECONDARY de novo Poisson enrichment
         p_enrich = exp = None
         if can_enrich and gene in mut:
             mrow = mut[gene]
-            mu = (float(mrow.get(mut_lof_c) or 0) if mut_lof_c else 0.0) + \
-                 (float(mrow.get(mut_mis_c) or 0) if mut_mis_c else 0.0)
+            # tolerate non-numeric cells ("NA", ".", "") instead of crashing on float()
+            mu = ((_num(mrow.get(mut_lof_c)) or 0.0) if mut_lof_c else 0.0) + \
+                 ((_num(mrow.get(mut_mis_c)) or 0.0) if mut_mis_c else 0.0)
             exp = 2.0 * n_trios * mu
             obs = g["denovo_lof"] + g["denovo_mis"]
             if exp > 0:
@@ -230,6 +271,7 @@ def main(argv=None) -> int:
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
             "recurrent": "1" if n_carriers >= min_carriers else "0",
             "exp_carriers": exp_car, "p_recurrence": p_recurrence,
+            "p_recurrence_biallelic": p_rec_bi, "p_recurrence_xlinked": p_rec_x,
             "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
             "constrained": "1" if constrained else "0",
             "dn_exp": (f"{exp:.4g}" if exp is not None else ""), "dn_p_enrich": p_enrich,
@@ -256,7 +298,8 @@ def main(argv=None) -> int:
 
     out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
                 "recurrent", "exp_carriers", "p_recurrence", "q_recurrence",
-                "recurrence_exome_wide_sig", "loeuf", "pli", "s_het", "phaplo", "constrained",
+                "recurrence_exome_wide_sig", "p_recurrence_biallelic", "p_recurrence_xlinked",
+                "loeuf", "pli", "s_het", "phaplo", "constrained",
                 "dn_exp", "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
     with open(args.out, "w") as out:
         out.write("\t".join(out_cols) + "\n")

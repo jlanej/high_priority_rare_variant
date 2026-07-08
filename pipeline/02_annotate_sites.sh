@@ -105,9 +105,16 @@ hprv_run -- vep "${vep_args[@]}" -i "$SITES" -o "$vep_vcf"
 require_intact_bgzip "$vep_vcf"
 
 # --- split-vep: lift only the CSQ fields that are actually present to INFO ---
-csq_fmt="$(hprv_run -- bcftools view -h "$vep_vcf" | grep -m1 '^##INFO=<ID=CSQ' \
-           | sed 's/.*Format: //; s/">.*//')"
-[[ -n "$csq_fmt" ]] || die "VEP output has no CSQ header — annotation failed"
+# Capture the header ONCE, then parse in bash: piping bcftools into `grep -m1` lets grep
+# close the pipe early and SIGPIPE-abort bcftools under `set -o pipefail`.
+vep_header="$(hprv_run -- bcftools view -h "$vep_vcf")"
+csq_line=""
+while IFS= read -r _hl; do
+    case "$_hl" in '##INFO=<ID=CSQ'*) csq_line="$_hl"; break ;; esac
+done <<< "$vep_header"
+[[ -n "$csq_line" ]] || die "VEP output has no CSQ header — annotation failed"
+csq_fmt="${csq_line##*Format: }"; csq_fmt="${csq_fmt%%\">*}"
+[[ -n "$csq_fmt" ]] || die "VEP CSQ header has no Format description"
 want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT CANONICAL \
       REVEL_score AlphaMissense_score AlphaMissense_pred MPC_score MetaRNN_score CADD_PHRED CADD_phred \
       SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
@@ -125,21 +132,37 @@ hprv_run -- bcftools +split-vep -c "$have_fields" -s worst -p vep_ \
 index_vcf "$split_vcf"
 
 # --- transfer external gnomAD (faf95/AF/nhomalt) and ClinVar (CLNSIG/CLNREVSTAT) ---
+# gnomAD faf95 is the SOLE population-frequency oracle (golden rule #2): a configured-but-missing
+# path is a hard error, never a silent skip. Only a genuinely unset resource warns-and-continues.
 cur="$split_vcf"
-if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "$HPRV_GNOMAD_SITES" ]]; then
+if is_set "${HPRV_GNOMAD_SITES:-}"; then
+    [[ -e "$HPRV_GNOMAD_SITES" ]] || die "gnomAD sites configured but not found: $HPRV_GNOMAD_SITES (resources.gnomad.sites_vcf)"
     log "Step 2: transferring gnomAD frequency (faf95 = ${HPRV_GNOMAD_FAF95_TAG:-fafmax_faf95_max_joint})"
     gn="$HPRV_TMPDIR/gnomad.vcf.gz"
     hprv_run -- bcftools annotate -a "$HPRV_GNOMAD_SITES" \
         -c "INFO/hprv_gnomad_af:=INFO/${HPRV_GNOMAD_AF_TAG:-AF_joint},INFO/hprv_gnomad_grpmax_af:=INFO/${HPRV_GNOMAD_GRPMAX_AF_TAG:-AF_grpmax_joint},INFO/hprv_gnomad_faf95:=INFO/${HPRV_GNOMAD_FAF95_TAG:-fafmax_faf95_max_joint},INFO/hprv_gnomad_nhomalt:=INFO/${HPRV_GNOMAD_NHOMALT_TAG:-nhomalt_joint}" \
         --threads "$THREADS" -Oz -o "$gn" "$cur"
     index_vcf "$gn"; cur="$gn"
-else warn "gnomAD sites not configured — rarity filtering will be unavailable downstream"; fi
+    # sanity: a contig-naming mismatch (chr1 vs 1) or wrong tag names annotates 0 records but exits 0
+    n_gn="$(hprv_run -- bcftools view -H -i 'INFO/hprv_gnomad_af!="." || INFO/hprv_gnomad_faf95!="."' "$gn" | wc -l | tr -d '[:space:]')"
+    log "Step 2: gnomAD annotated $n_gn / $n_sites sites"
+    [[ "$n_gn" -gt 0 || "$n_sites" -eq 0 ]] || \
+        die "gnomAD transfer matched 0/$n_sites sites — check contig naming (chr1 vs 1) and the resources.gnomad.*_tag names"
+else warn "gnomAD sites not configured (resources.gnomad.sites_vcf) — rarity filtering will be unavailable downstream"; fi
 
-if is_set "${HPRV_CLINVAR_VCF:-}" && [[ -e "$HPRV_CLINVAR_VCF" ]]; then
+if is_set "${HPRV_CLINVAR_VCF:-}"; then
+    [[ -e "$HPRV_CLINVAR_VCF" ]] || die "ClinVar VCF configured but not found: $HPRV_CLINVAR_VCF (resources.clinvar.vcf)"
     log "Step 2: transferring ClinVar (${HPRV_CLINVAR_SIG_TAG:-CLNSIG})"
     cv="$HPRV_TMPDIR/clinvar.vcf.gz"
-    hprv_run -- bcftools annotate -a "$HPRV_CLINVAR_VCF" \
-        -c "INFO/hprv_clnsig:=INFO/${HPRV_CLINVAR_SIG_TAG:-CLNSIG},INFO/hprv_clnrevstat:=INFO/${HPRV_CLINVAR_REVSTAT_TAG:-CLNREVSTAT},INFO/hprv_clnsigconf:=INFO/${HPRV_CLINVAR_SIGCONF_TAG:-CLNSIGCONF}" \
+    cln_cols="INFO/hprv_clnsig:=INFO/${HPRV_CLINVAR_SIG_TAG:-CLNSIG},INFO/hprv_clnrevstat:=INFO/${HPRV_CLINVAR_REVSTAT_TAG:-CLNREVSTAT}"
+    # CLNSIGCONF is absent in some ClinVar builds; requesting a missing source tag aborts the whole
+    # transfer (losing CLNSIG too), so only add it when present in the source header (bash match, no pipe).
+    sigconf_tag="${HPRV_CLINVAR_SIGCONF_TAG:-CLNSIGCONF}"
+    cln_header="$(hprv_run -- bcftools view -h "$HPRV_CLINVAR_VCF")"
+    if [[ "$cln_header" == *"##INFO=<ID=${sigconf_tag},"* ]]; then
+        cln_cols+=",INFO/hprv_clnsigconf:=INFO/${sigconf_tag}"
+    else warn "ClinVar source lacks ${sigconf_tag}; transferring CLNSIG/CLNREVSTAT only"; fi
+    hprv_run -- bcftools annotate -a "$HPRV_CLINVAR_VCF" -c "$cln_cols" \
         --threads "$THREADS" -Oz -o "$cv" "$cur"
     index_vcf "$cv"; cur="$cv"
 else warn "ClinVar not configured — clinical evidence will be unavailable downstream"; fi

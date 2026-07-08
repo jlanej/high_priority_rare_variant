@@ -136,7 +136,8 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     line("Recurrent genes", f"{n_recurrent} (>= {get(cfg, 'burden.min_carriers', 2)} distinct individuals)")
     n_recsig = sum(1 for r in genes if genes_h and "recurrence_exome_wide_sig" in genes_h
                    and r[genes_h.index("recurrence_exome_wide_sig")] == "1") if genes_h else 0
-    line("Recurrence-significant genes", f"{n_recsig} (exome-wide p < 2.5e-6 on the calibrated recurrence null)")
+    line("Recurrence-significant genes",
+         f"{n_recsig} (exome-wide p < {get(cfg, 'burden.exome_wide_p', 2.5e-6):g} on the calibrated dominant-recurrence null)")
     line("", "")
 
     # key thresholds
