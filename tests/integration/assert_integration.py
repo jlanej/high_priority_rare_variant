@@ -44,8 +44,12 @@ def main(argv=None) -> int:
     check(qc.get("CH_B", {}).get("inferred_sex") == "1", "CH_B inferred male (chrX)")
     # no selfSM configured -> VCF-only CHARR fallback; mock hom-alt AD is 0 ref -> ~0, unflagged
     check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
-    check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated")
-    check(qc.get("CH_B", {}).get("contam_flag") == "0", "CH_B not flagged contaminated")
+    check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated (clean)")
+    # CH_B's father carries 6 ref reads at a hom-alt site -> CHARR 0.15 > 0.02 -> trio flagged
+    check(qc.get("CH_B", {}).get("contam_flag") == "1", "CH_B flagged contaminated (father CHARR)")
+    dadc = float(qc.get("CH_B", {}).get("dad_contam") or 0)
+    check(0.1 < dadc < 0.2, f"CH_B dad_contam ~0.15 (got {dadc})")
+    check((qc.get("CH_B", {}).get("kid_contam") or "0") in ("", "0"), "CH_B proband CHARR clean")
     # Mendelian-error gate (sample-swap proxy): the de novo in CH_A is a Mendelian violation
     check(int(qc.get("CH_A", {}).get("mie_errors") or 0) >= 1, "CH_A Mendelian error detected (de novo)")
     check(qc.get("CH_A", {}).get("mie_flag") == "1", "CH_A MIE flag raised")
@@ -76,6 +80,11 @@ def main(argv=None) -> int:
     check(has("CH_A", "hom_recessive", "chr1", 8000, "GENE2"), "CH_A hom recessive GENE2")
     ch = [r for r in calls if r["trio_id"] == "CH_A" and r["mode"] == "compound_het"]
     check(len(ch) == 2 and all(r["symbol"] == "GENE3" for r in ch), "CH_A compound het pair in GENE3")
+    # comp-het requires TRANS: two cis (both maternal) hets in GENEC must NOT be a compound_het
+    genec = [r for r in calls if r["trio_id"] == "CH_A" and r["symbol"] == "GENEC"]
+    check(genec and all(r["mode"] != "compound_het" for r in genec),
+          "cis (same-parent) GENEC pair NOT called compound_het")
+    check(any(r["mode"] == "dominant" for r in genec), "cis GENEC variants emitted as dominant instead")
     check(has("CH_B", "denovo", "chr1", 5100, "GENE1"), "CH_B de novo GENE1 (secondary)")
     check(has("CH_B", "x_linked_recessive", "chrX", 2781600, "GENEX"), "CH_B X-linked recessive GENEX")
     check(not has("CH_A", "denovo", "chr1", 15000), "low-GQ pseudo-de-novo NOT called (QC gate)")

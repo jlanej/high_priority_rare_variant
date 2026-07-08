@@ -123,6 +123,26 @@ add(file="B", chrom="chr2", pos=10000, gene="GENED", csq="missense_variant", imp
     gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 
+# --- CONTAMINATION: a common hom-alt site where FA_B carries reference reads at a hom-alt
+#     genotype (verifyBamID-style contamination). Common (faf95=0.3) so Step 3 drops it and it
+#     never becomes a candidate — it only exercises Step 0's CHARR gate. Mendelian-consistent
+#     (all 1/1) so it adds no MIE. Expect: CH_B contam_flag=1 (dad), kid/mom clean. ---
+add(file="B", chrom="chr2", pos=14000, gene="XCONTAM", csq="missense_variant", impact="MODERATE",
+    faf95=0.3,
+    gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("1/1", 99, 40),
+         "SIB_B": ("1/1", 99, 40)},
+    adov={"FA_B": "6,34"})   # 6 ref reads at a hom-alt site -> CHARR 0.15 > 0.02 threshold
+
+# --- comp-het CIS rejection: two rare functional hets in GENEC, BOTH inherited from mom
+#     (cis). compound_het requires TRANS (mat x pat), so these must NOT be paired; each is a
+#     dominant (maternal-origin) call instead. Guards the trans-pairing logic. ---
+add(file="A", chrom="chr2", pos=16000, gene="GENEC", csq="missense_variant", impact="MODERATE",
+    revel="0.85", faf95=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
+add(file="A", chrom="chr2", pos=16100, gene="GENEC", csq="missense_variant", impact="MODERATE",
+    revel="0.85", faf95=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
+
 # --- Trio C: duo only (mom MO_C absent everywhere) -> resolver unresolved ---
 add(file="C", chrom="chr1", pos=9000, gene="GENE8", csq="missense_variant", impact="MODERATE",
     faf95=1e-3, gts={"CH_C": ("0/1", 99, 40), "FA_C": ("0/1", 99, 40)})
@@ -171,9 +191,11 @@ def write_vcf(path, samples, variants):
             if v["hidenovo"]:
                 info += f";hiConfDeNovo={v['hidenovo']}"
             cells = []
+            adov = v.get("adov", {})     # per-sample AD override, e.g. contamination at hom-alt
             for s in samples:
                 gt, gq, dp = v["gts"][s]
-                cells.append(f"{gt}:{ad(gt, dp)}:{dp}:{gq}")
+                a = adov.get(s, ad(gt, dp))
+                cells.append(f"{gt}:{a}:{dp}:{gq}")
             fh.write(f"{v['chrom']}\t{v['pos']}\t.\t{ref}\t{alt}\t100\t{v['filter']}\t"
                      f"{info}\tGT:AD:DP:GQ\t" + "\t".join(cells) + "\n")
 
