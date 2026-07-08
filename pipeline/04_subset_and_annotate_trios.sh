@@ -35,6 +35,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$MANIFEST" && -n "$PLAUSIBLE" && -n "$REF" && -n "$OUTDIR" ]] \
     || die "need --manifest, --plausible, --ref, --outdir"
+[[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
 [[ -f "$PLAUSIBLE" ]] || die "plausible sites not found: $PLAUSIBLE"
 [[ -f "$REF" ]] || die "reference not found: $REF"
 
@@ -84,13 +85,20 @@ for row in "${rows[@]}"; do
     norm="$HPRV_TMPDIR/${trio}.norm.vcf.gz"
     cand="$HPRV_TMPDIR/${trio}.cand.vcf.gz"
     log "  [$trio] subset-to-trio + norm + intersect + annotate"
-    # Subset to the 3 trio members (dropping extras) so per-trio candidate VCFs carry
-    # exactly the trio genotypes, then normalize to the same representation as sites.
+    # Subset to the 3 trio members (dropping extras) so per-trio candidate VCFs carry exactly
+    # the trio genotypes, split multiallelics, keep only alleles the trio carries (--min-ac 1,
+    # post-split), and STRIP the source INFO (stale internal AC/AN/AF + GATK site fields must
+    # not survive into the authoritative candidate VCF; the plausible-site INFO is transferred
+    # below). `norm -c w` warns, never silently rewrites, on a REF mismatch.
     if [[ -n "$samples" ]]; then
         bcftools view -s "$samples" --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c s --threads "$THREADS" -Oz -o "$norm" -
+            | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+            | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
     else
-        bcftools norm -m- -f "$REF" -c s --threads "$THREADS" -Oz -o "$norm" "$vcf"
+        bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou "$vcf" \
+            | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
     fi
     index_vcf "$norm"
     # allele-aware intersection: trio records that match a plausible site exactly

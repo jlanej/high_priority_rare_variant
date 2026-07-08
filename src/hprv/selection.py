@@ -37,7 +37,10 @@ def build_classifier(cfg):
     def functional_reason(v):
         if (A.impact(v) or "") in keep_impacts:
             return "impact_" + (A.impact(v) or "").lower()
-        # PVS1-eligible pLoF = LOFTEE HC with NO flags (Abou-Tayoun/gnomAD guidance)
+        # Step 3 is a PERMISSIVE keep/drop screen: HIGH/MODERATE impact above already keeps all
+        # pLoF regardless of LOFTEE confidence (LOFTEE only labels HIGH-impact consequences). The
+        # LOFTEE HC/no-flags PVS1 *strength* is applied at the planned ACMG tiering step, not here;
+        # this branch only catches a LoF call VEP did not mark HIGH/MODERATE.
         if loftee_require_hc and A.is_loftee_hc(v) and not A.loftee_flags(v):
             return "loftee_hc"
         for name, val, thr in (

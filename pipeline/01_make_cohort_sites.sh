@@ -60,8 +60,9 @@ done
 [[ $idcol -gt 0 && $vcfcol -gt 0 ]] || die "manifest must have tab-separated 'trio_id' and 'vcf' header columns"
 
 # --- collect inputs and build the bind set (dirs every tool call must see) ---
+# HPRV_TMPDIR must be bound too: the union's `bcftools sort -T` scratch lives under it.
 declare -a site_files=()
-binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF")"
+binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF") ${HPRV_TMPDIR:-}"
 rows=()
 while IFS= read -r _line || [[ -n "$_line" ]]; do rows+=("$_line"); done < <(tail -n +2 "$MANIFEST")
 [[ ${#rows[@]} -gt 0 ]] || die "manifest has no data rows"
@@ -93,22 +94,27 @@ for row in "${rows[@]}"; do
 
     if is_done "$site"; then
         log "  [$trio] cached"
+        [[ -f "$site.tbi" || -f "$site.csi" ]] || index_vcf "$site"  # concat -a needs the index
         site_files+=("$site")
         audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
         continue
     fi
-    # Subset to the trio's 3 members (dropping any extra members in a multi-sample
-    # VCF) and keep only sites variant within the trio (--min-ac 1), so the union is
-    # focused on this cohort's variation. Then drop genotypes and strip per-trio INFO.
+    # Subset to the trio's 3 members (dropping any extra members in a multi-sample VCF),
+    # split multiallelics, then keep only alleles the trio actually carries (--min-ac 1
+    # applied AFTER the split, so AC=0 alt alleles do not leak into the union). Then drop
+    # genotypes and strip per-trio INFO. `norm -c w` warns (never silently rewrites) on a
+    # REF mismatch — a build/contig problem should be visible, not masked.
     log "  [$trio] subsetting to trio + normalizing + dropping genotypes"
     if [[ -n "$samples" ]]; then
-        bcftools view -s "$samples" -f "$FILTER" --min-ac 1 --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c s -Ou - \
+        bcftools view -s "$samples" -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+            | bcftools norm -m- -f "$REF" -c w -Ou - \
+            | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     else
-        bcftools view -f "$FILTER" --min-ac 1 --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c s -Ou - \
+        bcftools view -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+            | bcftools norm -m- -f "$REF" -c w -Ou - \
+            | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     fi
@@ -121,9 +127,13 @@ done
 [[ ${#site_files[@]} -gt 0 ]] || die "no per-trio site files were produced"
 
 # --- union: concat (dedup) -> sort -> norm -d exact -> index ---
+# Pass the inputs via a file list, not argv — thousands of trios would blow ARG_MAX / the
+# open-file-descriptor limit when spread across the command line.
 log "Step 1: unioning ${#site_files[@]} per-trio site files"
 tmp_sort="$HPRV_TMPDIR/sort"; mkdir -p "$tmp_sort"
-bcftools concat -a -D --threads "$THREADS" -Ou "${site_files[@]}" \
+filelist="$workdir/union_filelist.txt"
+printf '%s\n' "${site_files[@]}" > "$filelist"
+bcftools concat -a -D -f "$filelist" --threads "$THREADS" -Ou \
     | bcftools sort -T "$tmp_sort" -Ou - \
     | bcftools norm -d exact -f "$REF" --threads "$THREADS" -Oz -o "$OUT" -
 index_vcf "$OUT"

@@ -41,8 +41,10 @@ def main(argv=None) -> int:
         "ID": "hprv_keep_reason", "Number": "1", "Type": "String",
         "Description": "Why this site was retained by Step 3 (evidence category)",
     })
-    out = args.out[:-3] if args.out.endswith(".gz") else args.out  # write plain, bgzip after
-    w = Writer(out, vcf)
+    # cyvcf2 bgzips directly when writing a .gz path (mode "wz") — no uncompressed
+    # intermediate to re-read, and no risk of aliasing the output onto its own input.
+    mode = "wz" if args.out.endswith(".gz") else "w"
+    w = Writer(args.out, vcf, mode=mode)
     n_in = n_out = 0
     reasons = {}
     for v in vcf:
@@ -56,10 +58,8 @@ def main(argv=None) -> int:
     w.close()
     vcf.close()
 
-    # bgzip + index via bcftools (present in the container)
-    subprocess.run(["bcftools", "view", "-Oz", "-o", args.out, out], check=True)
-    subprocess.run(["bcftools", "index", "-t", args.out], check=True)
-    subprocess.run(["rm", "-f", out], check=False)
+    if args.out.endswith(".gz"):
+        subprocess.run(["bcftools", "index", "-t", args.out], check=True)
 
     # audit: funnel in/out + counts by reason (drops and keeps)
     audit.record("03_select", "sites_in", n_in)
