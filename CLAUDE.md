@@ -148,6 +148,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Open TODOs
 
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the prioritized, dependency-ordered gap list from the
+SOTA review. Quick wins to do first: calibrated recurrence null + FDR, somalier ancestry/relatedness,
+CHARR contamination, PP1/BS4 co-segregation, UTRannotator, UPD rescue, conda-lock. Big bets:
+germline CNV (GATK-gCNV), phenotype ranker (Exomiser), read-backed/population phasing, ROH.
+
+Lower-level items:
+
 - **CNV/SV module** (GATK-gCNV / Manta / ExomeDepth) — the biggest coverage gap.
 - **Pseudogene/seg-dup handling** (PMS2/PMS2CL, CYP21A2, SMN1/2, NEB, GBA) — flag/annotate.
 - **Dominant-recurrence corroboration** — add TRAPD (case-vs-gnomAD carrier frequency) as an

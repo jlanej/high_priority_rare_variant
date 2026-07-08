@@ -17,6 +17,7 @@ the single source of truth; if a document ever disagrees with it, the table wins
 | Document | Covers |
 |----------|--------|
 | [pipeline_design.md](pipeline_design.md) | Vetted end-to-end flow; critique of the original 5-step proposal; data artifacts; scope limits |
+| [ROADMAP.md](ROADMAP.md) | Prioritized high-priority gaps vs state of the art (from a SOTA review); dependency-ordered |
 | [cohort_construction.md](cohort_construction.md) | Why a naive `merge` of non-joint trios corrupts AC/AN; the site-only union recipe |
 | [allele_frequency.md](allele_frequency.md) | gnomAD v4.1, grpmax `faf95`, maximum credible AF, why external AF not internal |
 | [functional_annotation.md](functional_annotation.md) | VEP/IMPACT, LOFTEE, calibrated missense/splice predictors, dbNSFP |
