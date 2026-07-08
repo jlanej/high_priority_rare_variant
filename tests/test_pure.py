@@ -45,6 +45,22 @@ def test_config_get():
     assert get(cfg, "nope.here", "d") == "d"
 
 
+def test_config_sh_skips_unresolved():
+    """emit_sh must NOT export a literal ${ENV} placeholder — that would shadow the
+    shell-level `:=`/`:-` defaults. It emits empty and warns instead."""
+    import contextlib
+    import io
+    from hprv import config as C
+    cfg = {"project": {"output_dir": "${NOPE_UNSET}"}, "runtime": {"tmpdir": "/real/tmp"}}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        C.emit_sh(cfg)
+    out = buf.getvalue()
+    assert "export HPRV_OUTPUT_DIR=''" in out       # unresolved -> empty, defaults win
+    assert "${NOPE_UNSET}" not in out               # never leak the literal placeholder to stdout
+    assert "HPRV_TMPDIR=/real/tmp" in out            # resolved values pass through (shlex-unquoted)
+
+
 def test_ped(tmp="/tmp/_hprv_test.ped"):
     with open(tmp, "w") as fh:
         fh.write("# comment\nFAM CHILD DAD MOM 1 2\nFAM DAD 0 0 1 1\nFAM MOM 0 0 2 1\n")

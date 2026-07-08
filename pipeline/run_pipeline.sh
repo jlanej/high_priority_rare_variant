@@ -19,7 +19,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$HERE/lib/common.sh"
-export PYTHONPATH="${PYTHONPATH:-}:${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src"
+# prepend our src; avoid a leading ':' (which would put CWD on the import path) when unset
+export PYTHONPATH="${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 CFG="" FROM=0 TO=8
 while [[ $# -gt 0 ]]; do
@@ -38,7 +39,10 @@ cfg_get() { python3 -m hprv.config get --config "$CFG" --key "$1" --default "${2
 run_step() { local n="$1"; [[ "$FROM" -le "$n" && "$n" -le "$TO" ]]; }
 
 # Resolve config -> environment (HPRV_* vars). Warnings for unset placeholders -> stderr.
-eval "$(python3 -m hprv.config sh --config "$CFG")"
+# Capture first so a config parse/emit failure aborts loudly (a bare `eval "$(...)"` under
+# set -e swallows the non-zero exit of the substitution).
+_cfg_sh="$(python3 -m hprv.config sh --config "$CFG")" || die "failed to resolve config: $CFG"
+eval "$_cfg_sh"
 
 is_set "${HPRV_OUTPUT_DIR:-}"  || die "project.output_dir is unresolved — set the env var it references"
 is_set "${HPRV_REF_FASTA:-}"   || die "reference.fasta is unresolved — set the env var it references"
