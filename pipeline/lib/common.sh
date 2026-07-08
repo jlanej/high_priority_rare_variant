@@ -38,6 +38,9 @@ set -euo pipefail
 # documented in the reference annotate script (apptainer --containall parks /tmp
 # in RAM, which is billed to --mem and SIGKILLs heavy VEP jobs). Keep it on disk.
 : "${HPRV_TMPDIR:=${TMPDIR:-/tmp}/hprv.$$}"
+# Remember the value we WOULD auto-create; the EXIT trap only rm -rf's this exact scratch,
+# never a user-supplied HPRV_TMPDIR / --tmpdir (which may be a pre-existing dir to preserve).
+_HPRV_TMPDIR_AUTO="${TMPDIR:-/tmp}/hprv.$$"
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -151,10 +154,15 @@ index_vcf() {
     fi
 }
 
-# Count variant records (data lines) in a VCF/BCF.
+# Count variant records (data lines) in a VCF/BCF. Uses the index (O(1)) when present,
+# else falls back to a full decompress — audit counts run on large VCFs repeatedly.
 count_variants() {
-    local vcf="$1" d
+    local vcf="$1" d n
     d="$(cd "$(dirname "$vcf")" && pwd)"
+    if [[ -f "$vcf.tbi" || -f "$vcf.csi" ]]; then
+        n="$(hprv_run --bind "$d" -- bcftools index -n "$vcf" 2>/dev/null || true)"
+        [[ -n "$n" ]] && { printf '%s\n' "$n"; return 0; }
+    fi
     hprv_run --bind "$d" -- bcftools view -H "$vcf" 2>/dev/null | wc -l | tr -d ' '
 }
 
@@ -188,5 +196,9 @@ audit() {
 # --------------------------------------------------------------------------- #
 # Cleanup of the per-run tmpdir on exit (best-effort; only what we created).
 # --------------------------------------------------------------------------- #
-_hprv_cleanup() { [[ -n "${HPRV_TMPDIR:-}" && -d "$HPRV_TMPDIR" ]] && rm -rf "$HPRV_TMPDIR" || true; }
+_hprv_cleanup() {
+    # only auto-remove the scratch WE created — never a user-supplied --tmpdir/HPRV_TMPDIR
+    [[ "${HPRV_TMPDIR:-}" == "${_HPRV_TMPDIR_AUTO:-/nonexistent}" && -d "${HPRV_TMPDIR:-}" ]] \
+        && rm -rf "$HPRV_TMPDIR" || true
+}
 trap _hprv_cleanup EXIT

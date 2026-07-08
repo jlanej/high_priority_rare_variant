@@ -10,8 +10,10 @@ plus a VCF source (directory and/or list). For each trio this:
   4. emits a resolved manifest (trio_id, vcf, ped, samples) for the rest of the
      pipeline, plus a resolution audit (what mapped where, and why anything didn't).
 
-Unresolved/ambiguous trios are reported loudly and skipped (never guessed) — mirroring
-the group's pedigree.py. The run fails only if NOTHING resolves. See CLAUDE.md.
+Trios with NO VCF containing all three members are reported loudly and skipped (never
+guessed) — mirroring the group's pedigree.py. A trio that matches MORE THAN ONE VCF is
+resolved by the fewest-samples/lexical tie-break in step 2 (the choice is recorded in the
+resolution audit), not skipped. The run fails only if NOTHING resolves. See CLAUDE.md.
 
 Usage:
   resolve_trios.py --trios trios.tsv [--vcf-dir DIR] [--vcf-list list.txt] --outdir OUT

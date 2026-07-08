@@ -137,7 +137,9 @@ def main(argv=None) -> int:
     ap.add_argument("--n-trios", type=int, default=0)
     ap.add_argument("--mutrate", default="")
     ap.add_argument("--constraint", default="")
-    ap.add_argument("--syn-denovo-count", type=int, default=-1)
+    ap.add_argument("--syn-denovo-count", type=int, default=-1,
+                    help="[reserved] observed synonymous de novo count for calibration "
+                         "(not yet wired into the Poisson expectation)")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -321,10 +323,11 @@ def main(argv=None) -> int:
         f"  recurrent (>= {min_carriers} carriers): {n_recurrent}; recurrent+constrained: {n_rec_con}\n"
         f"  recurrence exome-wide sig (p<{exome_p:g}): {n_rec_sig}; FDR q<{fdr_q}: {n_rec_fdr}\n"
     )
-    if args.mutrate and args.syn_denovo_count < 0:
+    if args.mutrate:
         sys.stderr.write(
-            "  NOTE: de novo enrichment (secondary) is uncalibrated without a synonymous "
-            "de novo count (--syn-denovo-count); de novo review is handled by separate machinery.\n"
+            "  NOTE: the de novo Poisson enrichment (secondary) is UNCALIBRATED here — the "
+            "expectation is not yet scaled to an observed synonymous de novo rate "
+            "(--syn-denovo-count is reserved); de novo review is handled by separate machinery.\n"
         )
     return 0
 
