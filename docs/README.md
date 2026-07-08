@@ -91,11 +91,14 @@ strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tier
 - **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
   machinery): `hiConfDeNovo` (child-membership checked) → re-verify DP/AB + parental cleanliness.
 - **Sample QC (Step 0)**: trio kid/dad/mom roles come from upstream **peddy**; Step 0 guards the
-  less-curated trios via genome-wide **Mendelian-error < 2%**, chrX-inferred sex vs. PED, and a
-  **contamination** gate — verifyBamID **FREEMIX > 0.05** if a `*.selfSM` directory is supplied
-  (`resources.selfsm_dir`), else a VCF-only **CHARR** proxy (reference-read fraction at
-  high-quality hom-alt SNV sites) **> 0.02**. (Richer somalier ancestry/relatedness is a roadmap
-  follow-on; CHARR: Lu et al., AJHG 2023.)
+  less-curated trios via genome-wide **Mendelian-error < 2%** (`qc.mie_max`), chrX-inferred sex vs.
+  PED (het-ratio **< 0.10 → male**, `qc.x_het_male_max`; needs **≥ 20** informative chrX calls,
+  `qc.sex_min_sites`, else sex is left unknown — a dedicated indexed chrX pass so the autosomal MIE
+  cap can't starve it), and a **contamination** gate — verifyBamID **FREEMIX > 0.05**
+  (`qc.freemix_threshold`) if a `*.selfSM` directory is supplied (`resources.selfsm_dir`), else a
+  VCF-only **CHARR** proxy (reference-read fraction at high-quality hom-alt SNV sites) **> 0.02**
+  (`qc.charr_threshold`). (Richer somalier ancestry/relatedness is a roadmap follow-on; CHARR: Lu
+  et al., AJHG 2023.)
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 
@@ -110,12 +113,18 @@ strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tier
 ### Cross-pedigree gene consolidation (recurrence across individuals)
 - Tally **distinct individuals** per gene by model: **dominant** (qualifying rare functional het),
   **biallelic** (hom / comp-het), **X-linked**; de novo counted separately (secondary).
-- **Calibrated recurrence null (primary signal):** observed carriers are tested against
-  `Binomial(N_trios, p)` where `p = 1 − Π_v (1 − faf95_v)²` over the gene's qualifying variants
-  (absent → floor `absent_faf95_floor`, default 1e-6) → a per-gene `p_recurrence`, BH `q`, and an
-  exome-wide flag (`p < 2.5e-6`). This makes 2 carriers of a *private* variant genome-wide
-  significant while 2 carriers of a common-ish one are not. *(Case-only approximation from
-  in-cohort variants; a gnomAD-derived per-gene cumulative-AF test — TRAPD/CoCoRV — is the upgrade.)*
+- **Calibrated recurrence null (primary signal):** observed carriers (≥ **min_carriers** — a lone
+  carrier is not recurrence) are tested against `Binomial(N_trios, p)` with a **model-appropriate**
+  per-individual carriage probability over the gene's qualifying variants (absent → floor
+  `absent_faf95_floor`, default 1e-6): **dominant het** `p = 1 − Π_v (1 − faf95_v)²` (the primary,
+  FDR-corrected headline); **biallelic** `p = (Σ_v faf95_v)²`; **X-linked male** `p = 1 − Π_v
+  (1 − faf95_v)` (hemizygous). A recessive/hemizygous carrier is **not** a ≥1-of-two-alleles event,
+  so it is never charged the dominant probability. → per-gene `p_recurrence` (+ `p_recurrence_biallelic`,
+  `p_recurrence_xlinked`), BH `q`, and an exome-wide flag (`p < burden.exome_wide_p`, default 2.5e-6).
+  `N_trios` is the **screened** population (passed explicitly; never inferred from the trios that
+  happened to have a call). This makes 2 carriers of a *private* variant genome-wide significant
+  while 2 carriers of a common-ish one are not. *(Case-only approximation from in-cohort variants; a
+  gnomAD-derived per-gene cumulative-AF test — TRAPD/CoCoRV — is the upgrade.)*
 - A gene is **recurrent** at ≥ **min_carriers** (default **2**) distinct individuals; rank
   recurrent-first, **then by `p_recurrence`**, then **weighted by constraint** (LOEUF / pLI /
   s_het / pHaplo — a recurrent het in a haploinsufficient gene is the most compelling).

@@ -91,9 +91,10 @@ def summarize(adir, out_md=None):
             lines.append(f"| {t} | {cg} | {cc} | {modes} |")
         lines.append("")
     lines += ["## Cross-pedigree gene burden",
-              f"- genes nominated: {g('06_burden','genes_nominated')}",
-              f"- exome-wide significant: {g('06_burden','genes_exome_wide_sig')}; "
-              f"FDR significant: {g('06_burden','genes_fdr_sig')}", ""]
+              f"- genes nominated: {g('06_burden','genes_nominated')}; "
+              f"recurrent: {g('06_burden','genes_recurrent')}",
+              f"- recurrence exome-wide significant: {g('06_burden','genes_recurrence_exome_wide_sig')}; "
+              f"FDR significant: {g('06_burden','genes_recurrence_fdr_sig')}", ""]
 
     text = "\n".join(lines)
     if out_md:

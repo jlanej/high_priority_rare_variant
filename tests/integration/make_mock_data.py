@@ -305,6 +305,8 @@ inputs:
   trios_file: {W}/trios.tsv
   vcf_dir: {W}/vcfs
   vcf_list: ""
+qc:
+  sex_min_sites: 2            # tiny mock has only a handful of chrX sites (prod default is 20)
 outputs:
   xlsx: true
   igv: {{enabled: true, padding: 200, genome: hg38}}

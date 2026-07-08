@@ -42,7 +42,49 @@ def mendelian_violation(gc, gd, gm) -> bool:
     return False
 
 
-def qc_trio(vcf_path, ped, thr, max_sites):
+def _pick_x_contig(seqnames):
+    for want in ("chrX", "X"):
+        if want in seqnames:
+            return want
+    return None
+
+
+def scan_sex(vcf_path, child_id, thr, max_x):
+    """chrX non-PAR het/hom counts in the child, as a DEDICATED pass.
+
+    chrX sorts after all autosomes, so an autosomal MIE cap in the main pass would
+    otherwise starve sex inference on WGS trios. Uses the index to jump straight to
+    chrX; falls back to a full scan (filtered to chrX) when the VCF is unindexed.
+    """
+    vcf = VCF(vcf_path)
+    ci = {s: i for i, s in enumerate(vcf.samples)}.get(child_id)
+    x = _pick_x_contig(vcf.seqnames)
+    if ci is None or x is None:
+        vcf.close()
+        return 0, 0
+    try:
+        it = vcf(x)                       # indexed region jump (preferred)
+    except Exception:
+        it = vcf                          # unindexed: full scan, filtered below
+    x_het = x_hom = 0
+    for v in it:
+        if v.CHROM.replace("chr", "") != "X" or G.in_par_x(v) or len(v.ALT) != 1:
+            continue
+        gq, dp = G.gq(v, ci), G.dp(v, ci)
+        if gq is None or gq < thr.min_gq or dp is None or dp < thr.min_dp:
+            continue
+        gt = v.gt_types[ci]
+        if gt == HET:
+            x_het += 1
+        elif gt == HOM_ALT:
+            x_hom += 1
+        if max_x and (x_het + x_hom) >= max_x:
+            break
+    vcf.close()
+    return x_het, x_hom
+
+
+def qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff=0.10, sex_min_sites=20):
     vcf = VCF(vcf_path)
     samples = {s: i for i, s in enumerate(vcf.samples)}
     for role in ("child", "father", "mother"):
@@ -51,23 +93,15 @@ def qc_trio(vcf_path, ped, thr, max_sites):
             return None
     c, d, m = samples[ped["child"]], samples[ped["father"]], samples[ped["mother"]]
 
+    # sex inference runs as its own chrX pass so the autosomal MIE cap can't disable it
+    x_het, x_hom = scan_sex(vcf_path, ped["child"], thr, max_x=(max_sites or 0))
+
     considered = errors = 0
-    x_het = x_hom = 0
     cref = {"kid": 0, "dad": 0, "mom": 0}   # CHARR: ref reads at hom-alt SNV sites
     cdp = {"kid": 0, "dad": 0, "mom": 0}    # CHARR: total (ref+alt) reads there
     for v in vcf:
         chrom = v.CHROM.replace("chr", "")
-        # sex inference from chrX non-PAR calls in the child
-        if chrom == "X" and not G.in_par_x(v) and len(v.ALT) == 1:
-            gt = v.gt_types[c]
-            gq = G.gq(v, c)
-            if gq is not None and gq >= thr.min_gq:
-                if gt == HET:
-                    x_het += 1
-                elif gt == HOM_ALT:
-                    x_hom += 1
-            continue
-        if chrom in ("Y", "MT", "M"):
+        if chrom in ("X", "Y", "MT", "M"):  # X counted in scan_sex; Y/MT out of scope
             continue
         if len(v.ALT) != 1:  # biallelic only for the simple MIE rule
             continue
@@ -98,12 +132,13 @@ def qc_trio(vcf_path, ped, thr, max_sites):
     mie_rate = (errors / considered) if considered else None
     x_total = x_het + x_hom
     x_het_ratio = (x_het / x_total) if x_total else None
+    # only call sex with enough informative chrX sites, else leave it unknown (fail-soft)
     inferred = None
-    if x_het_ratio is not None:
-        inferred = "1" if x_het_ratio < 0.10 else "2"  # male vs female
+    if x_total >= sex_min_sites and x_het_ratio is not None:
+        inferred = "1" if x_het_ratio < sex_cutoff else "2"  # male vs female
     return {
         "n_sites": considered, "mie_errors": errors, "mie_rate": mie_rate,
-        "x_het_ratio": x_het_ratio, "inferred_sex": inferred,
+        "x_sites": x_total, "x_het_ratio": x_het_ratio, "inferred_sex": inferred,
         "charr": {r: C.charr(cref[r], cdp[r]) for r in ("kid", "dad", "mom")},
     }
 
@@ -114,7 +149,8 @@ def main(argv=None) -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-sites", type=int, default=200000)
-    ap.add_argument("--mie-threshold", type=float, default=0.02)
+    ap.add_argument("--mie-threshold", type=float, default=None,
+                    help="override qc.mie_max from config")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -122,11 +158,15 @@ def main(argv=None) -> int:
     selfsm = C.read_selfsm(get(cfg, "resources.selfsm_dir", ""))   # verifyBamID FREEMIX (optional)
     freemix_thr = float(get(cfg, "qc.freemix_threshold", 0.05))
     charr_thr = float(get(cfg, "qc.charr_threshold", 0.02))
+    # thresholds are config defaults (canonical-defaults table), not hardcoded law
+    mie_thr = args.mie_threshold if args.mie_threshold is not None else float(get(cfg, "qc.mie_max", 0.02))
+    sex_cutoff = float(get(cfg, "qc.x_het_male_max", 0.10))
+    sex_min = int(get(cfg, "qc.sex_min_sites", 20))
 
     with open(args.manifest) as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
 
-    cols = ["trio_id", "n_sites", "mie_errors", "mie_rate", "x_het_ratio", "inferred_sex",
+    cols = ["trio_id", "n_sites", "mie_errors", "mie_rate", "x_sites", "x_het_ratio", "inferred_sex",
             "ped_sex", "sex_match", "mie_flag",
             "kid_contam", "dad_contam", "mom_contam", "contam_source", "contam_flag",
             "overall_pass"]
@@ -148,13 +188,13 @@ def main(argv=None) -> int:
             if not ped:
                 sys.stderr.write(f"WARN: no PED for {tid}; skipping QC\n")
                 continue
-            res = qc_trio(vcf_path, ped, thr, args.max_sites)
+            res = qc_trio(vcf_path, ped, thr, args.max_sites, sex_cutoff, sex_min)
             if res is None:
                 sys.stderr.write(f"WARN: {tid}: PED samples not in VCF; skipping\n")
                 continue
             ped_sex = str(ped["sex"])
             sex_match = "1" if (res["inferred_sex"] == ped_sex or res["inferred_sex"] is None) else "0"
-            mie_flag = "1" if (res["mie_rate"] is not None and res["mie_rate"] > args.mie_threshold) else "0"
+            mie_flag = "1" if (res["mie_rate"] is not None and res["mie_rate"] > mie_thr) else "0"
 
             contam, flags, src = {}, False, "charr"
             for role, key in (("kid", "child"), ("dad", "father"), ("mom", "mother")):
@@ -171,6 +211,7 @@ def main(argv=None) -> int:
             row = {
                 "trio_id": tid, "n_sites": res["n_sites"], "mie_errors": res["mie_errors"],
                 "mie_rate": ("" if res["mie_rate"] is None else f"{res['mie_rate']:.4g}"),
+                "x_sites": res["x_sites"],
                 "x_het_ratio": ("" if res["x_het_ratio"] is None else f"{res['x_het_ratio']:.3g}"),
                 "inferred_sex": res["inferred_sex"] or "", "ped_sex": ped_sex,
                 "sex_match": sex_match, "mie_flag": mie_flag,

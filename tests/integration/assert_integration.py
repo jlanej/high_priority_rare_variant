@@ -46,6 +46,9 @@ def main(argv=None) -> int:
     check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
     check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated")
     check(qc.get("CH_B", {}).get("contam_flag") == "0", "CH_B not flagged contaminated")
+    # Mendelian-error gate (sample-swap proxy): the de novo in CH_A is a Mendelian violation
+    check(int(qc.get("CH_A", {}).get("mie_errors") or 0) >= 1, "CH_A Mendelian error detected (de novo)")
+    check(qc.get("CH_A", {}).get("mie_flag") == "1", "CH_A MIE flag raised")
 
     # --- Step 3: plausible sites keep/drop ---
     plaus = {}

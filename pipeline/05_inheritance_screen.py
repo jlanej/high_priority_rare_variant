@@ -51,6 +51,8 @@ class Trio:
         self.c, self.d, self.m = idx[ped["child"]], idx[ped["father"]], idx[ped["mother"]]
         self.child_name = ped["child"]
         self.child_male = str(ped["sex"]) == "1"
+        # sex must be positively known (1/2) to apply ploidy-aware X/Y logic; unknown != female
+        self.sex_known = str(ped.get("sex")) in ("1", "2")
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
 
 
@@ -109,6 +111,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     for v in vcf:
         if require_pass and v.FILTER:  # cyvcf2 FILTER is None for PASS/'.'
             continue
+        # sex unresolved -> ploidy-aware X/Y logic cannot be applied; skip sex chromosomes
+        # rather than silently assume female (fail-soft; autosomal modes still run)
+        if not gt.sex_known and G.is_sex_nonpar(v):
+            continue
         # non-PAR chrY only exists in males; a female chrY non-PAR call is an artifact
         if G.is_y_nonpar(v) and not gt.child_male:
             continue
@@ -143,18 +149,28 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     r["review_prior_crosscheck"] = "1"
                 rows.append(r)
 
-        # ---- homozygous recessive (autosomal / X-female) ----
-        if not male_x and gc == G.HOM_ALT and gd == G.HET and gmm == G.HET:
+        # ---- autosomal homozygous recessive (both parents carrier hets) ----
+        if not male_x and not G.is_x_nonpar(v) and gc == G.HOM_ALT and gd == G.HET and gmm == G.HET:
             if (G.sample_qc(v, c, thr, "hom_alt")
                     and G.sample_qc(v, d, thr, "het")
                     and G.sample_qc(v, m, thr, "het")
                     and rare(v, rec_max)):
                 rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive"), v))
 
-        # ---- X-linked recessive (male hemizygous, carrier mother) ----
+        # ---- X-linked recessive, affected male (hemizygous, carrier mother) ----
         if male_x and gc == G.HOM_ALT and gmm == G.HET and gd == G.HOM_REF:
             if (G.sample_qc(v, c, thr, "hom_alt")
                     and G.sample_qc(v, m, thr, "het")
+                    and rare(v, rec_max)):
+                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
+
+        # ---- X-linked recessive, affected female: HOM_ALT daughter, carrier mother,
+        #      hemizygous-affected father (docs/inheritance_and_genotype_qc.md §3.4) ----
+        if (not male_x and G.is_x_nonpar(v) and gc == G.HOM_ALT
+                and gmm == G.HET and gd == G.HOM_ALT):
+            if (G.sample_qc(v, c, thr, "hom_alt")
+                    and G.sample_qc(v, m, thr, "het")
+                    and G.sample_qc(v, d, thr, "hom_alt")
                     and rare(v, rec_max)):
                 rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
 
@@ -171,7 +187,11 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 dad_ok = ((gd == G.HET and G.sample_qc(v, d, thr, "het"))
                           or (gd == G.HOM_ALT and G.sample_qc(v, d, thr, "hom_alt")))
                 if gmm == G.HOM_REF and gd == G.HOM_REF:
-                    origin = "denovo"            # de novo partner (de novo block QCs parents)
+                    # only a genuinely de novo het may pair in trans; require BOTH parents to
+                    # pass cleanliness QC, else a dropped-out parental het masquerades as de novo
+                    # and gets paired cis with a real variant from that same parent
+                    origin = ("denovo" if (G.sample_qc(v, m, thr, "clean_parent")
+                                           and G.sample_qc(v, d, thr, "clean_parent")) else None)
                 elif mom_carries and dad_carries:
                     origin = "both" if (mom_ok and dad_ok) else None
                 elif mom_carries:
@@ -246,9 +266,14 @@ def main(argv=None) -> int:
             sys.stderr.write(f"WARN: no usable PED for {trio_id} ({ped_path!r}); skipping\n")
             continue
         # If the generated PED has kid sex unknown, use Step 0's inferred sex so
-        # X-linked / hemizygous logic can fire correctly.
-        if str(ped.get("sex")) in ("0", "", "None") and trio_id in sex_map:
-            ped["sex"] = sex_map[trio_id]
+        # X-linked / hemizygous logic can fire correctly. If still unresolved, warn — Step 5
+        # will skip X/Y modes for this trio rather than silently assume female.
+        if str(ped.get("sex")) in ("0", "", "None"):
+            if trio_id in sex_map:
+                ped["sex"] = sex_map[trio_id]
+            else:
+                sys.stderr.write(f"WARN: {trio_id}: child sex unresolved (no Step-0 inference); "
+                                 f"X/Y-linked modes skipped for this trio (autosomal modes still run)\n")
         vcf = VCF(vcf_path)
         try:
             gt = Trio(vcf, ped, thr)
