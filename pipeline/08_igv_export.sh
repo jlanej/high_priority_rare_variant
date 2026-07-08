@@ -26,13 +26,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/common.sh"
 export PYTHONPATH="${PYTHONPATH:-}:${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src"
 
-WORK="" REF="${HPRV_REF_FASTA:-}" CRAM_MAP="${HPRV_CRAM_MAP:-}" PAD=1000
+WORK="" REF="${HPRV_REF_FASTA:-}" CRAM_MAP="${HPRV_CRAM_MAP:-}" PAD=1000 GENOME=hg38
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --work) WORK="$2"; shift 2;;
         --ref) REF="$2"; shift 2;;
         --cram-map) CRAM_MAP="$2"; shift 2;;
         --padding) PAD="$2"; shift 2;;
+        --genome) GENOME="$2"; shift 2;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
@@ -114,6 +115,7 @@ PY
 { printf '#kid\tmom\tdad\n'
   awk -F'\t' 'NR>1{split($4,s,","); if(s[1]!="") print s[1]"\t"s[3]"\t"s[2]}' "$resolved"; } > "$DATA/trios.tsv"
 [[ -f "$DATA/curation.json" ]] || echo '{}' > "$DATA/curation.json"
+printf '{"genome": "%s"}\n' "$GENOME" > "$DATA/config.json"   # server --genome hint
 
 audit 08_igv variants "$(($(grep -cve '^[[:space:]]*$' "$DATA/variants.tsv") - 1))"
 audit 08_igv minicrams "$n_extracted"

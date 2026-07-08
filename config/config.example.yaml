@@ -2,7 +2,11 @@
 # high_priority_rare_variant — EXAMPLE configuration
 #
 # Copy to config/config.yaml (git-ignored) and fill in the ${...} placeholders.
-# Every default threshold below matches docs/README.md#canonical-defaults.
+# Default values match docs/README.md#canonical-defaults. Keys marked "[reserved]"
+# specify the TARGET methodology (finer ACMG tiers, overlays, phenotype priors) and
+# are NOT yet consumed by the current screening/inheritance/recurrence code — they are
+# documented here so the intended full method is visible; do not assume they change
+# behavior until wired. See docs/README.md and CLAUDE.md "Open TODOs".
 #
 # PUBLIC-REPO RULE: this example contains NO real paths and NO identifiers. All
 # filesystem locations are ${ENV_VAR} placeholders resolved at runtime, so nothing
@@ -33,7 +37,8 @@ resources:
     cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
     version: 115
     plugins_dir: ${VEP_PLUGINS}   # dir holding LOFTEE, dbNSFP, SpliceAI, CADD plugin code
-    fasta: ${REF_FASTA}
+    # VEP is fed reference.fasta (above). To override the whole LOFTEE plugin string
+    # (data-file layout varies by build), export env HPRV_LOF_PLUGIN=<full --plugin arg>.
     cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
     cadd_indel: ${CADD_INDEL}     # gnomad indel CADD tsv.gz (+ .tbi)
     dbnsfp: ${DBNSFP}             # dbNSFP academic build (REVEL/AlphaMissense/MPC/CADD/...)
@@ -56,9 +61,9 @@ resources:
     revstat_tag: CLNREVSTAT
     sigconf_tag: CLNSIGCONF
   constraint:
-    gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF per gene (established v2.1.1)
-    shet: ${SHET_TABLE}                            # Zeng 2024 s_het per gene (short-gene rescue)
-  gene_lists:
+    # One per-gene TSV with LOEUF (oe_lof_upper) / pLI / s_het / phaplo columns (any subset).
+    gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF/s_het/pHaplo per gene
+  gene_lists:                     # [reserved] gene-list overlay not yet wired (planned)
     # All provided as simple gene-symbol lists / TSVs; version-pin and record below.
     acmg_sf: ${ACMG_SF_LIST}
     acmg_sf_version: "v3.3"
@@ -89,38 +94,38 @@ inputs:
 # --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
 filters:
   rarity:
-    field: grpmax_faf95           # NOT the point-estimate popmax AF
+    field: grpmax_faf95           # [reserved] descriptive; the field order (faf95 -> grpmax AF)
+                                  #   is fixed in annotations.frequency(), not driven by this key
     dominant_max: 1.0e-4          # dominant / de novo candidate
     recessive_max: 1.0e-2         # recessive / comp-het per-allele (permissive discovery)
-    recessive_strict: 1.0e-3      # high-confidence recessive tier
+    recessive_strict: 1.0e-3      # tags recessive/X-linked calls below this as high_conf_rarity
     benign_ba1: 0.05              # drop, never rescue (ClinGen BA1)
-    use_discordance_flag: true    # respect gnomAD v4.1 exome/genome discordance flag
+    use_discordance_flag: true    # [reserved] gnomAD v4.1 exome/genome discordance flag not yet consulted
 
   functional:
+    # Step-3 selection keeps a variant on ANY of: HIGH/MODERATE impact, LOFTEE HC-no-flags,
+    # or a single calibrated predictor over its *supporting* cutoff. The moderate/strong PP3
+    # and BP4 tiers below are [reserved] for a future ACMG evidence-strength / tiering step.
     keep_impacts: [HIGH, MODERATE]  # coarse VEP tier; splice handled separately below
-    loftee_require_hc: true         # HC-no-flag pLoF for PVS1-eligibility
-    # REVEL (primary missense predictor; Pejaver 2022 calibrated) — report ONE predictor
-    revel_pp3_supporting: 0.644
-    revel_pp3_moderate:   0.773
-    revel_pp3_strong:     0.932
-    revel_bp4_supporting: 0.290
-    revel_bp4_moderate:   0.183
-    # AlphaMissense (orthogonal support)
-    alphamissense_lp: 0.564
-    alphamissense_lb: 0.34
-    # SpliceAI (masked; Walker 2023 calibrated)
-    spliceai_pp3: 0.2             # supporting
-    spliceai_high: 0.5           # canonical-splice high tier
-    spliceai_bp4: 0.1
-    # regional / genome-wide fallbacks
-    mpc_strong: 2.0
-    cadd_phred_supporting: 20
+    loftee_require_hc: true         # require LOFTEE HC-no-flags for pLoF (PVS1-eligible) evidence
+    revel_pp3_supporting: 0.644     # active: keep threshold
+    revel_pp3_moderate:   0.773     # [reserved] tiering
+    revel_pp3_strong:     0.932     # [reserved] tiering
+    revel_bp4_supporting: 0.290     # [reserved] BP4 deprioritize (planned tiering step)
+    revel_bp4_moderate:   0.183     # [reserved] BP4
+    alphamissense_lp: 0.564         # active: keep threshold
+    alphamissense_lb: 0.34          # [reserved] BP4
+    spliceai_pp3: 0.2               # active: keep threshold (supporting)
+    spliceai_high: 0.5              # [reserved] canonical-splice high tier
+    spliceai_bp4: 0.1               # [reserved] BP4
+    mpc_strong: 2.0                 # active: keep threshold
+    cadd_phred_supporting: 25.3     # active: keep threshold (Pejaver-2022 PP3-supporting)
 
   clinvar:
-    auto_promote_min_stars: 2     # ≥2★, no conflicts → auto-tier
-    promote_sigs: ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]
-    flag_sigs: ["Conflicting_classifications_of_pathogenicity", "Uncertain_significance"]
-    exclude_zero_star_from_auto: true
+    auto_promote_min_stars: 2     # active: ClinVar P/LP override fires only at >= this star level
+    promote_sigs: ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]  # [reserved]
+    flag_sigs: ["Conflicting_classifications_of_pathogenicity", "Uncertain_significance"]  # [reserved]
+    exclude_zero_star_from_auto: true   # [reserved] (0★ already excluded implicitly by the >=2★ gate)
 
   genotype_qc:                    # applied to the REFINED (PP-derived) genotypes
     min_gq: 20
@@ -141,13 +146,15 @@ filters:
     require_gnomad_absent_or_singleton: true
     crosscheck_prerefinement_pl: true   # guard the gnomAD-prior suppression failure mode
 
-  constraint_weighting:           # RANKING WEIGHTS — never exclusion filters
-    loeuf_v2_tier1: 0.35
-    loeuf_v4_tier1: 0.60          # v4 flagged experimental; v2 preferred
-    pli_min: 0.90
-    shet_min: 0.10                # prefer for short genes where LOEUF is underpowered
-    phaplo_min: 0.86
-    downweight_recessive_by_lof_constraint: false   # never do this
+  constraint_weighting:           # RANKING WEIGHTS — never exclusion filters. A gene is
+                                  # "constrained" (Step 6) if ANY of LOEUF_v2/pLI/s_het/pHaplo
+                                  # crosses its cutoff (columns read from the constraint TSV).
+    loeuf_v2_tier1: 0.35          # active
+    loeuf_v4_tier1: 0.60          # [reserved] v4 LOEUF path not yet wired (v2 preferred)
+    pli_min: 0.90                 # active
+    shet_min: 0.10                # active (Zeng 2024 s_het, esp. for short genes)
+    phaplo_min: 0.86              # active (Collins 2022 pHaplo)
+    downweight_recessive_by_lof_constraint: false   # [reserved] per-model down-weighting not implemented
 
 # --- Inheritance modes (Step 5). Focus = INHERITED germline variation. ---
 inheritance:
@@ -167,11 +174,13 @@ burden:
   weight_by_constraint: true      # rank recurrent+constrained genes highest
   # OPTIONAL secondary signals (reported, not the primary rank):
   denovo_enrichment: true         # Samocha per-gene Poisson if a mutation_rate_table is given
-  corroborative_trapd: false      # vs ancestry/coverage-matched gnomAD (not yet implemented)
+  corroborative_trapd: false      # [reserved] TRAPD vs matched gnomAD not yet implemented
   exome_wide_p: 2.5e-6            # threshold for the secondary de novo enrichment p-value
   fdr_q: 0.05
 
-# --- Pediatric-cancer overlay & phenotype priors (tiers/priors, never hard filters) ---
+# --- [reserved] Pediatric-cancer overlay & phenotype priors — NOT yet wired.
+#     These specify the planned overlay/phenotype layer (see CLAUDE.md Open TODOs);
+#     no code reads them today. ---
 overlays:
   pediatric_cancer:
     enabled: true

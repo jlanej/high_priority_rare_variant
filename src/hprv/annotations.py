@@ -121,12 +121,15 @@ def nhomalt(variant) -> Optional[float]:
 
 
 def frequency(variant) -> Optional[float]:
-    """Preferred rarity field: faf95, falling back to grpmax AF, then global AF."""
+    """Rarity field = grpmax faf95, falling back to grpmax AF only. Returns None if
+    neither is present (None => 'not seen in gnomAD' => rarest). Global AF is NEVER
+    used as a filter field (it dilutes ancestry-enriched variants); see
+    docs/allele_frequency.md."""
     for fn in (faf95, grpmax_af):
         v = fn(variant)
         if v is not None:
             return v
-    return _max_float(variant, "gnomad_af")
+    return None
 
 
 # --- functional predictors ---------------------------------------------------

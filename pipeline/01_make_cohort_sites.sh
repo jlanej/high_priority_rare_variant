@@ -107,7 +107,7 @@ for row in "${rows[@]}"; do
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     else
-        bcftools view -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+        bcftools view -f "$FILTER" --min-ac 1 --threads "$THREADS" -Ou "$vcf" \
             | bcftools norm -m- -f "$REF" -c s -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -

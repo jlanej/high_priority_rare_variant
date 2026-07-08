@@ -87,10 +87,19 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     # dominant model — recurrent inherited rare functional hets — is the new emphasis.
     emit_denovo = bool(get(cfg, "inheritance.emit_denovo", True))
     emit_dominant = bool(get(cfg, "inheritance.emit_dominant", True))
+    require_pass = bool(get(cfg, "filters.genotype_qc.require_pass", True))
+    rec_strict = float(get(cfg, "filters.rarity.recessive_strict", 1e-3))
 
     def rare(v, limit):
         fr = A.frequency(v)
         return fr is None or fr < limit
+
+    def tag_strict(r, v):
+        """Flag a recessive/X-linked call whose faf95 is below the high-confidence tier."""
+        fr = A.faf95(v)
+        if fr is not None and fr < rec_strict:
+            r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "high_conf_rarity"
+        return r
 
     rows = []
     # gene -> list of (origin, variant, key); origin in {mat, pat, both, denovo}.
@@ -98,12 +107,16 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     hets = {}
 
     for v in vcf:
+        if require_pass and v.FILTER:  # cyvcf2 FILTER is None for PASS/'.'
+            continue
+        # non-PAR chrY only exists in males; a female chrY non-PAR call is an artifact
+        if G.is_y_nonpar(v) and not gt.child_male:
+            continue
         c, d, m = gt.c, gt.d, gt.m
         gc, gd, gmm = v.gt_types[c], v.gt_types[d], v.gt_types[m]
-        xnonpar = G.is_x_nonpar(v)
 
-        # --- male non-PAR X het is a QC red flag: do not call het modes there ---
-        male_x = xnonpar and gt.child_male
+        # male non-PAR chrX/chrY = hemizygous; a het call there is a QC red flag
+        male_x = G.is_sex_nonpar(v) and gt.child_male
 
         # ---- de novo (SECONDARY / cross-reference only; review handled elsewhere) ----
         denovo_hit = False
@@ -117,6 +130,8 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                   and G.sample_qc(v, d, thr, "clean_parent")
                   and G.sample_qc(v, m, thr, "clean_parent")
                   and rare(v, dom_max))
+            if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
+                ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
             nh = A.nhomalt(v)
             if require_absent and nh is not None and nh > 1:
                 ok = False
@@ -134,31 +149,40 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     and G.sample_qc(v, d, thr, "het")
                     and G.sample_qc(v, m, thr, "het")
                     and rare(v, rec_max)):
-                rows.append(base_row(trio_id, v, gt, "hom_recessive"))
+                rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive"), v))
 
         # ---- X-linked recessive (male hemizygous, carrier mother) ----
         if male_x and gc == G.HOM_ALT and gmm == G.HET and gd == G.HOM_REF:
             if (G.sample_qc(v, c, thr, "hom_alt")
                     and G.sample_qc(v, m, thr, "het")
                     and rare(v, rec_max)):
-                rows.append(base_row(trio_id, v, gt, "x_linked_recessive"))
+                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
 
         # ---- collect het candidates (het child, rare, parent-of-origin) ----
+        #      The transmitting parent must be a QC-confident carrier (documented rule),
+        #      so dominant and compound-het calls require parent genotype QC, not just child.
         if not male_x and gc == G.HET and G.sample_qc(v, c, thr, "het") and rare(v, rec_max):
             gene = A._str(v, "gene") or A.symbol(v)
             if gene:
-                mom_c = gmm in (G.HET, G.HOM_ALT)
-                dad_c = gd in (G.HET, G.HOM_ALT)
-                if not mom_c and not dad_c:
-                    origin = "denovo"
-                elif mom_c and dad_c:
-                    origin = "both"
-                elif mom_c:
-                    origin = "mat"
+                mom_carries = gmm in (G.HET, G.HOM_ALT)
+                dad_carries = gd in (G.HET, G.HOM_ALT)
+                mom_ok = ((gmm == G.HET and G.sample_qc(v, m, thr, "het"))
+                          or (gmm == G.HOM_ALT and G.sample_qc(v, m, thr, "hom_alt")))
+                dad_ok = ((gd == G.HET and G.sample_qc(v, d, thr, "het"))
+                          or (gd == G.HOM_ALT and G.sample_qc(v, d, thr, "hom_alt")))
+                if gmm == G.HOM_REF and gd == G.HOM_REF:
+                    origin = "denovo"            # de novo partner (de novo block QCs parents)
+                elif mom_carries and dad_carries:
+                    origin = "both" if (mom_ok and dad_ok) else None
+                elif mom_carries:
+                    origin = "mat" if mom_ok else None
+                elif dad_carries:
+                    origin = "pat" if dad_ok else None
                 else:
-                    origin = "pat"
-                key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
-                hets.setdefault(gene, []).append((origin, v, key))
+                    origin = None                # a parent no-call — inheritance unestablished
+                if origin:
+                    key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
+                    hets.setdefault(gene, []).append((origin, v, key))
 
     # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
     consumed = set()
@@ -175,7 +199,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             consumed.add(ka)
             consumed.add(kb)
             for v in (va, vb):
-                rows.append(base_row(trio_id, v, gt, "compound_het", pid))
+                rows.append(tag_strict(base_row(trio_id, v, gt, "compound_het", pid), v))
 
     # ---- dominant (inherited het): rare, functional, transmitted from >=1 parent,
     #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----

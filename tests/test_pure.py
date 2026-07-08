@@ -145,10 +145,14 @@ def test_step3_classifier():
     assert classify(FakeVar({"vep_IMPACT": "HIGH"})) == (True, "impact_high")
     # rare + LOFTEE HC -> kept
     assert classify(FakeVar({"vep_LoF": "HC"})) == (True, "loftee_hc")
-    # ClinVar P/LP overrides missing function (>=1 star)
+    # ClinVar P/LP overrides missing function only at >= 2 stars
     keep, why = classify(FakeVar({"hprv_clnsig": "Pathogenic",
-                                  "hprv_clnrevstat": "criteria_provided,_single_submitter"}))
+                                  "hprv_clnrevstat": "criteria_provided,_multiple_submitters,_no_conflicts"}))
     assert keep and why == "clinvar_plp"
+    # a 1-star P/LP does NOT auto-override (single submitter)
+    k1, _ = classify(FakeVar({"hprv_clnsig": "Pathogenic",
+                              "hprv_clnrevstat": "criteria_provided,_single_submitter"}))
+    assert not k1
     # rare but non-functional -> dropped
     assert classify(FakeVar({"vep_IMPACT": "MODIFIER"})) == (False, "not_functional")
     # too common for permissive recessive gate, no P/LP -> dropped

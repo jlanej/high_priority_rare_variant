@@ -41,12 +41,13 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 - Filter field = **grpmax `faf95`** (filtering allele frequency, 95% CI lower bound), *not* the
   point-estimate popmax AF. Fall back to grpmax AF only when `faf95` is unavailable.
 - **Never** use internal cohort AC/AN as population frequency; internal recurrence is valid only
-  as an artifact/blocklist signal. Heed the v4.1 exome/genome **discordance flag**.
+  as an artifact/blocklist signal. *(Target: also heed the v4.1 exome/genome **discordance flag** —
+  not yet consulted by code.)*
 
 ### Rarity gates (grpmax `faf95`) — a screening gate, distinct from the ACMG **PM2** criterion
 | Mode | Keep candidate if `faf95` < | Notes |
 |------|----------------------------|-------|
-| Dominant / de novo | **1e-4** | de novo additionally requires absent-or-singleton in gnomAD, low `nhomalt` |
+| Dominant / de novo | **1e-4** | de novo additionally requires low `nhomalt` (≤ 1); an AC-based absent-or-singleton test is a target refinement |
 | Recessive / comp-het | **1e-2** per allele (permissive); **1e-3** high-confidence tier | applied per variant, not per gene |
 | Benign, all modes | drop if `faf95` ≥ **0.05** (ClinGen BA1) | never rescue |
 
@@ -60,7 +61,11 @@ PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity
 | Missense (orthogonal **AlphaMissense**) | likely_pathogenic ≥ 0.564; ambiguous 0.34–0.564; likely_benign ≤ 0.34 |
 | Splicing (**SpliceAI** masked, Walker-2023) | PP3 Δ ≥ 0.2; BP4 Δ ≤ 0.1; 0.1–0.2 uninformative; canonical ±1,2 with Δ ≥ 0.5 = high tier |
 | Regional missense | MPC ≥ 2 up-weights; missense Z > 3.09 gene-level support |
-| Benign deprioritize (BP4) | REVEL ≤ 0.183 **and** AlphaMissense ≤ 0.34 **and** SpliceAI Δ ≤ 0.1 |
+| Benign deprioritize (BP4) *(target — planned tiering step, not applied at the Step-3 screen)* | REVEL ≤ 0.183 **and** AlphaMissense ≤ 0.34 **and** SpliceAI Δ ≤ 0.1 |
+
+*Note: Step-3 selection is a permissive keep/drop screen that keeps on the **supporting** cutoff of
+one predictor (or HIGH/MODERATE impact, LOFTEE HC-no-flags, or ClinVar P/LP ≥ 2★). The moderate/
+strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tiering step**.*
 
 ### Clinical evidence
 - **ClinVar**: pin a dated release; auto-promote **P/LP at ≥ 2★** (no conflicts); 1★ → prioritize

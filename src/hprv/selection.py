@@ -28,14 +28,17 @@ def build_classifier(cfg):
     revel_sup = _f(cfg, "filters.functional.revel_pp3_supporting", 0.644)
     am_lp = _f(cfg, "filters.functional.alphamissense_lp", 0.564)
     spliceai_pp3 = _f(cfg, "filters.functional.spliceai_pp3", 0.2)
-    cadd_sup = _f(cfg, "filters.functional.cadd_phred_supporting", 20.0)
+    cadd_sup = _f(cfg, "filters.functional.cadd_phred_supporting", 25.3)  # Pejaver PP3-supporting
     mpc_strong = _f(cfg, "filters.functional.mpc_strong", 2.0)
     keep_impacts = set(get(cfg, "filters.functional.keep_impacts", ["HIGH", "MODERATE"]))
+    loftee_require_hc = bool(get(cfg, "filters.functional.loftee_require_hc", True))
+    clinvar_min_stars = int(get(cfg, "filters.clinvar.auto_promote_min_stars", 2))
 
     def functional_reason(v):
         if (A.impact(v) or "") in keep_impacts:
             return "impact_" + (A.impact(v) or "").lower()
-        if A.is_loftee_hc(v):
+        # PVS1-eligible pLoF = LOFTEE HC with NO flags (Abou-Tayoun/gnomAD guidance)
+        if loftee_require_hc and A.is_loftee_hc(v) and not A.loftee_flags(v):
             return "loftee_hc"
         for name, val, thr in (
             ("spliceai", A.spliceai_max(v), spliceai_pp3),
@@ -52,7 +55,8 @@ def build_classifier(cfg):
         fr = A.frequency(v)
         if fr is not None and fr >= ba1:            # ClinGen BA1 — never rescue
             return False, "ba1"
-        plp = A.clnsig_is_plp(v) and A.clinvar_stars(v) >= 1
+        # ClinVar P/LP override auto-promotes only at >= auto_promote_min_stars (default 2)
+        plp = A.clnsig_is_plp(v) and A.clinvar_stars(v) >= clinvar_min_stars
         rarity_ok = (fr is None) or (fr < rec_max) or plp
         if not rarity_ok:
             return False, "too_common"

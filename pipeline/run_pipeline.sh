@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline.sh  —  end-to-end orchestrator (resolve + Steps 0-6)
+# run_pipeline.sh  —  end-to-end orchestrator (resolve + Steps 0-8)
 #
 # Runs the whole screen from a single config. Designed to run INSIDE the container
 # (tools + python env native on PATH):
@@ -121,7 +121,8 @@ fi
 if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     log "== Step 8: igv.js variant-review export =="
     pad="$(cfg_get outputs.igv.padding 1000)"
-    ig=(--work "$W" --ref "$HPRV_REF_FASTA" --padding "$pad")
+    gen="$(cfg_get outputs.igv.genome hg38)"
+    ig=(--work "$W" --ref "$HPRV_REF_FASTA" --padding "$pad" --genome "$gen")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
     bash "$HERE/08_igv_export.sh" "${ig[@]}"

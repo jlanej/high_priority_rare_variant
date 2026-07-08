@@ -12,8 +12,9 @@ from dataclasses import dataclass
 # cyvcf2 gt_types encoding
 HOM_REF, HET, UNKNOWN, HOM_ALT = 0, 1, 2, 3
 
-# GRCh38 pseudoautosomal regions on chrX (standard genome coordinates).
+# GRCh38 pseudoautosomal regions (standard genome coordinates).
 PAR_X = ((10001, 2781479), (155701383, 156030895))
+PAR_Y = ((10001, 2781479), (56887903, 57217415))
 
 
 @dataclass
@@ -89,6 +90,19 @@ def in_par_x(v) -> bool:
 
 def is_x_nonpar(v) -> bool:
     return v.CHROM.replace("chr", "") == "X" and not in_par_x(v)
+
+
+def in_par_y(v) -> bool:
+    return v.CHROM.replace("chr", "") == "Y" and any(lo <= v.POS <= hi for lo, hi in PAR_Y)
+
+
+def is_y_nonpar(v) -> bool:
+    return v.CHROM.replace("chr", "") == "Y" and not in_par_y(v)
+
+
+def is_sex_nonpar(v) -> bool:
+    """Non-PAR chrX or chrY — hemizygous in males; het calls there are a QC red flag."""
+    return is_x_nonpar(v) or is_y_nonpar(v)
 
 
 def sample_qc(v, i, thr: GtThresholds, kind: str) -> bool:

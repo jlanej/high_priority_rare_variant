@@ -128,7 +128,7 @@ De novo is **not** the driver of this pipeline: dedicated bespoke machinery hand
 - **Genotypes:** child `0/1`, mother `0/0`, father `0/0` (autosomal); hemizygous de novo on male chrX is `0 → 1` (see [X-linked](#34-x-linked--hemizygous)).
 - **Detection:** GATK `hiConfDeNovo` present (all three trio-member GQ ≥ 20), with **child membership** verified via `annotations.is_hiconf_denovo_for` (confirming the tag applies to *this* child). Use `loConfDeNovo` (child GQ ≥ 10) only as a lower-sensitivity tier.
 - **Re-verify (the tool does not):** child **DP ≥ 20**, het **AB 0.25–0.75**, all three GQ ≥ 20, and **parental cleanliness** — each parent alt AD ≤ 1 with DP ≥ 10 (a parental alt fraction of a few percent suggests inherited or parental mosaicism, not de novo).
-- **Rarity:** external gnomAD grpmax **faf95 < 1e-4**, plus **absent-or-singleton** in gnomAD and low `nhomalt`.
+- **Rarity:** external gnomAD grpmax **faf95 < 1e-4** and low `nhomalt` (≤ 1, enforced). *(An AC-based **absent-or-singleton** test is a target refinement, not yet enforced — de novo is secondary here.)*
 - **ACMG evidence:** PS2 (confirmed de novo) / PM6 (assumed de novo) are scored by the **ClinGen SVI point system**. See [clinical_classification.md](clinical_classification.md).
 - **Enrichment (optional secondary):** de novo Poisson enrichment vs the Samocha mutation model (denovolyzeR-style; exome-wide P < 2.5e-6, BH q < 0.05) is reported only when a mutation-rate table is supplied ([gene_burden.md](gene_burden.md)).
 

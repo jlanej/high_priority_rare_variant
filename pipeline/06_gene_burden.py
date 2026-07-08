@@ -119,6 +119,10 @@ def main(argv=None) -> int:
     fdr_q = float(get(cfg, "burden.fdr_q", 0.05))
     loeuf_tol = float(get(cfg, "filters.constraint_weighting.loeuf_v2_tier1", 0.35))
     pli_min = float(get(cfg, "filters.constraint_weighting.pli_min", 0.9))
+    shet_min = float(get(cfg, "filters.constraint_weighting.shet_min", 0.10))
+    phaplo_min = float(get(cfg, "filters.constraint_weighting.phaplo_min", 0.86))
+    weight_by_constraint = bool(get(cfg, "burden.weight_by_constraint", True))
+    do_enrich = bool(get(cfg, "burden.denovo_enrichment", True))
 
     # --- aggregate distinct individuals per gene, by model ---
     genes, trios = {}, set()
@@ -157,12 +161,15 @@ def main(argv=None) -> int:
     loeuf_c = _find(ccols, "oe_lof_upper", "loeuf", "loeuf_v2")
     pli_c = _find(ccols, "pli", "pli_v2")
     shet_c = _find(ccols, "s_het", "shet")
+    phaplo_c = _find(ccols, "phaplo", "phaplo_score")
 
-    can_enrich = bool(mut) and poisson is not None and n_trios > 0
+    can_enrich = do_enrich and bool(mut) and poisson is not None and n_trios > 0
 
     rows = []
     for gene, g in genes.items():
-        n_carriers = len(g["all"])
+        # Recurrence counts INHERITED models only (dominant het / biallelic / X-linked);
+        # de novo is tracked separately (n_denovo) and never drives the recurrence flag.
+        n_carriers = len(g["dom"] | g["bi"] | g["x"])
         # optional SECONDARY de novo Poisson enrichment
         p_enrich = exp = None
         if can_enrich and gene in mut:
@@ -173,13 +180,17 @@ def main(argv=None) -> int:
             obs = g["denovo_lof"] + g["denovo_mis"]
             if exp > 0:
                 p_enrich = float(poisson.sf(obs - 1, exp))
-        loeuf = pli = shet = None
+        loeuf = pli = shet = phaplo = None
         if gene in con:
             crow = con[gene]
             loeuf = _num(crow.get(loeuf_c)) if loeuf_c else None
             pli = _num(crow.get(pli_c)) if pli_c else None
             shet = _num(crow.get(shet_c)) if shet_c else None
-        constrained = (loeuf is not None and loeuf < loeuf_tol) or (pli is not None and pli >= pli_min)
+            phaplo = _num(crow.get(phaplo_c)) if phaplo_c else None
+        constrained = ((loeuf is not None and loeuf < loeuf_tol)
+                       or (pli is not None and pli >= pli_min)
+                       or (shet is not None and shet >= shet_min)
+                       or (phaplo is not None and phaplo >= phaplo_min))
         modes = []
         if g["dom"]:
             modes.append(f"dominant={len(g['dom'])}")
@@ -193,7 +204,8 @@ def main(argv=None) -> int:
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
             "recurrent": "1" if n_carriers >= min_carriers else "0",
-            "loeuf": loeuf, "pli": pli, "s_het": shet, "constrained": "1" if constrained else "0",
+            "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
+            "constrained": "1" if constrained else "0",
             "dn_exp": (f"{exp:.4g}" if exp is not None else ""), "dn_p_enrich": p_enrich,
             "modes": ";".join(modes),
         })
@@ -206,14 +218,15 @@ def main(argv=None) -> int:
     # Rank: recurrent genes first, then constrained, then by carrier/dominant counts,
     # then (secondary) de novo enrichment.
     def rank_key(r):
-        return (r["recurrent"] != "1", r["constrained"] != "1", -r["n_carriers"],
+        con_key = (r["constrained"] != "1") if weight_by_constraint else 0
+        return (r["recurrent"] != "1", con_key, -r["n_carriers"],
                 -r["n_dominant"], -r["n_biallelic"],
                 r["dn_p_enrich"] if r["dn_p_enrich"] is not None else 1.0)
     rows.sort(key=rank_key)
 
     out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
-                "recurrent", "loeuf", "pli", "s_het", "constrained", "dn_exp", "dn_p_enrich",
-                "dn_q_enrich", "dn_exome_wide_sig", "modes"]
+                "recurrent", "loeuf", "pli", "s_het", "phaplo", "constrained", "dn_exp",
+                "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
     with open(args.out, "w") as out:
         out.write("\t".join(out_cols) + "\n")
         for r in rows:

@@ -68,7 +68,6 @@ SH_MAP = {
     "HPRV_VEP_CACHE": "resources.vep.cache_dir",
     "HPRV_VEP_VERSION": "resources.vep.version",
     "HPRV_VEP_PLUGINS": "resources.vep.plugins_dir",
-    "HPRV_VEP_FASTA": "resources.vep.fasta",
     "HPRV_CADD_SNV": "resources.vep.cadd_snv",
     "HPRV_CADD_INDEL": "resources.vep.cadd_indel",
     "HPRV_DBNSFP": "resources.vep.dbnsfp",

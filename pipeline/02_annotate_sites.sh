@@ -6,7 +6,7 @@
 # expensive VEP pass runs once over distinct sites rather than per trio. See
 # docs/functional_annotation.md and docs/pipeline_design.md (Step 2).
 #
-# Pipeline: (optional contig reheader) -> VEP (cache + plugins) -> bcftools
+# Pipeline: VEP (cache + plugins) -> bcftools
 #           +split-vep (lift key fields to INFO) -> transfer gnomAD faf95/AF and
 #           ClinVar CLNSIG/CLNREVSTAT from external sites VCFs.
 #
