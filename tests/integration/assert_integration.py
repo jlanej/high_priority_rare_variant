@@ -39,9 +39,13 @@ def main(argv=None) -> int:
     manifest = rows(os.path.join(W, "trios.resolved.tsv"))
     check(len(manifest) == 2, f"2 trios in resolved manifest (got {len(manifest)})")
 
-    # --- Step 0: CH_B inferred male ---
+    # --- Step 0: CH_B inferred male + contamination gate ---
     qc = {r["trio_id"]: r for r in rows(os.path.join(W, "qc_report.tsv"))}
     check(qc.get("CH_B", {}).get("inferred_sex") == "1", "CH_B inferred male (chrX)")
+    # no selfSM configured -> VCF-only CHARR fallback; mock hom-alt AD is 0 ref -> ~0, unflagged
+    check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
+    check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated")
+    check(qc.get("CH_B", {}).get("contam_flag") == "0", "CH_B not flagged contaminated")
 
     # --- Step 3: plausible sites keep/drop ---
     plaus = {}

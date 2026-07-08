@@ -149,9 +149,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 ## Open TODOs
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the prioritized, dependency-ordered gap list from the
-SOTA review. Quick wins to do first: calibrated recurrence null + FDR, somalier ancestry/relatedness,
-CHARR contamination, PP1/BS4 co-segregation, UTRannotator, UPD rescue, conda-lock. Big bets:
-germline CNV (GATK-gCNV), phenotype ranker (Exomiser), read-backed/population phasing, ROH.
+SOTA review. Done: calibrated recurrence null + FDR (Step 6), CHARR/freemix contamination gate
+(Step 0). Quick wins still open: somalier ancestry/relatedness, PP1/BS4 co-segregation,
+UTRannotator, UPD rescue, conda-lock. Big bets: germline CNV (GATK-gCNV), phenotype ranker
+(Exomiser), read-backed/population phasing, ROH.
 
 Lower-level items:
 

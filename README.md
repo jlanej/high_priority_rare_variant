@@ -28,7 +28,7 @@ for the vetted design and the artifact each step produces):
 | Step | What | Output |
 |------|------|--------|
 | resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
-| 0 | Per-trio QC gate (Mendelian error + sex) | `qc_report.tsv` |
+| 0 | Per-trio QC gate (Mendelian error + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
 | 2 | Annotate the union **once** (VEP + LOFTEE + dbNSFP + SpliceAI + gnomAD faf95 + ClinVar) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
