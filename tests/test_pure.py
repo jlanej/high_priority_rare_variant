@@ -159,6 +159,23 @@ def test_step3_classifier():
     assert classify(FakeVar({"hprv_gnomad_faf95": "0.02", "vep_IMPACT": "HIGH"})) == (False, "too_common")
 
 
+def test_contamination():
+    import tempfile
+    from hprv import contamination as C
+    assert C.charr(0, 40) == 0.0                       # clean hom-alt: no ref reads
+    assert abs(C.charr(4, 100) - 0.04) < 1e-9          # 4% ref reads = contamination proxy
+    assert C.charr(0, 0) is None
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "s.selfSM"), "w") as fh:
+        fh.write("#SEQ_ID\tRG\tCHIP_ID\t#SNPS\t#READS\tAVG_DP\tFREEMIX\tX\n")
+        fh.write("SAMP1\tALL\tNA\t1000\t50000\t30\t0.031\tx\n")
+    fm = C.read_selfsm(d)
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+    assert abs(fm.get("SAMP1", 0) - 0.031) < 1e-9
+    assert C.read_selfsm("/no/such/dir") == {}
+
+
 def _load_gb():
     spec = importlib.util.spec_from_file_location(
         "gb", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))

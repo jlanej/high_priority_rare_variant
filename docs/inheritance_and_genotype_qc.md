@@ -81,6 +81,7 @@ These gates apply to every inheritance mode. AB (allele balance) is computed fro
 
 - **Peddy** confirms reported vs. genotype-inferred sex (chrX heterozygosity) and pedigree relatedness via IBS0 / Rel; parent–child pairs should show **IBS0 ≈ 0** and **relatedness ≈ 0.5**. Elevated IBS0 signals a sample swap or mislabeled trio → block downstream inheritance logic. Kids First runs Peddy explicitly.
 - **Genome-wide Mendelian-error rate < 2%** is the concordance backstop: higher signals a bad trio/swap; localized MIE clusters flag CNV/UPD.
+- **Contamination gate.** kid/dad/mom roles are already peddy-verified upstream, so Step 0's job is to catch the *less-curated* trios. It flags a trio if any member is contaminated: **verifyBamID2 `FREEMIX` > 0.05** when a directory of `*.selfSM` files is supplied (`resources.selfsm_dir`; this mirrors the group's DNM freemix QC), otherwise a **VCF-only CHARR** proxy — the reference-allele read fraction at high-quality homozygous-ALT SNV sites, thresholded at **> 0.02**. An uncontaminated sample sits near 0 (sequencing error + reference bias); cross-sample contamination injects reference reads at hom-alt sites and raises it. This matters because 1–3% contamination turns hom-ref → apparent-het, manufacturing false inherited hets / comp-het second hits. (CHARR: Lu et al., *Am J Hum Genet* 2023, [PMC10716339](https://pmc.ncbi.nlm.nih.gov/articles/PMC10716339/).)
 
 > **Known failure mode (gnomAD-prior suppression).** Because `CalculateGenotypePosteriors` folds a population prior into every genotype, a genuinely rare/private pathogenic variant can be *pushed toward hom-ref* by a low-AF prior, suppressing a real finding. For candidate high-priority variants, **cross-check the pre-refinement PL/GT** to ensure refinement did not down-weight a true rare call.
 
@@ -153,7 +154,8 @@ De novo is **not** the driver of this pipeline: dedicated bespoke machinery hand
 | **GATK** CalculateGenotypePosteriors / VariantFiltration / PossibleDeNovo | Source of PP/GQ and `hiConfDeNovo`/`loConfDeNovo` | Already upstream; reuse these annotations — provenance-clean. GATK 4.6.2.0 (2025-04-13). |
 | **slivar** (v0.3.4) | Core segregation engine | JS-expression filtering with built-in dominant/inherited-het, recessive/hom-alt, `comphet`, `x_denovo`, and `denovo` helpers driven by a PED file. Parent-of-origin for inherited hets comes from the trio genotypes. Single static binary → trivially containerizable. Pinned in [tooling_and_reproducibility.md](tooling_and_reproducibility.md). |
 | **WhatsHap** | Read-based + pedigree phasing | For compound-het trans resolution when reads span both variants. |
-| **Peddy** | Sex + relatedness + Mendelian-error QC | IBS0/Rel checks; run before inheritance logic. |
+| **Peddy** | Sex + relatedness + Mendelian-error QC | IBS0/Rel checks; run before inheritance logic. Upstream source of the kid/dad/mom role assignments. |
+| **verifyBamID2 / CHARR** | Per-sample contamination | Step 0 gate: ingest verifyBamID `FREEMIX` (`*.selfSM`) if available, else a VCF-only CHARR estimate from AD at hom-alt sites. |
 | **UPDhmm** | Per-chromosome UPD detection | HMM on the trio VCF. |
 | **cyvcf2 / pysam / bcftools** | Custom QC gates & edge cases | Hemizygous handling, parental-mosaicism thresholds, de novo QC (AB/DP), gene-list joins — trivial to tune where slivar's canned expressions don't expose the knob. |
 | **TrioDeNovo** (v0.06) | Optional orthogonal DNM caller | Stale (C++, ~2015); use only for a second-caller consensus on high-stakes DNMs. |

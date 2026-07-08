@@ -90,7 +90,12 @@ strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tier
   het calls; kid sex inferred from chrX heterozygosity when the PED is unknown.
 - **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
   machinery): `hiConfDeNovo` (child-membership checked) → re-verify DP/AB + parental cleanliness.
-- **Sample QC**: Peddy/somalier (sex, relatedness); Mendelian-error < 2%.
+- **Sample QC (Step 0)**: trio kid/dad/mom roles come from upstream **peddy**; Step 0 guards the
+  less-curated trios via genome-wide **Mendelian-error < 2%**, chrX-inferred sex vs. PED, and a
+  **contamination** gate — verifyBamID **FREEMIX > 0.05** if a `*.selfSM` directory is supplied
+  (`resources.selfsm_dir`), else a VCF-only **CHARR** proxy (reference-read fraction at
+  high-quality hom-alt SNV sites) **> 0.02**. (Richer somalier ancestry/relatedness is a roadmap
+  follow-on; CHARR: Lu et al., AJHG 2023.)
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 

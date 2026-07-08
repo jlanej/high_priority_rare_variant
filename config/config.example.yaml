@@ -76,6 +76,9 @@ resources:
   # Mini-CRAMs are sliced around candidate loci for each trio member. Optional —
   # without it, variants.tsv is still produced (no alignment tracks).
   cram_map: ${CRAM_MAP}
+  # Optional directory of verifyBamID *.selfSM files (Step 0 contamination gate). If set,
+  # per-sample FREEMIX is ingested; otherwise Step 0 falls back to a VCF-only CHARR estimate.
+  selfsm_dir: ${SELFSM_DIR}
 
 inputs:
   # Trio pedigree (git-ignored, user-supplied): tab-separated with a HEADER naming the
@@ -155,6 +158,11 @@ filters:
     shet_min: 0.10                # active (Zeng 2024 s_het, esp. for short genes)
     phaplo_min: 0.86              # active (Collins 2022 pHaplo)
     downweight_recessive_by_lof_constraint: false   # [reserved] per-model down-weighting not implemented
+
+# --- Step 0 QC (contamination gate; Mendelian-error + sex are always computed) ---
+qc:
+  freemix_threshold: 0.05         # flag a trio if any member's verifyBamID FREEMIX exceeds this
+  charr_threshold: 0.02           # VCF-only fallback: ref-read fraction at hom-alt SNV sites
 
 # --- Inheritance modes (Step 5). Focus = INHERITED germline variation. ---
 inheritance:

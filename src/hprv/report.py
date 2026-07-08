@@ -115,7 +115,8 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
         ("Candidate calls", "One row per candidate per trio: inheritance mode, genotypes, and "
                             "annotations (gnomAD faf95, REVEL/AlphaMissense/SpliceAI, ClinVar)."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
-        ("QC", "Per-trio Mendelian-error rate and chrX-inferred sex (garbage-in guard)."),
+        ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex, and contamination "
+               "(verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),
         ("Audit counts", "Per-step input/output counts and funnel tallies (what went where, and why)."),
     ]:
         line(nm, desc)
