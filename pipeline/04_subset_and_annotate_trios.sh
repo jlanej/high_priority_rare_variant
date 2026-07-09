@@ -58,10 +58,27 @@ for row in "${rows[@]}"; do
     IFS=$'\t' read -ra f <<< "$row"
     v="${f[$((vcfcol-1))]}"; [[ -n "$v" && -f "$v" ]] && binds+=" $(abspath_dir "$v")"
 done
+mkdir -p "$HPRV_TMPDIR"; binds+=" $HPRV_TMPDIR"   # norm/cand + shared region BED + sort scratch live here; wrapped tools must see it
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
 # ensure plausible sites indexed
 index_vcf "$PLAUSIBLE"
+
+# Build a padded, merged BED of plausible loci ONCE. Region-restricting each trio VCF to
+# these windows BEFORE `norm` makes per-trio work scale with the candidate set, not the
+# genome (norm's ref lookups + left-alignment are the expensive part). The pad absorbs
+# left-alignment shifts — a trio indel's raw POS can sit a few bp from its normalized POS
+# in the plausible set — so the exact-allele `isec` below stays the real gate and never
+# drops a match; a generous window only adds a little norm work, never a spurious call.
+PLAUSIBLE_PAD="${HPRV_PLAUSIBLE_PAD:-1000}"
+region_bed="$HPRV_TMPDIR/plausible.regions.bed"
+bcftools query -f '%CHROM\t%POS\t%REF\n' "$PLAUSIBLE" \
+    | awk -v pad="$PLAUSIBLE_PAD" 'BEGIN{OFS="\t"}{s=$2-1-pad; if(s<0)s=0; print $1,s,($2-1+length($3)+pad)}' \
+    | sort -k1,1 -k2,2n \
+    | awk 'BEGIN{OFS="\t"}{if($1==c&&$2<=e){if($3>e)e=$3}else{if(c!="")print c,s,e;c=$1;s=$2;e=$3}}END{if(c!="")print c,s,e}' \
+    > "$region_bed"
+REGION_OK=0
+if [[ -s "$region_bed" ]]; then REGION_OK=1; else warn "no plausible loci in $PLAUSIBLE; region-restrict disabled"; fi
 
 printf 'trio_id\tcandidates_vcf\tped\n' > "$out_manifest"
 log "Step 4: extracting candidate genotypes for ${#rows[@]} trios"
@@ -84,21 +101,56 @@ for row in "${rows[@]}"; do
 
     norm="$HPRV_TMPDIR/${trio}.norm.vcf.gz"
     cand="$HPRV_TMPDIR/${trio}.cand.vcf.gz"
-    log "  [$trio] subset-to-trio + norm + intersect + annotate"
+    # Region-restrict to plausible loci BEFORE norm when the trio VCF is indexed, so the
+    # expensive per-trio norm scales with the candidate set, not the whole genome. `-R`
+    # needs an index on the trio VCF; build one if missing, else fall back to the original
+    # whole-genome norm (identical result, just slower) so unindexed inputs never regress.
+    use_region=0
+    if [[ "$REGION_OK" -eq 1 ]]; then
+        if [[ -f "$vcf.tbi" || -f "$vcf.csi" ]]; then
+            use_region=1
+        elif index_vcf "$vcf" 2>/dev/null; then
+            use_region=1
+        else
+            warn "  [$trio] trio VCF is unindexed and could not be indexed; using whole-genome norm"
+        fi
+    fi
     # Subset to the 3 trio members (dropping extras) so per-trio candidate VCFs carry exactly
     # the trio genotypes, split multiallelics, keep only alleles the trio carries (--min-ac 1,
     # post-split), and STRIP the source INFO (stale internal AC/AN/AF + GATK site fields must
     # not survive into the authoritative candidate VCF; the plausible-site INFO is transferred
     # below). `norm -c w` warns, never silently rewrites, on a REF mismatch.
-    if [[ -n "$samples" ]]; then
-        bcftools view -s "$samples" --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
-            | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+    if [[ "$use_region" -eq 1 ]]; then
+        log "  [$trio] region-restrict + subset-to-trio + norm + intersect + annotate"
+        # `-R` emits records in regions-file order (contigs grouped lexically); `bcftools sort`
+        # (over the tiny candidate set, negligible) restores header/coordinate order so the
+        # output is byte-identical to the whole-genome path, which relies on `norm` output
+        # already being coordinate-sorted for its index step to succeed.
+        if [[ -n "$samples" ]]; then
+            bcftools view -s "$samples" -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
+                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+                | bcftools annotate -x INFO --threads "$THREADS" -Ou - \
+                | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
+        else
+            bcftools view -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
+                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+                | bcftools annotate -x INFO --threads "$THREADS" -Ou - \
+                | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
+        fi
     else
-        bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou "$vcf" \
-            | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-            | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+        log "  [$trio] subset-to-trio + norm + intersect + annotate"
+        if [[ -n "$samples" ]]; then
+            bcftools view -s "$samples" --threads "$THREADS" -Ou "$vcf" \
+                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+                | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+        else
+            bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou "$vcf" \
+                | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
+                | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+        fi
     fi
     index_vcf "$norm"
     # allele-aware intersection: trio records that match a plausible site exactly
