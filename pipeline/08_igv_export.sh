@@ -63,18 +63,30 @@ else
 fi
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
-# --- per-trio: BED of candidate loci -> mini-CRAM extraction + VCF track ---
+# --- pre-group per-trio inputs in ONE pass each (was O(trios x calls) re-scanning) ---
+mkdir -p "$HPRV_TMPDIR"
+# 1) candidate loci -> one padded BED per trio. Tag each call with its trio, sort so a
+#    trio's rows are contiguous, then split into per-trio BEDs keeping a single file
+#    handle open at a time (scales to many trios without hitting awk's open-file limit).
+beddir="$HPRV_TMPDIR/callbeds"; mkdir -p "$beddir"
+awk -F'\t' -v pad="$PAD" '
+    NR==1{for(i=1;i<=NF;i++){if($i=="trio_id")ti=i; if($i=="chrom")ci=i; if($i=="pos")pi=i}; next}
+    ti&&ci&&pi{s=$pi-1-pad; if(s<0)s=0; print $ti"\t"$ci"\t"s"\t"($pi+pad)}' "$calls" \
+    | sort -k1,1 -k2,2 -k3,3n \
+    | awk -v dir="$beddir" '$1==""{next} {if($1!=prev){if(prev!="")close(pf); pf=dir"/"$1".bed"; prev=$1} print $2"\t"$3"\t"$4 > pf}'
+# 2) trio -> candidate VCF path (trios.candidates.tsv has one row per trio). Write the
+#    first path per trio to a tiny lookup file so the loop below is O(1) per trio.
+vcfmapdir="$HPRV_TMPDIR/candvcf"; mkdir -p "$vcfmapdir"
+[[ -f "$cand" ]] && awk -F'\t' -v dir="$vcfmapdir" 'NR>1 && $1!="" && !seen[$1]++{f=dir"/"$1; print $2 > f; close(f)}' "$cand"
+
+# --- per-trio: mini-CRAM extraction around candidate loci + VCF track ---
 n_extracted=0
 while IFS=$'\t' read -r trio vcf ped samples; do
     [[ "$trio" == "trio_id" || -z "$trio" ]] && continue
     IFS=',' read -r kid dad mom <<< "$samples"
 
-    bed="$HPRV_TMPDIR/${trio}.bed"; mkdir -p "$HPRV_TMPDIR"
-    awk -F'\t' -v t="$trio" -v pad="$PAD" '
-        NR==1{for(i=1;i<=NF;i++){if($i=="trio_id")ti=i; if($i=="chrom")ci=i; if($i=="pos")pi=i}; next}
-        $ti==t{s=$pi-1-pad; if(s<0)s=0; print $ci"\t"s"\t"($pi+pad)}' "$calls" \
-        | sort -k1,1 -k2,2n > "$bed"
-    [[ -s "$bed" ]] || { continue; }
+    bed="$beddir/${trio}.bed"
+    [[ -s "$bed" ]] || continue
     merged="$HPRV_TMPDIR/${trio}.merged.bed"
     hprv_run -- bedtools merge -i "$bed" > "$merged" 2>/dev/null || cp "$bed" "$merged"
 
@@ -98,12 +110,11 @@ while IFS=$'\t' read -r trio vcf ped samples; do
     fi
 
     # per-trio VCF track (copy + index the candidate VCF under the data-dir)
-    if [[ -f "$cand" ]]; then
-        cvcf="$(awk -F'\t' -v t="$trio" '$1==t{print $2; exit}' "$cand")"
-        if [[ -n "$cvcf" && -f "$cvcf" ]]; then
-            cp -f "$cvcf" "$DATA/vcfs/${trio}.vcf.gz"
-            hprv_run --bind "$DATA" -- bcftools index -t -f "$DATA/vcfs/${trio}.vcf.gz" 2>/dev/null || true
-        fi
+    cvcf=""
+    if [[ -f "$vcfmapdir/$trio" ]]; then IFS= read -r cvcf < "$vcfmapdir/$trio" || true; fi
+    if [[ -n "$cvcf" && -f "$cvcf" ]]; then
+        cp -f "$cvcf" "$DATA/vcfs/${trio}.vcf.gz"
+        hprv_run --bind "$DATA" -- bcftools index -t -f "$DATA/vcfs/${trio}.vcf.gz" 2>/dev/null || true
     fi
 done < <(tail -n +2 "$resolved")
 
