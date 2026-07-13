@@ -47,6 +47,31 @@ RUN set -eux; \
 # `env perl` still finds the base image's system Perl and VEP is unaffected.
 ENV PATH=${HPRV_ENV}/bin:$PATH
 
+# --- LOFTEE plugin CODE (GRCh38 fork) ---------------------------------------
+# The ensembl-vep base bundles the Ensembl/VEP_plugins .pm at /plugins (CADD, dbNSFP,
+# SpliceAI, ...) but builds with `--skip_plugins LoF`, and LOFTEE is a SEPARATE repo
+# (konradjk/loftee) — so LoF.pm is absent. Bake the *grch38 branch* (master is GRCh37-only)
+# into /plugins so a single `--dir_plugins /plugins` (and loftee_path:/plugins) serves all four
+# plugins. LOFTEE's heavy Perl deps (Bio::DB::BigFile against the Kent lib, DBI) are already
+# compiled into the base; DBD::SQLite is only a `recommends`, so verify and install if missing.
+# Only plugin CODE is baked — the DATA (human_ancestor/GERP/loftee.sql) is host-fetched.
+# Repro note: pin a grch38 commit SHA for byte-identical rebuilds (the branch tip moves).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git ca-certificates; \
+    git clone --depth 1 -b grch38 https://github.com/konradjk/loftee.git /tmp/loftee; \
+    cp -a /tmp/loftee/. /plugins/; \
+    rm -rf /tmp/loftee; \
+    perl -MDBD::SQLite -e1 2>/dev/null || apt-get install -y --no-install-recommends libdbd-sqlite3-perl; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    # fail the build loudly if any LOFTEE runtime dep or required plugin .pm is missing
+    perl -MDBI -e1; perl -MDBD::SQLite -e1; perl -MBio::DB::BigFile -e1; perl -MBio::Perl -e1; \
+    for p in LoF CADD dbNSFP SpliceAI; do test -f "/plugins/$p.pm" || { echo "missing /plugins/$p.pm" >&2; exit 1; }; done
+
+# VEP's plugin-code dir in this base is /plugins; expose it under our config's ${VEP_PLUGINS}
+# so `resources.vep.plugins_dir` resolves without the user setting anything.
+ENV VEP_PLUGINS=/plugins
+
 # --- pipeline code ----------------------------------------------------------
 COPY pipeline/ /opt/hprv/pipeline/
 COPY src/ /opt/hprv/src/

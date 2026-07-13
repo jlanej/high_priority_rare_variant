@@ -103,8 +103,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `nhomalt_joint`) match gnomAD v4.1 *joint* conventions but **vary by how the file was
   subset/downloaded**. Verify with `bcftools view -h $GNOMAD_SITES | grep INFO` and set the
   `resources.gnomad.*_tag` config keys. Step 2 fails loudly if a tag is absent.
-- **LOFTEE data filenames vary** across builds/forks. If the default LoF plugin string is wrong,
-  set `HPRV_LOF_PLUGIN` to the full plugin argument. LOFTEE must be the **GRCh38** fork.
+- **LOFTEE plugin code is baked into the image** at `/plugins` (the Dockerfile clones the
+  `konradjk/loftee` **grch38** branch there — the base image ships all other VEP_plugins but
+  `--skip_plugins LoF`, and master LOFTEE is GRCh37-only). `loftee_path:/plugins`. Only the LOFTEE
+  **data** (human_ancestor/GERP/loftee.sql) is host-fetched. If the default LoF plugin string is
+  wrong for your data-file layout, override the whole thing with `HPRV_LOF_PLUGIN`.
 - **`hiConfDeNovo` may be absent.** The Kids First genotype-refinement workflow may skip
   `VariantAnnotator PossibleDeNovo`. Step 5 requires the tag only when it is present in the
   callset header; otherwise it detects de novos from genotypes + QC. Don't assume the tag exists.

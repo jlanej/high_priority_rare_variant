@@ -32,7 +32,7 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 |---|---|---|---|---|
 | GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~3 GB |
 | VEP indexed cache (r115) | VEP core | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~25 GB |
-| VEP plugins code | LOFTEE/dbNSFP/SpliceAI/CADD plugins | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | free (in image or fetched) | small |
+| VEP plugin **code** (`.pm`) | CADD/dbNSFP/SpliceAI + LOFTEE grch38 | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
 | gnomAD v4.1 **joint** sites | rarity oracle (**faf95**) | `resources.gnomad.sites_vcf` (`GNOMAD_SITES`) | free, large (slimmed) | ~tens GB |
 | ClinVar GRCh38 VCF | clinical evidence | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free | ~0.2 GB |
 | dbNSFP | REVEL/AlphaMissense/MPC/MetaRNN/CADD_phred | `resources.vep.dbnsfp` (`DBNSFP`) | **license-gated** | ~30 GB |
@@ -44,6 +44,15 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 
 Gene-list / phenotype resources (`ACMG_SF_LIST`, `PANELAPP_*`, `RECESSIVE_CPG_LIST`, `HPO_TERMS`)
 are **reserved** (the overlay is not yet wired) and are not required to run the pipeline.
+
+**Plugin code vs. plugin data.** VEP plugin *code* (the `.pm` scripts) is **software → baked into the
+image**, not fetched. The `ensemblorg/ensembl-vep:release_115.0` base bundles the `Ensembl/VEP_plugins`
+`.pm` at `/plugins` (`CADD.pm`, `dbNSFP.pm`, `SpliceAI.pm`, …) but builds with `--skip_plugins LoF`, and
+**LOFTEE is a separate repo** — so our Dockerfile additionally bakes in the **`konradjk/loftee` grch38
+branch** (master is GRCh37-only) at `/plugins` and installs its one missing Perl dep (`DBD::SQLite`;
+`Bio::DB::BigFile`/Kent lib is already compiled into the base). `VEP_PLUGINS` therefore defaults to
+`/plugins` via the image and needs no setup. Only the plugin **data** (CADD tsv, dbNSFP tsv, SpliceAI
+VCF, and LOFTEE's `human_ancestor.fa.gz` / GERP bigwig / `loftee.sql`) is host-fetched by this script.
 
 Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../resources/manifest.env)
 (re-pin there). Verified specifics:

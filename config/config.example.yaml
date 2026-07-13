@@ -36,7 +36,9 @@ resources:
   vep:
     cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
     version: 115
-    plugins_dir: ${VEP_PLUGINS}   # dir holding LOFTEE, dbNSFP, SpliceAI, CADD plugin code
+    plugins_dir: ${VEP_PLUGINS}   # plugin CODE (CADD/dbNSFP/SpliceAI + LOFTEE grch38) — ships IN
+                                  # the image at /plugins; ${VEP_PLUGINS} defaults to /plugins via
+                                  # the image ENV. Override only if you relocate the plugin code.
     # VEP is fed reference.fasta (above). To override the whole LOFTEE plugin string
     # (data-file layout varies by build), export env HPRV_LOF_PLUGIN=<full --plugin arg>.
     cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
