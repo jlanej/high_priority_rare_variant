@@ -50,6 +50,36 @@ is_set "${HPRV_TRIOS_FILE:-}"  || die "inputs.trios_file is unresolved — set t
 [[ -f "$HPRV_TRIOS_FILE" ]]    || die "trios file not found: $HPRV_TRIOS_FILE"
 is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf_dir and/or inputs.vcf_list"
 
+# ---------------------------------------------------------------------------
+# Resource preflight — the annotation resources are an IDEMPOTENT UPSTREAM
+# REQUIREMENT: prepare them ONCE with scripts/prepare_resources.sh (see
+# docs/resources.md), and every run just re-verifies them here before doing work.
+# Hard-fail on the resources without which the screen is meaningless (VEP cache +
+# the gnomAD faf95 rarity oracle); loudly flag missing OPTIONAL predictors (they
+# remove specific evidence, not the whole run). Only enforced when Step 2 (which actually
+# consumes these) is in the --from/--to range — a `--from 3` re-run reads already-transferred
+# annotations and needs none of them, so it must not be blocked.
+# ---------------------------------------------------------------------------
+if run_step 2; then
+    r_missing=()
+    _need() { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then r_missing+=("$2 -> \$$v='${!v:-}'"); fi; }
+    _opt()  { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then warn "resource DEGRADED: $2 missing (\$$v) — that evidence will be unavailable"; fi; }
+    _need HPRV_VEP_CACHE     "VEP cache (resources.vep.cache_dir)"
+    _need HPRV_GNOMAD_SITES  "gnomAD v4.1 sites (resources.gnomad.sites_vcf) = the faf95 rarity oracle"
+    _opt  HPRV_CLINVAR_VCF    "ClinVar (P/LP override)"
+    _opt  HPRV_DBNSFP         "dbNSFP (REVEL/AlphaMissense/MPC)"
+    _opt  HPRV_SPLICEAI_SNV   "SpliceAI SNV"
+    _opt  HPRV_SPLICEAI_INDEL "SpliceAI indel"
+    _opt  HPRV_LOFTEE_DATA    "LOFTEE (pLoF HC/LC)"
+    _opt  HPRV_CADD_SNV       "CADD SNV"
+    _opt  HPRV_CADD_INDEL     "CADD indel"
+    if [[ ${#r_missing[@]} -gt 0 ]]; then
+        warn "Required annotation resources are missing — prepare them ONCE, upstream:"
+        for m in "${r_missing[@]}"; do warn "  - $m"; done
+        die "run scripts/prepare_resources.sh (fetch -> verify -> emit-env), source the emitted env, then re-run. See docs/resources.md."
+    fi
+fi
+
 W="$HPRV_OUTPUT_DIR"; mkdir -p "$W"
 export HPRV_TMPDIR="${HPRV_TMPDIR:-$W/tmp}"; mkdir -p "$HPRV_TMPDIR"
 export HPRV_AUDIT_DIR="$W/audit"; mkdir -p "$HPRV_AUDIT_DIR"
@@ -126,7 +156,15 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     log "== Step 8: igv.js variant-review export =="
     pad="$(cfg_get outputs.igv.padding 1000)"
     gen="$(cfg_get outputs.igv.genome hg38)"
-    ig=(--work "$W" --ref "$HPRV_REF_FASTA" --padding "$pad" --genome "$gen")
+    # CRAMs are reference-compressed: decoding needs the reference they were ENCODED
+    # against, which may differ from the variant-calling reference.fasta (e.g. an
+    # alignment build with different decoy/HLA/PAR-masking). Use resources.cram_ref
+    # when set, else fall back to reference.fasta.
+    cref="${HPRV_CRAM_REF:-}"; is_set "$cref" && [[ -f "$cref" ]] || cref="$HPRV_REF_FASTA"
+    # samtools threads per slice. Slicing is serial (one CRAM at a time) so a flaky
+    # FUSE/SBFS mount stays healthy; this only sets per-slice compression threads.
+    jobs="$(cfg_get outputs.igv.extract_jobs "$(cfg_get runtime.threads 4)")"
+    ig=(--work "$W" --ref "$cref" --padding "$pad" --genome "$gen" --jobs "$jobs")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
     bash "$HERE/08_igv_export.sh" "${ig[@]}"
