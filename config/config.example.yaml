@@ -74,8 +74,16 @@ resources:
   mutation_rate_table: ${MUTRATE_TABLE}            # Samocha per-gene, per-consequence rates
   # Source CRAMs for the IGV review export (Step 8). TSV: sample<TAB>cram_path.
   # Mini-CRAMs are sliced around candidate loci for each trio member. Optional —
-  # without it, variants.tsv is still produced (no alignment tracks).
+  # without it, variants.tsv is still produced (no alignment tracks). Paths may be
+  # on a FUSE/network mount (slices are small index-based reads; concurrency is
+  # capped by outputs.igv.extract_jobs so the mount stays healthy).
   cram_map: ${CRAM_MAP}
+  # Reference the CRAMs were ENCODED against (used ONLY to decode CRAMs in Step 8).
+  # CRAM is reference-compressed, so decoding requires the exact contigs/MD5s the
+  # CRAM was written with — which may DIFFER from reference.fasta (the calling build)
+  # when alignment and calling used different GRCh38 builds (decoy/HLA/PAR masking).
+  # Leave unset to reuse reference.fasta.
+  cram_ref: ${CRAM_REF}
   # Optional directory of verifyBamID *.selfSM files (Step 0 contamination gate). If set,
   # per-sample FREEMIX is ingested; otherwise Step 0 falls back to a VCF-only CHARR estimate.
   selfsm_dir: ${SELFSM_DIR}
@@ -217,6 +225,11 @@ outputs:
     enabled: true                 # igv.js trio variant-review export (Step 8)
     padding: 1000                 # bp flank around each candidate locus for mini-CRAM slicing
     genome: hg38                  # reference name passed to the igv.js server
+    extract_jobs: 4               # samtools --threads (-@) per CRAM slice in Step 8 (defaults to
+                                  #   runtime.threads). Slices run SERIALLY — one source CRAM open at
+                                  #   a time — which is the gentlest access pattern for a flaky
+                                  #   FUSE/SBFS mount; this only sets the per-slice compression threads.
+                                  #   Run Step 8 in one interactive job where the CRAM mount is available.
 
 # --- Honest scope limitations (documented, enforced as warnings) ---
 scope:
