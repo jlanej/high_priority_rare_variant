@@ -31,9 +31,9 @@ F = {
     "alphamissense_pred": "vep_AlphaMissense_pred",
     "mpc": "vep_MPC_score",
     "metarnn": "vep_MetaRNN_score",
-    # CADD may arrive from the CADD plugin (CADD_PHRED) or dbNSFP (CADD_phred)
-    "cadd_a": "vep_CADD_PHRED",
-    "cadd_b": "vep_CADD_phred",
+    # CADD comes from the dedicated CADD plugin: CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep.
+    # (dbNSFP's coding-only CADD_phred is deliberately not requested; see 02_annotate_sites.sh.)
+    "cadd": "vep_CADD_PHRED",
     "spliceai_ag": "vep_SpliceAI_pred_DS_AG",
     "spliceai_al": "vep_SpliceAI_pred_DS_AL",
     "spliceai_dg": "vep_SpliceAI_pred_DS_DG",
@@ -146,7 +146,7 @@ def mpc(variant) -> Optional[float]:
 
 
 def cadd(variant) -> Optional[float]:
-    return _max_float(variant, "cadd_a", "cadd_b")
+    return _max_float(variant, "cadd")
 
 
 def spliceai_max(variant) -> Optional[float]:
