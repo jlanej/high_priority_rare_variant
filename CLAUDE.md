@@ -121,6 +121,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Running
 
+- **Resources first (one-time):** the image ships SOFTWARE; the reference DATA is prepared on the
+  host by `scripts/prepare_resources.sh --dir DIR fetch|verify|emit-env` (manifest-pinned in
+  `resources/manifest.env`; free resources auto-download+verify+index, license-gated ones —
+  dbNSFP/SpliceAI/CADD — validated-if-provided). Never bake resources into the image. See
+  [docs/resources.md](docs/resources.md). `emit-env` writes the `${ENV}` exports the config expects.
 - **HPC (primary):** `apptainer exec --cleanenv --bind ... hprv.sif run_pipeline.sh --config
   config/config.yaml` (add `--from N --to M` for a subset).
 - **Dev/host:** run individual step scripts; python steps need `PYTHONPATH=src` and the container
