@@ -78,6 +78,29 @@ Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../
 > (+ ~50 GB transient sort) + LOFTEE ~13 GB + constraint <10 MB. Point `TMPDIR`/`APPTAINER_TMPDIR`
 > at real disk with headroom.
 
+## Can the VEP cache replace any of these? (No — a documented trap)
+
+A `--everything` VEP run emits gnomAD **AF** (`gnomADe_AF`/`gnomADg_AF`/`MAX_AF`), a coarse
+cache-frozen `CLIN_SIG`, and `SIFT`/`PolyPhen` straight from the cache — so it is tempting to skip
+the downloads below. **Do not.** None of them replace a load-bearing resource for this pipeline:
+
+- **gnomAD** — the cache gives point **AF** (exome & genome *separately*), not **`faf95`** (the sole
+  rarity oracle, golden rule #2), not the **v4.1 *joint*** combine, and not **`nhomalt`** (needed for
+  the recessive / de-novo `nhomalt ≤ 1` checks). `frequency()` intentionally has **no AF fallback**;
+  wiring cache AF in would silently re-break the faf95 contract. → keep the sites VCF.
+- **ClinVar** — the cache's `CLIN_SIG` has **no `CLNREVSTAT`** (star rating → the ≥2★ auto-promote
+  gate can't run), no `CLNSIGCONF`, and is frozen at the cache's ClinVar version. → keep the dated VCF.
+- **dbNSFP / SpliceAI** — the cache only carries the legacy `SIFT`/`PolyPhen`, not
+  **REVEL / AlphaMissense / MPC / MetaRNN** or **SpliceAI** (the Step-3 functional/splice gate). → keep both.
+- **LOFTEE** — VEP's own `IMPACT` is not LOFTEE's **`LoF`/`LoF_flags`** HC/LC confidence. → keep it.
+- **CADD** — the one exception is a *confirmation*, not an elimination: if your VEP call already runs
+  the CADD plugin (`CADD_PHRED`), you can drop dbNSFP's `CADD_phred` column — but dbNSFP is still
+  required for REVEL/AlphaMissense/MPC. Use CADD-plugin **or** dbNSFP-CADD, not both.
+
+Where the cache *does* help: `gnomADe_AF`/`MAX_AF` are a good **cheap pre-filter + QC cross-check**
+against faf95, and since AF is free from the cache, the gnomAD slim strictly only needs
+`fafmax_faf95_max_joint` + `nhomalt_joint` (we also keep `AF_joint`/`AF_grpmax_joint` for reporting).
+
 ## Usage
 
 Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host installs needed):
