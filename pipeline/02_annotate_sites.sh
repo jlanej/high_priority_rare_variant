@@ -71,14 +71,18 @@ vep_args=(
 )
 is_set "${HPRV_VEP_PLUGINS:-}" && vep_args+=(--dir_plugins "$HPRV_VEP_PLUGINS")
 
-# CADD (genome-wide fallback; matches the group's existing annotate setup)
+# CADD via the dedicated plugin = the COMPLETE CADD source: whole_genome_SNVs scores every
+# possible SNV genome-wide (coding AND non-coding) + the precomputed indel set. This is the
+# authoritative CADD field (vep_CADD_PHRED); dbNSFP's CADD_phred (coding-only) is intentionally
+# NOT requested to avoid a partial duplicate. Matches the group's existing annotate setup.
 if is_set "${HPRV_CADD_SNV:-}" && is_set "${HPRV_CADD_INDEL:-}"; then
     vep_args+=(--plugin "CADD,snv=${HPRV_CADD_SNV},indels=${HPRV_CADD_INDEL}")
-else warn "CADD not configured — skipping CADD annotation"; fi
+else warn "CADD plugin not configured — no genome-wide CADD (dbNSFP CADD_phred is coding-only and not requested)"; fi
 
-# dbNSFP (REVEL / AlphaMissense / MPC / ... — the calibrated missense predictors)
+# dbNSFP (REVEL / AlphaMissense / MPC / MetaRNN — the calibrated missense predictors). CADD comes
+# from the dedicated plugin above (more complete), so CADD_phred is deliberately omitted here.
 if is_set "${HPRV_DBNSFP:-}"; then
-    vep_args+=(--plugin "dbNSFP,${HPRV_DBNSFP},REVEL_score,AlphaMissense_score,AlphaMissense_pred,MPC_score,MetaRNN_score,CADD_phred")
+    vep_args+=(--plugin "dbNSFP,${HPRV_DBNSFP},REVEL_score,AlphaMissense_score,AlphaMissense_pred,MPC_score,MetaRNN_score")
 else warn "dbNSFP not configured — REVEL/AlphaMissense/MPC will be unavailable"; fi
 
 # SpliceAI (masked scores recommended for interpretation)
@@ -116,7 +120,7 @@ done <<< "$vep_header"
 csq_fmt="${csq_line##*Format: }"; csq_fmt="${csq_fmt%%\">*}"
 [[ -n "$csq_fmt" ]] || die "VEP CSQ header has no Format description"
 want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT CANONICAL \
-      REVEL_score AlphaMissense_score AlphaMissense_pred MPC_score MetaRNN_score CADD_PHRED CADD_phred \
+      REVEL_score AlphaMissense_score AlphaMissense_pred MPC_score MetaRNN_score CADD_PHRED \
       SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
       LoF LoF_filter LoF_flags"
 have_fields=""

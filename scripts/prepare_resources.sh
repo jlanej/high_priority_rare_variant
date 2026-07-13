@@ -259,12 +259,15 @@ prep_spliceai() {
 }
 
 prep_cadd() {
-    # OPTIONAL: dbNSFP already provides CADD_phred, so CADD is only fetched on explicit --only cadd
     selected cadd || return 0
-    log "[cadd] OPTIONAL — dbNSFP already supplies CADD_phred; fetching CADD v${CADD_VERSION} (81 GB SNV) because --only cadd was given"
-    get_licensed cadd_snv "$CADD_SNV_URL" "$CADD_SNV_OUT" "CADD non-commercial (UW)." \
+    # CADD via the dedicated plugin is the COMPLETE CADD source (whole-genome SNVs, coding AND
+    # non-coding, + the precomputed indel set) — more complete than dbNSFP's coding-only CADD_phred.
+    # ~81 GB SNV file, non-commercial -> requires --accept-license. If your existing VEP setup
+    # already holds these files, point CADD_SNV/CADD_INDEL at them and skip (--only without cadd).
+    log "[cadd] fetching CADD v${CADD_VERSION} GRCh38 — whole-genome SNVs (~81 GB) + indels (the complete CADD source)"
+    get_licensed cadd_snv "$CADD_SNV_URL" "$CADD_SNV_OUT" "CADD ${CADD_VERSION} non-commercial (UW)." \
         && get_free cadd_snv_tbi "$CADD_SNV_URL.tbi" "$CADD_SNV_OUT.tbi" "" || true
-    get_licensed cadd_indel "$CADD_INDEL_URL" "$CADD_INDEL_OUT" "CADD non-commercial (UW)." \
+    get_licensed cadd_indel "$CADD_INDEL_URL" "$CADD_INDEL_OUT" "CADD ${CADD_VERSION} non-commercial (UW)." \
         && get_free cadd_indel_tbi "$CADD_INDEL_URL.tbi" "$CADD_INDEL_OUT.tbi" "" || true
 }
 
