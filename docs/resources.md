@@ -36,7 +36,7 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 | gnomAD v4.1 **joint** sites | rarity oracle (**faf95**) | `resources.gnomad.sites_vcf` (`GNOMAD_SITES`) | free, large (slimmed) | ~tens GB |
 | ClinVar GRCh38 VCF | clinical evidence | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free | ~0.2 GB |
 | dbNSFP | REVEL/AlphaMissense/MPC/MetaRNN/CADD_phred | `resources.vep.dbnsfp` (`DBNSFP`) | **license-gated** | ~30 GB |
-| CADD SNV + indel | CADD plugin (optional if dbNSFP CADD_phred suffices) | `CADD_SNV` / `CADD_INDEL` | **license-gated**, huge | ~80 GB |
+| CADD SNV + indel | CADD plugin — **the complete, genome-wide CADD** (dbNSFP CADD dropped) | `CADD_SNV` / `CADD_INDEL` | **license-gated**, huge | ~80 GB |
 | SpliceAI precomputed | splicing (SpliceAI plugin) | `SPLICEAI_SNV` / `SPLICEAI_INDEL` | **license-gated** | ~40 GB |
 | LOFTEE GRCh38 data | pLoF confidence (LoF plugin) | `resources.vep.loftee_data` (`LOFTEE_DATA`) | free | ~several GB |
 | Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
@@ -62,8 +62,11 @@ Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../
   REVEL/CADD/AlphaMissense). Columns confirmed present: `REVEL_score, AlphaMissense_score,
   AlphaMissense_pred, MPC_score, MetaRNN_score, CADD_phred`. Heavy prep (a genome-wide sort — point
   scratch at real disk with tens of GB free). Non-commercial + citation.
-- **CADD v1.7 — OPTIONAL.** dbNSFP already carries `CADD_phred`, so the 81 GB CADD SNV file is only
-  fetched on explicit `--only cadd`. Free-academic, non-redistributable.
+- **CADD v1.7 — the complete CADD source.** `whole_genome_SNVs.tsv.gz` scores every possible SNV
+  genome-wide (coding **and** non-coding) plus the precomputed indel set — strictly more complete than
+  dbNSFP's coding-only `CADD_phred`, which is therefore **dropped** from the dbNSFP column list. Step 2
+  sources CADD only from the plugin (`vep_CADD_PHRED`). Fetched by default (with `--accept-license`);
+  point `CADD_SNV`/`CADD_INDEL` at your existing files to reuse them. Free-academic, non-redistributable.
 - **SpliceAI** — the full genome-wide set is Illumina **BaseSpace (login-gated)**; the script instead
   auto-fetches the **no-login Ensembl MANE mirror** for SNVs (`--accept-license`), and instructs you to
   supply the indel file from BaseSpace. The MANE mirror covers MANE-select transcripts only. Non-commercial.
@@ -93,9 +96,10 @@ the downloads below. **Do not.** None of them replace a load-bearing resource fo
 - **dbNSFP / SpliceAI** — the cache only carries the legacy `SIFT`/`PolyPhen`, not
   **REVEL / AlphaMissense / MPC / MetaRNN** or **SpliceAI** (the Step-3 functional/splice gate). → keep both.
 - **LOFTEE** — VEP's own `IMPACT` is not LOFTEE's **`LoF`/`LoF_flags`** HC/LC confidence. → keep it.
-- **CADD** — the one exception is a *confirmation*, not an elimination: if your VEP call already runs
-  the CADD plugin (`CADD_PHRED`), you can drop dbNSFP's `CADD_phred` column — but dbNSFP is still
-  required for REVEL/AlphaMissense/MPC. Use CADD-plugin **or** dbNSFP-CADD, not both.
+- **CADD** — the one overlap. We keep the **dedicated plugin** (genome-wide `CADD_PHRED`, the most
+  complete) and **drop dbNSFP's coding-only `CADD_phred`** so there is a single authoritative CADD
+  field. dbNSFP is still required for REVEL/AlphaMissense/MPC. (Your existing DNM VEP call already runs
+  this exact CADD plugin, so those files can be reused.)
 
 Where the cache *does* help: `gnomADe_AF`/`MAX_AF` are a good **cheap pre-filter + QC cross-check**
 against faf95, and since AF is free from the cache, the gnomAD slim strictly only needs
