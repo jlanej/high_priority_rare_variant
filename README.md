@@ -121,14 +121,24 @@ variant-review server.
 # 1. Get the image (built + published to GHCR on every commit). Pull by digest on HPC.
 apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:latest
 
-# 2. Configure. Copy the example and point the ${ENV} placeholders at YOUR resources.
-cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
-export REF_FASTA=/path/to/GRCh38.fa VEP_CACHE=/path/to/vep GNOMAD_SITES=/path/to/gnomad.vcf.gz
-export CLINVAR_VCF=... HPRV_WORK=/path/to/work ...
-#    (see config.example.yaml for the full list; verify gnomAD INFO tag names with
-#     `bcftools view -h $GNOMAD_SITES | grep INFO`)
+# 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
+#    Free resources auto-download + verify + index; license-gated ones (dbNSFP/SpliceAI/CADD)
+#    are validated if you provide them. See docs/resources.md.
+apptainer exec --bind /data hprv.sif \
+    scripts/prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
+apptainer exec --bind /data hprv.sif \
+    scripts/prepare_resources.sh --dir /data/hprv_resources verify
+apptainer exec --bind /data hprv.sif \
+    scripts/prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 
-# 3. Provide inputs (git-ignored):
+# 3. Configure. Copy the example; point the ${ENV} placeholders at your prepared resources.
+cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
+source /data/hprv_resources/resources.env            # exports VEP_CACHE / GNOMAD_SITES / CLINVAR_VCF / ...
+export HPRV_WORK=/path/to/work
+#    (gnomAD v4.1 joint tag names already match the config defaults; verify with
+#     `bcftools view -h $GNOMAD_SITES | grep INFO` if you slimmed a different file)
+
+# 4. Provide inputs (git-ignored):
 #    - a trios file: TSV with a header naming kid/dad/mom (any order); IDs match the VCFs:
 #          #kid   dad    mom
 #          CH1    FA1    MO1
@@ -139,7 +149,7 @@ export CLINVAR_VCF=... HPRV_WORK=/path/to/work ...
 #    the internal manifest + PEDs automatically — sample order within a VCF does not matter,
 #    and a VCF may contain additional members.
 
-# 4. Run the whole pipeline inside the container.
+# 5. Run the whole pipeline inside the container.
 apptainer exec --cleanenv \
     --bind "$(dirname "$REF_FASTA")" --bind "$VEP_CACHE" --bind "$HPRV_WORK" --bind "$VCF_DIR" \
     hprv.sif run_pipeline.sh --config config/config.yaml

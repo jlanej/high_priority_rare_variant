@@ -223,6 +223,31 @@ def test_recurrence_null_per_model():
     assert gb.p_biallelic_hwe([None], floor) > 0
 
 
+def test_join_constraint():
+    import csv as _csv
+    import tempfile
+    d = tempfile.mkdtemp()
+    gn, sh, ph, out = (os.path.join(d, f) for f in ("gn.txt", "sh.tsv", "ph.tsv", "c.tsv"))
+    with open(gn, "w") as f:
+        f.write("gene\toe_lof_upper\tpLI\nTP53\t0.21\t0.99\nBRCA2\t0.55\t0.0\n")
+    with open(sh, "w") as f:
+        f.write("gene\tpost_mean\nTP53\t0.35\n")            # s_het via 'post_mean' alias
+    with open(ph, "w") as f:
+        f.write("#gene\tpHaplo\nTP53\t0.98\nNF1\t0.91\n")   # '#gene' header + gene not in gnomAD
+    spec = importlib.util.spec_from_file_location(
+        "jc", os.path.join(os.path.dirname(__file__), "..", "scripts", "join_constraint.py"))
+    jc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(jc)
+    assert jc.main(["--gnomad", gn, "--shet", sh, "--phaplo", ph, "--out", out]) == 0
+    rows = {r["gene"]: r for r in _csv.DictReader(open(out), delimiter="\t")}
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+    assert rows["TP53"]["oe_lof_upper"] == "0.21" and rows["TP53"]["pli"] == "0.99"
+    assert rows["TP53"]["s_het"] == "0.35" and rows["TP53"]["phaplo"] == "0.98"
+    assert rows["NF1"]["phaplo"] == "0.91" and rows["NF1"]["oe_lof_upper"] == ""   # left-join keeps it
+    assert rows["BRCA2"]["s_het"] == "" and rows["BRCA2"]["phaplo"] == ""
+
+
 def _load_gb():
     spec = importlib.util.spec_from_file_location(
         "gb", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
