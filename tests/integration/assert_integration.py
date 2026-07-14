@@ -87,6 +87,12 @@ def main(argv=None) -> int:
     check(any(r["mode"] == "dominant" for r in genec), "cis GENEC variants emitted as dominant instead")
     check(has("CH_B", "denovo", "chr1", 5100, "GENE1"), "CH_B de novo GENE1 (secondary)")
     check(has("CH_B", "x_linked_recessive", "chrX", 2781600, "GENEX"), "CH_B X-linked recessive GENEX")
+    # X-linked recessive must fire even with an AFFECTED (hom-alt) father (father's chrX not
+    # transmitted to a son) — the previously-required father-hom-ref would have wrongly dropped it
+    check(has("CH_B", "x_linked_recessive", "chrX", 2782000, "GENEXAF"),
+          "X-linked recessive called with an affected (hom-alt) father")
+    # autosomal hom-recessive with a HOM-ALT parent (carrier rule accepts HET or HOM_ALT parents)
+    check(has("CH_A", "hom_recessive", "chr1", 8500, "GENE2H"), "hom recessive called with a HOM-ALT parent")
     check(not has("CH_A", "denovo", "chr1", 15000), "low-GQ pseudo-de-novo NOT called (QC gate)")
     # dominant model: rare functional inherited het, recurrent across individuals
     check(has("CH_A", "dominant", "chr2", 10000, "GENED"), "CH_A dominant inherited het GENED")
@@ -96,6 +102,11 @@ def main(argv=None) -> int:
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}
     check(genes.get("GENED", {}).get("n_dominant") == "2", "GENED has 2 dominant carriers")
     check(genes.get("GENED", {}).get("recurrent") == "1", "GENED flagged recurrent")
+    # same- vs distinct-variant recurrence: GENED shares one variant (founder/artifact-suspect);
+    # GENEDD has two distinct variants across trios (the stronger gene signal)
+    check(genes.get("GENED", {}).get("recurrence_kind") == "same_variant", "GENED = same-variant recurrence")
+    check(genes.get("GENEDD", {}).get("recurrence_kind") == "distinct_variant", "GENEDD = distinct-variant recurrence")
+    check(genes.get("GENEDD", {}).get("n_dominant") == "2", "GENEDD has 2 dominant carriers")
     check(genes.get("GENE1", {}).get("n_denovo") == "2", "GENE1 has 2 de novo carriers (secondary)")
     # calibrated recurrence null: a rare variant recurring in 2 individuals is significant
     check(float(genes.get("GENED", {}).get("p_recurrence") or 1) < 1e-4,

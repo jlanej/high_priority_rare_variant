@@ -170,9 +170,14 @@ def main(argv=None) -> int:
                 "dom_faf": {}, "bi_faf": {}, "x_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
             })
             g["all"].add(trio)
-            # distinct qualifying variant per mode -> its gnomAD faf95, for the model-appropriate null
+            # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
+            # faf95 preferred; fall back to grpmax AF (mirrors annotations.frequency) BEFORE the
+            # absent-floor, so a variant with a grpmax AF but no faf95 is not treated as ultra-rare
+            # (which would make the recurrence p anti-conservative).
             key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
             faf = _num(r.get("faf95"))
+            if faf is None:
+                faf = _num(r.get("grpmax_af"))
             if mode in DOMINANT_MODES:
                 g["dom"].add(trio); g["dom_faf"][key] = faf
             elif mode in BIALLELIC_MODES:
@@ -268,11 +273,22 @@ def main(argv=None) -> int:
             modes.append(f"x_linked={len(g['x'])}")
         if g["dn"]:
             modes.append(f"denovo={len(g['dn'])}")
+        # DISTINCT-variant recurrence (independent hits -> gene signal) vs SAME-variant recurrence
+        # (one shared variant across carriers -> founder OR artifact; golden rule #2 treats internal
+        # recurrence as artifact/blocklist-suspect, so it is ranked BELOW distinct-variant, not headlined).
+        rec_kind = ""
+        for cset, fmap in ((g["dom"], g["dom_faf"]), (g["bi"], g["bi_faf"]), (g["x"], g["x_faf"])):
+            if len(cset) >= min_carriers:
+                rec_kind = "same_variant" if len(fmap) <= 1 else "distinct_variant"
+                break
+        # rank by the STRONGEST recurrence signal across the applicable models (so recessive/X-only
+        # recurrent genes are ordered by their own p, not left at 1.0)
+        best_p = min([p for p in (p_recurrence, p_rec_bi, p_rec_x) if p is not None], default=None)
         rows.append({
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
-            "recurrent": "1" if n_carriers >= min_carriers else "0",
-            "exp_carriers": exp_car, "p_recurrence": p_recurrence,
+            "recurrent": "1" if n_carriers >= min_carriers else "0", "recurrence_kind": rec_kind,
+            "exp_carriers": exp_car, "p_recurrence": p_recurrence, "best_p": best_p,
             "p_recurrence_biallelic": p_rec_bi, "p_recurrence_xlinked": p_rec_x,
             "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
             "constrained": "1" if constrained else "0",
@@ -280,27 +296,33 @@ def main(argv=None) -> int:
             "modes": ";".join(modes),
         })
 
-    # FDR across genes for BOTH the primary recurrence p-value and the secondary de novo one
-    for r, q in zip(rows, bh_fdr([r["p_recurrence"] for r in rows])):
-        r["q_recurrence"] = q
-        r["recurrence_exome_wide_sig"] = "1" if (r["p_recurrence"] is not None and r["p_recurrence"] < exome_p) else "0"
-    for r, q in zip(rows, bh_fdr([r["dn_p_enrich"] for r in rows])):
-        r["dn_q_enrich"] = q
-        r["dn_exome_wide_sig"] = "1" if (r["dn_p_enrich"] is not None and r["dn_p_enrich"] < exome_p) else "0"
+    # BH-FDR + exome-wide flag PER model family (each is its own family of tests: dominant het,
+    # biallelic, X-linked, secondary de novo) — so recessive-only recurrent genes get a corrected q.
+    for pcol, qcol, sigcol in (
+        ("p_recurrence", "q_recurrence", "recurrence_exome_wide_sig"),
+        ("p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig"),
+        ("p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig"),
+        ("dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig"),
+    ):
+        for r, q in zip(rows, bh_fdr([r[pcol] for r in rows])):
+            r[qcol] = q
+            r[sigcol] = "1" if (r[pcol] is not None and r[pcol] < exome_p) else "0"
 
-    # Rank: recurrent genes first, then by the calibrated recurrence p-value (most
-    # surprising first), then constraint, then counts, then (secondary) de novo enrichment.
+    # Rank: recurrent first; DISTINCT-variant recurrence above SAME-variant (founder/artifact); then
+    # by the strongest recurrence p across models; then constraint, counts, secondary de novo.
     def rank_key(r):
         con_key = (r["constrained"] != "1") if weight_by_constraint else 0
-        prec = r["p_recurrence"] if r["p_recurrence"] is not None else 1.0
-        return (r["recurrent"] != "1", prec, con_key, -r["n_carriers"],
-                -r["n_dominant"], -r["n_biallelic"],
+        prec = r["best_p"] if r["best_p"] is not None else 1.0
+        return (r["recurrent"] != "1", r["recurrence_kind"] == "same_variant", prec, con_key,
+                -r["n_carriers"], -r["n_dominant"], -r["n_biallelic"],
                 r["dn_p_enrich"] if r["dn_p_enrich"] is not None else 1.0)
     rows.sort(key=rank_key)
 
     out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
-                "recurrent", "exp_carriers", "p_recurrence", "q_recurrence",
-                "recurrence_exome_wide_sig", "p_recurrence_biallelic", "p_recurrence_xlinked",
+                "recurrent", "recurrence_kind", "exp_carriers", "p_recurrence", "q_recurrence",
+                "recurrence_exome_wide_sig",
+                "p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig",
+                "p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig",
                 "loeuf", "pli", "s_het", "phaplo", "constrained",
                 "dn_exp", "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
     with open(args.out, "w") as out:
