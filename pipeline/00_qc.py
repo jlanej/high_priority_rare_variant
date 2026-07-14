@@ -193,7 +193,12 @@ def main(argv=None) -> int:
                 sys.stderr.write(f"WARN: {tid}: PED samples not in VCF; skipping\n")
                 continue
             ped_sex = str(ped["sex"])
-            sex_match = "1" if (res["inferred_sex"] == ped_sex or res["inferred_sex"] is None) else "0"
+            # Sex-swap gate: only a MISMATCH against a KNOWN expected sex is a failure. The generated
+            # PED leaves kid sex unknown ('0'), so an unknown/absent ped_sex = "no expectation" = pass
+            # (mirrors the un-inferable branch); otherwise every inferable trio would be flagged.
+            sex_known = ped_sex not in ("0", "", "None")
+            sex_match = "0" if (sex_known and res["inferred_sex"] is not None
+                                and res["inferred_sex"] != ped_sex) else "1"
             mie_flag = "1" if (res["mie_rate"] is not None and res["mie_rate"] > mie_thr) else "0"
 
             contam, flags, src = {}, False, "charr"

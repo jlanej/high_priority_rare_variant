@@ -143,13 +143,18 @@ get_licensed() {  # get_licensed ID URL OUT "license note"
 # -------- per-resource preparation ------------------------------------------ #
 prep_reference() {
     selected reference || return 0
+    # DETERMINISTIC output path: fetch/verify/emit-env are separate invocations, so the prepared
+    # file must land at exactly $REF_FASTA_OUT (line 51) — never a process-local reassignment.
+    if [[ -f "$REF_FASTA_OUT" ]]; then log "[reference] cached"; record skip reference; return 0; fi
     get_free reference "$REF_FASTA_URL" "$REF_FASTA_OUT.dl" "$REF_FASTA_SHA256" || return 0
-    # de-bgzip if needed (VEP + samtools faidx want a plain or bgzipped .fa; keep bgzipped)
-    if [[ ! -f "$REF_FASTA_OUT" ]]; then
-        case "$REF_FASTA_URL" in *.gz|*.bgz) need bgzip && zcat "$REF_FASTA_OUT.dl" | bgzip > "$REF_FASTA_OUT.gz" && REF_FASTA_OUT="$REF_FASTA_OUT.gz" || cp "$REF_FASTA_OUT.dl" "$REF_FASTA_OUT";;
-                                  *) cp "$REF_FASTA_OUT.dl" "$REF_FASTA_OUT";; esac
+    # Ensembl serves gzip; decompress to a PLAIN faidx'd FASTA (universally accepted by
+    # bcftools norm -f, VEP --fasta, samtools -T; no bgzf-random-access ambiguity).
+    if zcat "$REF_FASTA_OUT.dl" > "$REF_FASTA_OUT" 2>/dev/null || gunzip -c "$REF_FASTA_OUT.dl" > "$REF_FASTA_OUT"; then
+        rm -f "$REF_FASTA_OUT.dl"
+    else
+        warn "[reference] decompress failed; raw download left at $REF_FASTA_OUT.dl"; record miss reference; return 0
     fi
-    need samtools && samtools faidx "$REF_FASTA_OUT" 2>/dev/null || warn "samtools faidx failed on reference"
+    need samtools && samtools faidx "$REF_FASTA_OUT" 2>/dev/null || warn "[reference] samtools faidx failed (need the .fai next to $REF_FASTA_OUT)"
 }
 
 prep_vep_cache() {
@@ -175,19 +180,30 @@ prep_gnomad() {
     for c in $GNOMAD_CHROMS; do
         # shellcheck disable=SC2059
         local fn; fn="$(printf "$GNOMAD_FILE_TMPL" "$c")"
-        local raw="$DIR/gnomad/raw.${fn}" slim="$DIR/gnomad/slim.chr${c}.vcf.gz"
-        if [[ -f "$slim" ]]; then parts+=("$slim"); continue; fi
+        local raw="$DIR/gnomad/raw.${fn}" slim="$DIR/gnomad/slim.chr${c}.vcf.gz" tmp="$DIR/gnomad/.slim.chr${c}.tmp.vcf.gz"
+        # reuse a cached slim ONLY if it is a complete, index-valid bgzip — a truncated one from an
+        # interrupted run must be rebuilt, never concatenated into the faf95 oracle (silent corruption)
+        if [[ -f "$slim" ]] && bcftools index -n "$slim" >/dev/null 2>&1; then parts+=("$slim"); continue; fi
+        rm -f "$slim" "$slim".tbi "$slim".csi "$tmp" "$tmp".tbi 2>/dev/null || true
         log "[gnomad_sites] chr${c}: fetch + slim to {$GNOMAD_KEEP_INFO}"
         fetch_to "${base}/${fn}" "$raw" || { warn "[gnomad_sites] chr${c} download failed"; record miss gnomad_sites; return 0; }
-        # keep ONLY the INFO fields the pipeline reads (drops the rest -> tens of GB, not hundreds)
-        bcftools annotate -x "^INFO/${GNOMAD_KEEP_INFO//,/,INFO/}" -Oz -o "$slim" "$raw"
-        index_vcf "$slim"; rm -f "$raw"; parts+=("$slim")
+        # keep ONLY the INFO fields the pipeline reads; write to a temp and ATOMICALLY move it into
+        # place only after tabix indexes it cleanly (which validates the BGZF EOF block) — so a
+        # partial/truncated slim can never be trusted or reused.
+        if bcftools annotate -x "^INFO/${GNOMAD_KEEP_INFO//,/,INFO/}" -Oz -o "$tmp" "$raw" \
+               && tabix -f -p vcf "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$slim"; mv -f "$tmp.tbi" "$slim.tbi"; rm -f "$raw"; parts+=("$slim")
+        else
+            warn "[gnomad_sites] chr${c} slim failed/truncated — not trusting it"; rm -f "$tmp" "$tmp.tbi" "$raw"; record miss gnomad_sites; return 0
+        fi
     done
     [[ ${#parts[@]} -gt 0 ]] || { record miss gnomad_sites; return 0; }
     printf '%s\n' "${parts[@]}" > "$list"
     log "[gnomad_sites] concatenating ${#parts[@]} slim per-chrom files"
     bcftools concat -n -f "$list" -Oz -o "$GNOMAD_OUT" || bcftools concat -f "$list" -Oz -o "$GNOMAD_OUT"
-    index_vcf "$GNOMAD_OUT"; record ok gnomad_sites
+    index_vcf "$GNOMAD_OUT"
+    bcftools index -n "$GNOMAD_OUT" >/dev/null 2>&1 || { warn "[gnomad_sites] concatenated oracle failed its integrity check"; record miss gnomad_sites; return 0; }
+    record ok gnomad_sites
 }
 
 prep_clinvar() {

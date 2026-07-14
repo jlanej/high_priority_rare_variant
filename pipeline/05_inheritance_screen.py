@@ -128,14 +128,18 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         denovo_hit = False
         if emit_denovo and not male_x and gc == G.HET and gd == G.HOM_REF and gmm == G.HOM_REF:
             denovo_hit = True
-        elif emit_denovo and male_x and gc == G.HOM_ALT and gd == G.HOM_REF and gmm == G.HOM_REF:
+        # male-X de novo: the son's single X comes from the MOTHER; the father transmits Y, so his
+        # chrX is irrelevant — require only mother hom-ref, not the father.
+        elif emit_denovo and male_x and gc == G.HOM_ALT and gmm == G.HOM_REF:
             denovo_hit = True
         if denovo_hit:
             child_kind = "denovo_child" if not male_x else "hom_alt"
-            ok = (G.sample_qc(v, c, thr, child_kind)
-                  and G.sample_qc(v, d, thr, "clean_parent")
-                  and G.sample_qc(v, m, thr, "clean_parent")
-                  and rare(v, dom_max))
+            # parental cleanliness: both parents for an autosomal de novo; only the transmitting
+            # mother for a male-X de novo (father's chrX is not transmitted to a son).
+            parents_clean = G.sample_qc(v, m, thr, "clean_parent")
+            if not male_x:
+                parents_clean = parents_clean and G.sample_qc(v, d, thr, "clean_parent")
+            ok = (G.sample_qc(v, c, thr, child_kind) and parents_clean and rare(v, dom_max))
             if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
                 ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
             nh = A.nhomalt(v)
@@ -149,29 +153,38 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     r["review_prior_crosscheck"] = "1"
                 rows.append(r)
 
-        # ---- autosomal homozygous recessive (both parents carrier hets) ----
-        if not male_x and not G.is_x_nonpar(v) and gc == G.HOM_ALT and gd == G.HET and gmm == G.HET:
-            if (G.sample_qc(v, c, thr, "hom_alt")
-                    and G.sample_qc(v, d, thr, "het")
-                    and G.sample_qc(v, m, thr, "het")
+        # a transmitting/carrier parent may be HET or (consanguinity, common-ish recessive allele,
+        # affected parent) HOM_ALT — both carry a transmissible alt; QC per its own genotype.
+        def carrier_ok(idx, gtype):
+            if gtype == G.HET:
+                return G.sample_qc(v, idx, thr, "het")
+            if gtype == G.HOM_ALT:
+                return G.sample_qc(v, idx, thr, "hom_alt")
+            return False
+
+        # ---- autosomal homozygous recessive: HOM_ALT child, both parents carriers (HET or HOM_ALT) ----
+        if not male_x and not G.is_x_nonpar(v) and gc == G.HOM_ALT \
+                and gd in (G.HET, G.HOM_ALT) and gmm in (G.HET, G.HOM_ALT):
+            if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(d, gd) and carrier_ok(m, gmm)
                     and rare(v, rec_max)):
                 rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive"), v))
 
-        # ---- X-linked recessive, affected male (hemizygous, carrier mother) ----
-        if male_x and gc == G.HOM_ALT and gmm == G.HET and gd == G.HOM_REF:
-            if (G.sample_qc(v, c, thr, "hom_alt")
-                    and G.sample_qc(v, m, thr, "het")
-                    and rare(v, rec_max)):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
+        # ---- X-linked recessive, affected male: hemizygous son + carrier mother. The father
+        #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and is not
+        #      required — an affected/carrier father or a father chrX no-call must not drop the call. ----
+        if male_x and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
+            if G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm) and rare(v, rec_max):
+                r = base_row(trio_id, v, gt, "x_linked_recessive")
+                if gd in (G.HET, G.HOM_ALT):
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "father_carries_x_allele"
+                rows.append(tag_strict(r, v))
 
-        # ---- X-linked recessive, affected female: HOM_ALT daughter, carrier mother,
-        #      hemizygous-affected father (docs/inheritance_and_genotype_qc.md §3.4) ----
+        # ---- X-linked recessive, affected female: HOM_ALT daughter, carrier mother, hemizygous-
+        #      affected father (he DOES transmit his X to a daughter) (docs §3.4) ----
         if (not male_x and G.is_x_nonpar(v) and gc == G.HOM_ALT
-                and gmm == G.HET and gd == G.HOM_ALT):
-            if (G.sample_qc(v, c, thr, "hom_alt")
-                    and G.sample_qc(v, m, thr, "het")
-                    and G.sample_qc(v, d, thr, "hom_alt")
-                    and rare(v, rec_max)):
+                and gmm in (G.HET, G.HOM_ALT) and gd == G.HOM_ALT):
+            if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm)
+                    and G.sample_qc(v, d, thr, "hom_alt") and rare(v, rec_max)):
                 rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
 
         # ---- collect het candidates (het child, rare, parent-of-origin) ----

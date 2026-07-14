@@ -133,6 +133,30 @@ add(file="B", chrom="chr2", pos=14000, gene="XCONTAM", csq="missense_variant", i
          "SIB_B": ("1/1", 99, 40)},
     adov={"FA_B": "6,34"})   # 6 ref reads at a hom-alt site -> CHARR 0.15 > 0.02 threshold
 
+# --- X-linked recessive with an AFFECTED FATHER (hom-alt hemizygous) + carrier mother: the son
+#     must STILL be called (father transmits Y, not X, to a son) -> tests the father-genotype
+#     relaxation. Flag 'father_carries_x_allele' expected. ---
+add(file="B", chrom="chrX", pos=2782000, gene="GENEXAF", csq="missense_variant", impact="MODERATE",
+    revel="0.90", faf95=1e-4,
+    gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 99, 40),
+         "SIB_B": ("0/0", 99, 40)})
+
+# --- autosomal hom-recessive with a HOM-ALT parent (consanguinity-like): FA_A hom-alt, MO_A het,
+#     CH_A hom-alt -> hom_recessive via the {HET,HOM_ALT} carrier rule (tests carrier_ok HOM_ALT). ---
+add(file="A", chrom="chr1", pos=8500, gene="GENE2H", csq="missense_variant", impact="MODERATE",
+    revel="0.95", faf95=5e-4,
+    gts={"CH_A": ("1/1", 99, 40), "FA_A": ("1/1", 99, 40), "MO_A": ("0/1", 99, 40)})
+
+# --- DISTINCT-variant dominant recurrence across trios A+B in GENEDD (two DIFFERENT rare hets) ->
+#     the stronger 'gene signal'; recurrence_kind=distinct_variant (ranks above same-variant GENED). ---
+add(file="A", chrom="chr2", pos=11000, gene="GENEDD", csq="missense_variant", impact="MODERATE",
+    revel="0.90", faf95=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+add(file="B", chrom="chr2", pos=11100, gene="GENEDD", csq="missense_variant", impact="MODERATE",
+    revel="0.90", faf95=5e-5,
+    gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
+         "SIB_B": ("0/0", 99, 40)})
+
 # --- comp-het CIS rejection: two rare functional hets in GENEC, BOTH inherited from mom
 #     (cis). compound_het requires TRANS (mat x pat), so these must NOT be paired; each is a
 #     dominant (maternal-origin) call instead. Guards the trans-pairing logic. ---
