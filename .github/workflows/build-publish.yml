@@ -70,6 +70,9 @@ jobs:
 
   build-publish:
     runs-on: ubuntu-latest
+    # Gate publishing on the checks: a test-failing (but image-valid) regression must NOT ship to
+    # GHCR:latest where HPC users pull it. lint/test/integration must pass before build+push.
+    needs: [lint, test, integration]
     env:
       REGISTRY: ghcr.io
     steps:

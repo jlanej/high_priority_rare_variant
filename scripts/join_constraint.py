@@ -91,6 +91,16 @@ def main(argv=None) -> int:
     sys.stderr.write(
         f"constraint join -> {a.out}: {len(genes)} genes "
         f"(LOEUF {len(loeuf)}, pLI {len(pli)}, s_het {len(shet)}, pHaplo {len(phaplo)})\n")
+    # Loud WARN if a supplied source contributed ZERO genes overlapping the LOEUF gene set — the
+    # usual cause is a key mismatch (e.g. GeneBayes keys s_het on ENSG, not HGNC symbol), which
+    # would otherwise silently produce an all-empty column that Step 6 treats as "no constraint".
+    loeuf_genes = set(loeuf)
+    for name, path, table in (("s_het", a.shet, shet), ("pHaplo", a.phaplo, phaplo)):
+        if path and table and loeuf_genes and not (set(table) & loeuf_genes):
+            sys.stderr.write(
+                f"WARN: {name} ({path}) loaded {len(table)} rows but 0 overlap the LOEUF gene set — "
+                f"likely a gene-key mismatch (ENSG vs symbol). The {name} column will be empty; "
+                f"map keys to HGNC symbols or point at a symbol-keyed file.\n")
     return 0
 
 

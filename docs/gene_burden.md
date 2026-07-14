@@ -36,7 +36,7 @@ Step 6 aggregates the per-family candidate calls (from the inheritance screen, s
 | --- | --- | --- |
 | **Dominant (inherited het)** | Rare, functional **heterozygous** variant transmitted from ≥ 1 parent (parent-of-origin recorded: maternal / paternal / both), **not** part of a compound-het pair | `faf95` < 1e-4 |
 | **Biallelic** | Homozygous **or** compound het (two rare hets, same gene, in *trans*) | `faf95` < 1e-2 (permissive) / 1e-3 (high-confidence) per allele |
-| **X-linked recessive** | Male hemizygous + carrier mother; sex-aware ploidy | `faf95` < 1e-4 |
+| **X-linked recessive** | Affected male (hemizygous) + carrier mother (father's chrX not required); or affected female (hom-alt, carrier mother, hemizygous father); sex-aware ploidy | `faf95` < 1e-2 (permissive) per allele |
 | **De novo (secondary)** | GATK `hiConfDeNovo`, child-membership checked (`annotations.is_hiconf_denovo_for`) | counted in a **separate** column, not part of the recurrence driver |
 
 The dominant-het count is the **key new signal**: individually a rare inherited het is weak evidence, but a gene that accumulates such hets across **multiple distinct individuals** is a strong nomination.
@@ -44,7 +44,7 @@ The dominant-het count is the **key new signal**: individually a rare inherited 
 ### Recurrence flag and ranking
 
 - A gene is **recurrent** when its distinct-individual carrier count reaches **`min_carriers` (default 2)**.
-- Genes are ranked **recurrent-first**, then **constraint-weighted** (constrained = LOEUF < 0.35 **or** pLI ≥ 0.9), then by carrier / dominant-het counts. A recurrent het in a **haploinsufficient** gene ranks highest.
+- Genes are ranked **recurrent-first**, then **distinct-variant** recurrence above same-variant (founder/artifact), then by the strongest per-model recurrence p, then **constraint-weighted** (constrained = LOEUF < 0.35 **or** pLI ≥ 0.9 **or** s_het ≥ 0.1 **or** pHaplo ≥ 0.86), then by carrier / dominant-het counts. A recurrent het in a **haploinsufficient** gene ranks highest.
 - De novo carrier counts and the optional de novo enrichment p-value are carried as **secondary columns** used only to break ties after the recurrence and constraint keys.
 
 ## Optional secondary signal: de novo enrichment vs a mutation model

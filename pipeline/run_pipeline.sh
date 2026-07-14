@@ -46,6 +46,9 @@ eval "$_cfg_sh"
 
 is_set "${HPRV_OUTPUT_DIR:-}"  || die "project.output_dir is unresolved — set the env var it references"
 is_set "${HPRV_REF_FASTA:-}"   || die "reference.fasta is unresolved — set the env var it references"
+# existence, not just placeholder-resolution: a wrong bind-mount must fail here, not mid-Step-1
+[[ -f "$HPRV_REF_FASTA" ]]     || die "reference FASTA not found: $HPRV_REF_FASTA (check the bind mount)"
+[[ -f "$HPRV_REF_FASTA.fai" ]] || warn "reference index $HPRV_REF_FASTA.fai missing — bcftools norm/samtools will samtools-faidx or fail; run 'samtools faidx $HPRV_REF_FASTA'"
 is_set "${HPRV_TRIOS_FILE:-}"  || die "inputs.trios_file is unresolved — set the env var it references"
 [[ -f "$HPRV_TRIOS_FILE" ]]    || die "trios file not found: $HPRV_TRIOS_FILE"
 is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf_dir and/or inputs.vcf_list"
