@@ -9,8 +9,9 @@
 #     conda-lock lock -f env/environment.yml -p linux-64 --lockfile env/conda-lock.yml
 # (conda-lock pins each package with a hash; environment.yml pins only versions.)
 #
-# The env is intentionally PERL-FREE so nothing here shadows the base image's Perl,
-# which VEP depends on.
+# This env must not shadow the base image's Perl (VEP depends on it). It is NOT inherently
+# perl-free — bioconda's bcftools/samtools pull `perl` in transitively — so the Dockerfile
+# REMOVES the conda Perl after the solve, so VEP's `env perl` resolves to the base image's Perl.
 # =============================================================================
 name: hprv
 channels:

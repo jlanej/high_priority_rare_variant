@@ -41,10 +41,16 @@ COPY env/environment.yml /tmp/environment.yml
 RUN set -eux; \
     micromamba create -y -p "${HPRV_ENV}" -f /tmp/environment.yml; \
     micromamba clean -a -y; \
-    rm -f /tmp/environment.yml
+    rm -f /tmp/environment.yml; \
+    # bioconda tools (bcftools/samtools/...) drag `perl` into the env as a transitive dep. With
+    # the env prepended to PATH it would SHADOW the base image's VEP Perl, so VEP's `#!/usr/bin/env
+    # perl` (and its plugins, incl. LOFTEE) would run under the conda Perl and fail to load their
+    # modules. Nothing in this pipeline uses the conda Perl, so remove it to keep the env GENUINELY
+    # perl-free — the invariant VEP relies on — so `env perl` resolves to the base image's Perl.
+    find "${HPRV_ENV}/bin" -maxdepth 1 \( -name 'perl' -o -name 'perl5*' \) -delete 2>/dev/null || true
 
-# Analysis tools resolve from the conda env. The env is perl-free, so VEP's
-# `env perl` still finds the base image's system Perl and VEP is unaffected.
+# Analysis tools resolve from the conda env; the env is kept perl-free (above), so VEP's
+# `env perl` finds the base image's system Perl and VEP + its plugins are unaffected.
 ENV PATH=${HPRV_ENV}/bin:$PATH
 
 # --- LOFTEE plugin CODE (GRCh38 fork) ---------------------------------------
@@ -69,8 +75,11 @@ RUN set -eux; \
     apt-get clean; rm -rf /var/lib/apt/lists/*; \
     # GUARANTEE: the plugin CODE must be present — fail the build if not
     for p in LoF CADD dbNSFP SpliceAI; do test -f "/plugins/$p.pm" || { echo "MISSING plugin code: /plugins/$p.pm" >&2; exit 1; }; done; \
-    # REPORT (non-fatal): LOFTEE runtime Perl deps — a missing one errors clearly when LoF runs
-    for m in DBI DBD::SQLite Bio::DB::BigFile Bio::Perl; do \
+    # ASSERT the conda-Perl un-shadow worked: `perl` must now be the base image's VEP Perl, which
+    # has DBI (a hard VEP dependency). If this fails, VEP itself is running under the wrong Perl.
+    perl -MDBI -e1 || { echo "FATAL: PATH perl lacks DBI — the conda Perl is still shadowing VEP's Perl" >&2; exit 1; }; \
+    # REPORT (non-fatal): remaining LOFTEE runtime Perl deps (Bio::DB::BigFile is a base `recommends`)
+    for m in DBD::SQLite Bio::DB::BigFile Bio::Perl; do \
         if perl -M"$m" -e1 2>/dev/null; then echo "loftee dep OK: $m"; \
         else echo "WARN: loftee Perl dep not loadable at build: $m (LoF will error at runtime if truly missing)" >&2; fi; \
     done
