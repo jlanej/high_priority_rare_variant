@@ -31,7 +31,11 @@
 !tests/**/*.ped
 
 # --- Reference resources / annotation caches (large, versioned externally) ---
-resources/
+# Ignore prepared resource DATA, but KEEP the pinned manifest (public URLs/versions/checksums —
+# the single source of truth prepare_resources.sh reads; no paths/PHI). Use resources/* (not
+# resources/) so the exception can re-include the file.
+resources/*
+!resources/manifest.env
 vep_cache/
 *.sif                     # Apptainer/Singularity images
 *.tsv.gz                  # CADD/dbNSFP style annotation tables
