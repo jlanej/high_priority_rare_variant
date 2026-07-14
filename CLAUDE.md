@@ -42,7 +42,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 - **One image** (`Dockerfile`): the group's validated `ensemblorg/ensembl-vep:release_115.0`
   base + a pinned micromamba env (`env/environment.yml`) for bcftools/bedtools/slivar/somalier/
-  whatshap/python. The conda env is deliberately perl-free so it never shadows VEP's Perl.
+  whatshap/python. The conda env must not shadow VEP's Perl — bioconda drags `perl` in, so the
+  Dockerfile removes the conda Perl after solve (VEP's `env perl` must resolve to the base's Perl).
 - **Config → env → scripts.** `config/config.example.yaml` is the contract. `src/hprv/config.py`
   loads it, expands `${ENV}`, and emits shell exports (`python -m hprv.config sh`). The bash
   steps take explicit args; `run_pipeline.sh` maps config → args.
