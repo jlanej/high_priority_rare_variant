@@ -101,6 +101,38 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # Build the image locally FIRST so we can smoke-test the real (non-mocked) VEP before
+      # publishing. The integration job mocks VEP (cache is too heavy for CI), so this is the
+      # only place the image's actual VEP + plugin Perl stack is exercised. Layers are gha-cached
+      # and reused by the push step below (near-instant), so this does not double the build cost.
+      - name: Build image (load for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: hprv:ci
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Non-mocked smoke test: VEP must actually start (loads its Perl modules under the image's
+      # env — catches the conda-Perl-shadow class of bug the mocked integration test cannot), and
+      # LOFTEE's Perl deps + all four plugin .pm must be present in VEP's Perl. Any failure here
+      # fails the job before the push below, so a broken image is never published.
+      - name: Smoke test — real VEP + LOFTEE Perl deps + plugin code
+        run: |
+          docker run --rm hprv:ci bash -c '
+            set -eu
+            echo "vep interpreter: $(head -1 "$(command -v vep)")"
+            vep --help >/dev/null && echo "OK: vep --help (VEP + its Perl modules load)"
+            for m in DBI DBD::SQLite Bio::DB::BigFile Bio::Perl Bio::DB::HTS; do
+              perl -M"$m" -e1 && echo "OK: perl module $m"
+            done
+            for p in LoF CADD dbNSFP SpliceAI; do
+              test -f "/plugins/$p.pm" && echo "OK: plugin /plugins/$p.pm"
+            done
+          '
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
