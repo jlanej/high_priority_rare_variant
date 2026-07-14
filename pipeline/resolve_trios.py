@@ -100,11 +100,19 @@ def main(argv=None) -> int:
     res_audit = os.path.join(args.outdir, "trio_resolution.tsv")
 
     n_res = n_unres = n_ambig = 0
+    seen_kids = set()
     with open(manifest, "w") as mf, open(res_audit, "w") as af:
         mf.write("trio_id\tvcf\tped\tsamples\n")
         af.write("kid\tdad\tmom\tstatus\tchosen_vcf\tn_candidate_vcfs\t"
                  "missing_members\tn_samples_in_chosen\n")
         for kid, dad, mom in trios:
+            # trio_id (= proband) must be unique — a duplicate would write two manifest rows and
+            # overwrite the PED, silently losing one intended analysis. Keep the first, skip + warn.
+            if kid in seen_kids:
+                sys.stderr.write(f"WARN: duplicate proband '{kid}' in trios file — SKIPPING this row "
+                                 f"(first mapping kept; trio_id must be unique)\n")
+                continue
+            seen_kids.add(kid)
             members = {"kid": kid, "dad": dad, "mom": mom}
             missing = [f"{role}:{sid}" for role, sid in members.items() if sid not in s2v]
             candidates = (s2v.get(kid, set()) & s2v.get(dad, set()) & s2v.get(mom, set()))
