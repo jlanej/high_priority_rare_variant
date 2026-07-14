@@ -35,7 +35,7 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 | VEP plugin **code** (`.pm`) | CADD/dbNSFP/SpliceAI + LOFTEE grch38 | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
 | gnomAD v4.1 **joint** sites | rarity oracle (**faf95**) | `resources.gnomad.sites_vcf` (`GNOMAD_SITES`) | free, large (slimmed) | ~tens GB |
 | ClinVar GRCh38 VCF | clinical evidence | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free | ~0.2 GB |
-| dbNSFP | REVEL/AlphaMissense/MPC/MetaRNN/CADD_phred | `resources.vep.dbnsfp` (`DBNSFP`) | **license-gated** | ~30 GB |
+| dbNSFP | REVEL/AlphaMissense/MPC/MetaRNN (its CADD_phred is **not** requested — CADD comes from the plugin) | `resources.vep.dbnsfp` (`DBNSFP`) | **license-gated** | ~30 GB |
 | CADD SNV + indel | CADD plugin — **the complete, genome-wide CADD** (dbNSFP CADD dropped) | `CADD_SNV` / `CADD_INDEL` | **license-gated**, huge | ~80 GB |
 | SpliceAI precomputed | splicing (SpliceAI plugin) | `SPLICEAI_SNV` / `SPLICEAI_INDEL` | **license-gated** | ~40 GB |
 | LOFTEE GRCh38 data | pLoF confidence (LoF plugin) | `resources.vep.loftee_data` (`LOFTEE_DATA`) | free | ~several GB |

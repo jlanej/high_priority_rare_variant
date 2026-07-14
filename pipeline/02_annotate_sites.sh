@@ -125,10 +125,23 @@ want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT CAN
       LoF LoF_filter LoF_flags"
 have_fields=""
 for w in $want; do
-    printf '%s' "|$csq_fmt|" | grep -q "|$w|" && have_fields+="${have_fields:+,}$w"
+    [[ "|$csq_fmt|" == *"|$w|"* ]] && have_fields+="${have_fields:+,}$w"
 done
 [[ -n "$have_fields" ]] || die "none of the desired CSQ fields are present"
 log "Step 2: split-vep lifting fields: $have_fields"
+
+# core VEP fields must always be present; their absence means the annotation itself is broken
+_have() { case ",$have_fields," in *",$1,"*) return 0;; *) return 1;; esac; }
+for core in Consequence IMPACT SYMBOL; do
+    _have "$core" || die "VEP CSQ is missing core field '$core' — annotation is broken (bad cache/plugins?)"
+done
+# functional predictors: warn LOUDLY (not fatal — a mode can proceed on other evidence) when a
+# CONFIGURED plugin's field did not land, so a misconfigured dbNSFP/SpliceAI/CADD/LOFTEE is caught
+# rather than silently dropping that evidence on the whole cohort.
+if is_set "${HPRV_DBNSFP:-}"      && ! _have REVEL_score;         then warn "dbNSFP configured but no vep_REVEL_score lifted — check the dbNSFP plugin columns"; fi
+if is_set "${HPRV_SPLICEAI_SNV:-}" && ! _have SpliceAI_pred_DS_AG; then warn "SpliceAI configured but no vep_SpliceAI_pred_DS lifted — check the SpliceAI plugin"; fi
+if is_set "${HPRV_CADD_SNV:-}"    && ! _have CADD_PHRED;          then warn "CADD configured but no vep_CADD_PHRED lifted — check the CADD plugin"; fi
+if { is_set "${HPRV_LOFTEE_DATA:-}" || is_set "${HPRV_LOF_PLUGIN:-}"; } && ! _have LoF; then warn "LOFTEE configured but no vep_LoF lifted — check the LoF plugin / data files"; fi
 
 split_vcf="$HPRV_TMPDIR/split.vcf.gz"
 hprv_run -- bcftools +split-vep -c "$have_fields" -s worst -p vep_ \

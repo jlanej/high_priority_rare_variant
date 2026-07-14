@@ -22,7 +22,7 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 
 ## What it does
 
-A resolve preflight + seven-step flow (see **[docs/pipeline_design.md](docs/pipeline_design.md)**
+A resolve preflight + nine-step flow (Steps 0–8; see **[docs/pipeline_design.md](docs/pipeline_design.md)**
 for the vetted design and the artifact each step produces):
 
 | Step | What | Output |
@@ -70,9 +70,10 @@ allele frequency — a CI lower bound), not internal counts. Benign-common varia
 
 **4. Plausible-variant selection.** An inheritance-agnostic filter keeps a site if it is rare
 (permissive-union cutoff) **and** functionally credible — HIGH/MODERATE VEP impact, LOFTEE-HC
-pLoF, calibrated missense (REVEL / AlphaMissense), or SpliceAI — with **ClinVar P/LP** (≥1★) kept
-as an override. Each kept site is tagged with *why* (`hprv_keep_reason`). Gene lists and
-constraint are **not** applied here (never-drop rule), so novel genes survive.
+pLoF, calibrated missense (REVEL / AlphaMissense / MPC), CADD, or SpliceAI — with **ClinVar P/LP**
+(**≥ 2★**, no conflicts) kept as an override. Each kept site is tagged with *why*
+(`hprv_keep_reason`). Gene lists and constraint are **not** applied here (never-drop rule), so
+novel genes survive.
 
 **5. Per-trio inheritance screen (inherited focus).** Real per-trio genotypes are recovered at
 the plausible sites and classified with refined-`GQ` genotype QC (GQ ≥ 20, DP ≥ 10, allele
