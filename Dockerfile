@@ -59,10 +59,12 @@ ENV PATH=${HPRV_ENV}/bin:$PATH
 # (konradjk/loftee) — so LoF.pm is absent. Bake the *grch38 branch* (master is GRCh37-only)
 # into /plugins so a single `--dir_plugins /plugins` (and loftee_path:/plugins) serves all four
 # plugins. LOFTEE's Perl deps (Bio::DB::BigFile against the Kent lib, DBI, Bio::Perl) are provided
-# by the base image; DBD::SQLite is only a `recommends` there, so ensure it. The plugin-.pm checks
-# HARD-FAIL the build (that is the guarantee this layer makes); the Perl-dep checks only REPORT — a
-# base `recommends` may not have compiled, and a truly missing runtime dep surfaces clearly when the
-# LoF plugin runs, so hard-failing on it would block an otherwise-working image.
+# by the base image; DBD::SQLite is only a `recommends` there, so ensure it. Both the plugin-.pm
+# existence AND every LOFTEE runtime Perl dep HARD-FAIL the build: now that the conda Perl no longer
+# shadows VEP's Perl (see the env layer), all of DBI/DBD::SQLite/Bio::DB::BigFile/Bio::Perl must load
+# in VEP's Perl — a broken or GERP-less LOFTEE must never ship silently. If a base `recommends`
+# (e.g. Bio::DB::BigFile via the Kent lib) turns out not to have compiled, the build says so loudly
+# and we add an explicit build for it.
 # Only plugin CODE is baked — the DATA (human_ancestor/GERP/loftee.sql) is host-fetched.
 # Repro note: pin a grch38 commit SHA for byte-identical rebuilds (the branch tip moves).
 RUN set -eux; \
@@ -75,13 +77,10 @@ RUN set -eux; \
     apt-get clean; rm -rf /var/lib/apt/lists/*; \
     # GUARANTEE: the plugin CODE must be present — fail the build if not
     for p in LoF CADD dbNSFP SpliceAI; do test -f "/plugins/$p.pm" || { echo "MISSING plugin code: /plugins/$p.pm" >&2; exit 1; }; done; \
-    # ASSERT the conda-Perl un-shadow worked: `perl` must now be the base image's VEP Perl, which
-    # has DBI (a hard VEP dependency). If this fails, VEP itself is running under the wrong Perl.
-    perl -MDBI -e1 || { echo "FATAL: PATH perl lacks DBI — the conda Perl is still shadowing VEP's Perl" >&2; exit 1; }; \
-    # REPORT (non-fatal): remaining LOFTEE runtime Perl deps (Bio::DB::BigFile is a base `recommends`)
-    for m in DBD::SQLite Bio::DB::BigFile Bio::Perl; do \
-        if perl -M"$m" -e1 2>/dev/null; then echo "loftee dep OK: $m"; \
-        else echo "WARN: loftee Perl dep not loadable at build: $m (LoF will error at runtime if truly missing)" >&2; fi; \
+    # Every LOFTEE runtime Perl dep must load in VEP's Perl (DBI also proves the conda-Perl un-shadow
+    # worked; DBD::SQLite = conservation db; Bio::DB::BigFile = GERP bigwig; Bio::Perl) — fail loudly.
+    for m in DBI DBD::SQLite Bio::DB::BigFile Bio::Perl; do \
+        perl -M"$m" -e1 2>/dev/null || { echo "FATAL: LOFTEE Perl dep not loadable: $m — conda Perl still shadowing VEP's, or a base 'recommends' (e.g. Bio::DB::BigFile via the Kent lib) did not compile; add an explicit install." >&2; exit 1; }; \
     done
 
 # VEP's plugin-code dir in this base is /plugins; expose it under our config's ${VEP_PLUGINS}
