@@ -326,7 +326,9 @@ do_emit() {
         echo "export GNOMAD_V2_CONSTRAINT=$CONSTRAINT_OUT"
         echo "export MUTRATE_TABLE=$MUTRATE_OUT"
     } > "$w"
-    [[ -n "$EMIT_OUT" ]] && log "wrote env exports -> $EMIT_OUT"
+    # `if`, not `[[ ]] && log`: as the LAST statement of the function a false test would make
+    # do_emit return 1, and `set -e` would kill the script AFTER a successful emit to stdout.
+    if [[ -n "$EMIT_OUT" ]]; then log "wrote env exports -> $EMIT_OUT"; fi
 }
 
 # -------- dispatch ---------------------------------------------------------- #
