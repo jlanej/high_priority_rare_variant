@@ -188,6 +188,46 @@ if ! _have CLIN_SIG; then warn "no vep_CLIN_SIG lifted — the ClinVar P/LP over
 if is_set "${HPRV_CSQ_SELECT:-}"; then sel="$HPRV_CSQ_SELECT"
 elif [[ "|$csq_fmt|" == *"|PICK|"* ]]; then sel="pick"
 else sel="worst"; fi
+
+# `pick` and `mane` are RECENT split-vep selectors; older bcftools knows only all/worst/primary and
+# dies with "the transcript selection key ... is not recognised" — AFTER VEP has already run, which
+# on real data is hours wasted. Probe the plugin's own usage and fail here with something
+# actionable. Parsed from the usage text rather than a version number so it cannot rot; note the
+# trigger must be `--help` (no-args prints nothing useful), and we read only the selector list —
+# grepping the whole usage would match 'mane' inside "MANE_SELECT" in the prose below it.
+# NOT auto-downgraded to `worst`: on a --flag_pick VCF that silently swaps "the transcript VEP
+# chose" for "the worst consequence across all transcripts" — a different annotation, and exactly
+# the kind of quiet science change this pipeline exists to prevent. The image pins a bcftools that
+# supports these; this only bites host-mode runs (CLAUDE.md "Dev/host").
+case "$sel" in
+    all|worst|primary) ;;   # available in every bcftools that ships split-vep
+    *)
+        # Two subtleties, both learned the hard way:
+        #  * `|| true` — +split-vep --help exits 255 (it has no real help flag; the usage dump IS
+        #    the error path). Under `set -o pipefail` that propagates out of the command
+        #    substitution and kills the step silently, with no message at all.
+        #  * the regex must match BOTH usage wordings. Older bcftools prints
+        #    "TR, transcript:   worst,primary(*),all", newer prints
+        #    "TR, filter transcripts:   all,worst,primary,pick,mane,EXPRESSION". Matching only the
+        #    new one would leave _sv_keys empty on exactly the old versions this check exists for,
+        #    silently downgrading the good error back to bcftools' cryptic one.
+        _sv_keys="$( { hprv_run -- bcftools +split-vep --help 2>&1 || true; } | sed -n 's/.*TR, \(filter \)*transcripts*:[[:space:]]*//p' | head -1)"
+        if [[ -z "$_sv_keys" ]]; then
+            # Unrecognised usage format: warn rather than block. bcftools' own error is survivable;
+            # a false die here would be worse than the cryptic message we are trying to improve on.
+            warn "could not read +split-vep's selector list to pre-check '-s $sel'; continuing (bcftools will error if unsupported)"
+        else
+            case "$_sv_keys" in
+                *"$sel"*) ;;
+                *) die "this bcftools's +split-vep does not support the '$sel' transcript selector — it offers: ${_sv_keys}. \
+$(hprv_run -- bcftools --version 2>/dev/null | head -1). The image pins a bcftools that supports it, so run inside \
+the image or upgrade. You may instead set resources.vep.csq_select to all|worst|primary — but do NOT reach for \
+'worst' on a --flag_pick VCF unless you mean it: it takes the worst consequence ACROSS transcripts rather than the \
+one VEP picked, changing every downstream SYMBOL/IMPACT."
+            esac
+        fi
+        ;;
+esac
 log "Step 2: split-vep transcript selection: -s $sel"
 
 split_vcf="$HPRV_TMPDIR/split.vcf.gz"
