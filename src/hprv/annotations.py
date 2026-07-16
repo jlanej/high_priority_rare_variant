@@ -1,10 +1,17 @@
 """Read the annotations produced by pipeline Step 2 and evaluate genotype QC.
 
-Step 2 lifts VEP/plugin fields to INFO with a ``vep_`` prefix (via ``bcftools
-+split-vep``) and transfers external population/clinical annotations as
-``hprv_gnomad_*`` / ``hprv_clnsig`` etc. This module is the single place that knows
-those field names and how to coerce their (string) values, so the selection,
-inheritance, and burden steps all read them identically.
+**VEP-only contract.** Every annotation this pipeline reads comes from ONE source: a VEP
+115 (GRCh38) VCF whose CSQ fields Step 2 lifts to INFO with a ``vep_`` prefix (via
+``bcftools +split-vep``). No external sites VCF is transferred in — no gnomAD, ClinVar,
+dbNSFP, SpliceAI or LOFTEE file is fetched or bind-mounted. The only plugin required is
+CADD (genome-wide, SNV+indel); everything else rides in the cache. This module is the
+single place that knows those field names and how to coerce their (string) values, so the
+selection, inheritance, and burden steps all read them identically.
+
+What that costs is documented in docs/allele_frequency.md and docs/functional_annotation.md;
+in short: no faf95 (no CI correction), no nhomalt, no SpliceAI, no LOFTEE, no ClinVar
+review status. Reintroducing any of them means adding its INFO field here and a transfer
+in Step 2 — nothing else in the codebase reaches around this contract.
 
 All getters are defensive: they return ``None`` for missing/'.'/unparseable values
 and take the max over ``&``/``,``-joined multi-transcript values for scores.
@@ -15,8 +22,19 @@ from __future__ import annotations
 from typing import Optional
 
 
+# gnomAD v4.1 genetic-ancestry groups that gnomAD's OWN grpmax includes. grpmax
+# deliberately EXCLUDES asj / fin / mid / ami / remaining: bottlenecked founder groups
+# whose small ANs make a point-estimate AF wildly unrepresentative of any general
+# population (ami AN ~900 — a single allele reads as AF ~1e-3, ten-fold over the
+# dominant gate). Mirroring that inclusion set is precisely what makes the per-population
+# CSQ max a defensible grpmax proxy. VEP's own MAX_AF is NOT usable here: it maximises
+# over all gnomAD groups AND the tiny 1000 Genomes phase-3 populations, reintroducing
+# exactly the false-negative mode grpmax exists to prevent. See docs/allele_frequency.md.
+GRPMAX_POPS = ("AFR", "AMR", "EAS", "NFE", "SAS")
+
 # --- INFO field names written by Step 2 (single source of truth) -------------
 F = {
+    # --- core VEP consequence block ---
     "consequence": "vep_Consequence",
     "impact": "vep_IMPACT",
     "symbol": "vep_SYMBOL",
@@ -26,33 +44,50 @@ F = {
     "hgvsc": "vep_HGVSc",
     "hgvsp": "vep_HGVSp",
     "mane": "vep_MANE_SELECT",
-    "revel": "vep_REVEL_score",
-    "alphamissense": "vep_AlphaMissense_score",
-    "alphamissense_pred": "vep_AlphaMissense_pred",
-    "mpc": "vep_MPC_score",
-    "metarnn": "vep_MetaRNN_score",
-    # CADD comes from the dedicated CADD plugin: CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep.
-    # (dbNSFP's coding-only CADD_phred is deliberately not requested; see 02_annotate_sites.sh.)
+    # --- functional prediction ---
+    # CADD from the dedicated plugin (CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep):
+    # genome-wide, SNV+indel, and under this contract the ONLY functional predictor.
+    # It is therefore the sole keep-path for anything VEP rates below MODERATE. CADD
+    # v1.6+ ingests SpliceAI/MMSplice as input features, so it carries a lossy
+    # re-encoding of the splice signal the SpliceAI plugin would have supplied.
     "cadd": "vep_CADD_PHRED",
-    "spliceai_ag": "vep_SpliceAI_pred_DS_AG",
-    "spliceai_al": "vep_SpliceAI_pred_DS_AL",
-    "spliceai_dg": "vep_SpliceAI_pred_DS_DG",
-    "spliceai_dl": "vep_SpliceAI_pred_DS_DL",
-    "loftee": "vep_LoF",
-    "loftee_filter": "vep_LoF_filter",
-    "loftee_flags": "vep_LoF_flags",
-    "gnomad_af": "hprv_gnomad_af",
-    "gnomad_grpmax_af": "hprv_gnomad_grpmax_af",
-    "gnomad_faf95": "hprv_gnomad_faf95",
-    "gnomad_nhomalt": "hprv_gnomad_nhomalt",
-    "clnsig": "hprv_clnsig",
-    "clnrevstat": "hprv_clnrevstat",
-    "clnsigconf": "hprv_clnsigconf",
+    # --- clinical ---
+    # ClinVar significance as cached by VEP (--check_existing, via --everything).
+    # The cache exposes CLIN_SIG ONLY: there is no review status (CLNREVSTAT), so star
+    # ratings are unavailable and the >=2-star auto-promote gate cannot be applied.
+    # Values are lowercase, '&'-joined (e.g. "pathogenic&likely_pathogenic").
+    "clnsig": "vep_CLIN_SIG",
+    # --- population frequency (gnomAD v4.1, cached; --af_gnomade / --af_gnomadg) ---
+    # POINT ESTIMATES. The cache carries no AC/AN, so faf95's CI correction is not
+    # reconstructible from them at any cost — it is simply absent, not approximated.
+    "gnomade_afr_af": "vep_gnomADe_AFR_AF",
+    "gnomade_amr_af": "vep_gnomADe_AMR_AF",
+    "gnomade_eas_af": "vep_gnomADe_EAS_AF",
+    "gnomade_nfe_af": "vep_gnomADe_NFE_AF",
+    "gnomade_sas_af": "vep_gnomADe_SAS_AF",
+    "gnomadg_afr_af": "vep_gnomADg_AFR_AF",
+    "gnomadg_amr_af": "vep_gnomADg_AMR_AF",
+    "gnomadg_eas_af": "vep_gnomADg_EAS_AF",
+    "gnomadg_nfe_af": "vep_gnomADg_NFE_AF",
+    "gnomadg_sas_af": "vep_gnomADg_SAS_AF",
+    # Global AFs + MAX_AF: REPORTING ONLY, never a filter field. Global AF dilutes an
+    # ancestry-enriched benign variant across the whole cohort (false-positive
+    # retention); MAX_AF over-counts founder groups (false-negative loss). Both failure
+    # modes are real and they run in opposite directions — hence grpmax_af() below.
+    "gnomade_af": "vep_gnomADe_AF",
+    "gnomadg_af": "vep_gnomADg_AF",
+    "max_af": "vep_MAX_AF",
+    "max_af_pops": "vep_MAX_AF_POPS",
     # GATK PossibleDeNovo tags carried from the source trio VCF (value = comma-delimited
-    # list of child sample IDs for which this is a candidate de novo).
+    # list of child sample IDs for which this is a candidate de novo). Not a VEP field.
     "hiconf_denovo": "hiConfDeNovo",
     "loconf_denovo": "loConfDeNovo",
 }
+
+# The grpmax-eligible AF fields, in F-key form, for grpmax_af()'s max.
+_GRPMAX_KEYS = tuple(
+    f"gnomad{src}_{pop.lower()}_af" for src in ("e", "g") for pop in GRPMAX_POPS
+)
 
 # HIGH-impact / loss-of-function VEP consequence terms.
 LOF_CONSEQUENCES = {
@@ -60,18 +95,6 @@ LOF_CONSEQUENCES = {
     "stop_gained", "frameshift_variant", "stop_lost", "start_lost",
     "transcript_amplification",
 }
-
-_STAR = {
-    "practice_guideline": 4,
-    "reviewed_by_expert_panel": 3,
-    "criteria_provided,_multiple_submitters,_no_conflicts": 2,
-    "criteria_provided,_conflicting_classifications": 1,
-    "criteria_provided,_single_submitter": 1,
-    "no_assertion_criteria_provided": 0,
-    "no_classification_provided": 0,
-    "no_assertion_provided": 0,
-}
-
 
 def _raw(variant, key: str):
     try:
@@ -108,49 +131,39 @@ def _max_float(variant, *keys) -> Optional[float]:
 
 
 # --- population frequency ----------------------------------------------------
-def faf95(variant) -> Optional[float]:
-    return _max_float(variant, "gnomad_faf95")
-
-
 def grpmax_af(variant) -> Optional[float]:
-    return _max_float(variant, "gnomad_grpmax_af")
+    """Max gnomAD v4.1 AF over the grpmax-ELIGIBLE ancestry groups (see GRPMAX_POPS).
 
-
-def nhomalt(variant) -> Optional[float]:
-    return _max_float(variant, "gnomad_nhomalt")
+    A point estimate standing in for gnomAD's published grpmax AF. It is NOT faf95:
+    faf95 is the lower bound of the 95% CI, and computing it needs AC/AN, which the VEP
+    cache does not carry. So this runs ~one CI-width HIGH on low-AC observations, and a
+    rarity gate driven by it fires slightly more often than a faf95 gate would (i.e. it
+    errs toward dropping). Excluding the bottlenecked groups removes the large half of
+    that error; the residual is bounded by AC and documented in docs/allele_frequency.md.
+    """
+    return _max_float(variant, *_GRPMAX_KEYS)
 
 
 def frequency(variant) -> Optional[float]:
-    """Rarity field = grpmax faf95, falling back to grpmax AF only. Returns None if
-    neither is present (None => 'not seen in gnomAD' => rarest). Global AF is NEVER
-    used as a filter field (it dilutes ancestry-enriched variants); see
-    docs/allele_frequency.md."""
-    for fn in (faf95, grpmax_af):
-        v = fn(variant)
-        if v is not None:
-            return v
-    return None
+    """The rarity field every gate reads — the single chokepoint for population frequency.
+
+    None => no grpmax-eligible group reports this allele => treat as rarest. Note that
+    under the VEP-cache contract, absence is weaker evidence than it was with a gnomAD
+    sites VCF: the cache only carries frequencies for alleles accessioned into dbSNP, so
+    an un-accessioned gnomAD variant silently returns no AF and reads as 'absent'. That
+    biases toward retention (extra review), not toward missed calls.
+    """
+    return grpmax_af(variant)
 
 
 # --- functional predictors ---------------------------------------------------
-def revel(variant) -> Optional[float]:
-    return _max_float(variant, "revel")
-
-
-def alphamissense(variant) -> Optional[float]:
-    return _max_float(variant, "alphamissense")
-
-
-def mpc(variant) -> Optional[float]:
-    return _max_float(variant, "mpc")
-
-
+# CADD is the only one available under the VEP-only contract. REVEL / AlphaMissense /
+# MPC / MetaRNN (dbNSFP) and SpliceAI are gone with their resource files; their getters
+# and their Step-3 branches were removed rather than left to return None forever. Note
+# the missense trio was already inert BEFORE removal: they are missense-only scores, and
+# every missense is IMPACT=MODERATE, which selection.py keeps at an earlier branch.
 def cadd(variant) -> Optional[float]:
     return _max_float(variant, "cadd")
-
-
-def spliceai_max(variant) -> Optional[float]:
-    return _max_float(variant, "spliceai_ag", "spliceai_al", "spliceai_dg", "spliceai_dl")
 
 
 def impact(variant) -> Optional[str]:
@@ -165,34 +178,33 @@ def consequence(variant) -> Optional[str]:
     return _str(variant, "consequence")
 
 
-def is_loftee_hc(variant) -> bool:
-    return (_str(variant, "loftee") or "").upper() == "HC"
-
-
-def loftee_flags(variant) -> Optional[str]:
-    return _str(variant, "loftee_flags")
-
-
 # --- clinical ----------------------------------------------------------------
+# ClinVar here is the VEP cache's CLIN_SIG, NOT a ClinVar VCF transfer. Two consequences
+# the reader must hold onto:
+#   1. NO review status. The cache has no CLNREVSTAT, so star ratings do not exist and
+#      clinvar_stars()/the >=2-star auto-promote gate are gone. A 1-star single-submitter
+#      P/LP assertion is now indistinguishable from an expert-panel one.
+#   2. It is as stale as the cache (VEP 115 GRCh38 caches ClinVar 2025-02), whereas the
+#      ClinVar VCF ships monthly. Reclassification is real; treat P/LP as a triage
+#      prior, never as an answer.
+# Both push toward false-positive retention (more to review), not toward missed calls.
 def clnsig(variant) -> Optional[str]:
     return _str(variant, "clnsig")
 
 
 def clnsig_is_plp(variant) -> bool:
+    """True for a ClinVar P/LP assertion. VEP's CLIN_SIG is lowercase and '&'-joined
+    (e.g. 'pathogenic&likely_pathogenic'); the ClinVar VCF's CLNSIG was Capitalised and
+    '/'-or-','-joined. Both forms are matched so the predicate survives either source."""
     s = (clnsig(variant) or "").lower()
     if not s:
         return False
     # Treat conflicting as NOT P/LP even if the token appears in the conflict string.
+    # VEP uses 'conflicting_interpretations_of_pathogenicity' /
+    # 'conflicting_classifications_of_pathogenicity'; the substring covers both.
     if "conflicting" in s:
         return False
     return "pathogenic" in s and "likely_benign" not in s and "benign/likely" not in s
-
-
-def clinvar_stars(variant) -> int:
-    s = _str(variant, "clnrevstat")
-    if not s:
-        return 0
-    return _STAR.get(s.strip().lower(), 0)
 
 
 # --- GATK de novo tags (child-membership aware) ------------------------------

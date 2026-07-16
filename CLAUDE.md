@@ -24,10 +24,30 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    paths, sample/subject IDs, or PHI. All paths are `${ENV}` placeholders resolved at runtime.
    `.gitignore` enforces this; before every commit, sanity-check with
    `grep -rE '/Users/|/scratch|/home/[a-z]|BS_[A-Z0-9]{8}'`.
-2. **gnomAD v4.1 `faf95` is the ONLY population-frequency oracle.** These trios are not jointly
-   genotyped, so internal cohort AC/AN is meaningless (absent ≠ hom-ref). Never `bcftools merge`
-   the trios into a genotype matrix and never compute population frequency from internal counts;
-   internal recurrence is valid only as an artifact/blocklist signal.
+2. **gnomAD v4.1 from the VEP cache is the ONLY population-frequency oracle.** These trios are not
+   jointly genotyped, so internal cohort AC/AN is meaningless (absent ≠ hom-ref). Never `bcftools
+   merge` the trios into a genotype matrix and never compute population frequency from internal
+   counts; internal recurrence is valid only as an artifact/blocklist signal.
+   The rarity field is a **grpmax proxy** — max AF over the grpmax-*eligible* groups
+   (`annotations.GRPMAX_POPS` = AFR/AMR/EAS/NFE/SAS) — read from the CSQ. Two hard rules:
+   - **Never substitute VEP's `MAX_AF`.** It maxes over the bottlenecked founder groups grpmax
+     deliberately excludes (ami AN≈900, asj, fin, mid) and over tiny 1000G populations; one allele
+     there reads as AF≈1e-3 and silently kills dominant candidates at the 1e-4 gate.
+   - **Never substitute the global AF.** It dilutes ancestry-enriched variants and fails the
+     opposite way (retaining benign polymorphisms). The two wrong substitutions err in opposite
+     directions — there is no single safe fallback.
+   This is a **point estimate, not `faf95`**: faf95's CI correction needs AC/AN, which the cache
+   does not carry, so it is unrecoverable rather than approximated. It is the deliberate cost of
+   the VEP-only contract (rule 6). Everything reads it through `annotations.frequency()` — one
+   chokepoint, never a field getter directly.
+6. **VEP-only contract.** The annotation surface is a VEP 115 GRCh38 cache + the CADD plugin.
+   Nothing else is downloaded or bind-mounted: no gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE
+   file. Adding an annotation means adding a `bcftools annotate` transfer in Step 2 **and** its
+   INFO field in `annotations.F` — never a lookup that reaches around that contract. Known,
+   accepted losses (see [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no
+   nhomalt, **no SpliceAI ⇒ deep-intronic/synonymous splice variants are invisible**, no LOFTEE,
+   no ClinVar stars. CADD is consequently the ONLY functional predictor and the ONLY keep-path
+   below MODERATE impact.
 3. **Gene lists and constraint are priors/tiers, never hard include/exclude** — the "never-drop
    rule" keeps novel-gene discovery alive. Rarity/impact/QC gating happens *before and
    independently of* any list.
@@ -71,14 +91,25 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   (step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
   `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.
 - **VEP runs ONCE** on the cohort union (Step 2). Step 4 transfers annotations with
-  `bcftools annotate` — it never re-runs VEP. Keep it that way.
-- **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): VEP/plugin fields are
-  lifted by `bcftools +split-vep` with a `vep_` prefix (`vep_Consequence`, `vep_IMPACT`,
-  `vep_SYMBOL`, `vep_REVEL_score`, `vep_AlphaMissense_score`, `vep_MPC_score`, `vep_CADD_PHRED`,
-  `vep_SpliceAI_pred_DS_*`, `vep_LoF`, ...). External transfers are `hprv_gnomad_af`,
-  `hprv_gnomad_grpmax_af`, `hprv_gnomad_faf95`, `hprv_gnomad_nhomalt`, `hprv_clnsig`,
-  `hprv_clnrevstat`, `hprv_clnsigconf`. Add a new annotation by wiring it through Step 2's
-  split-vep/annotate list AND `annotations.F`.
+  `bcftools annotate` — it never re-runs VEP. Keep it that way. Already have a VEP VCF? Set
+  `resources.vep.annotated_vcf` and Step 2 ingests it instead (verifying build + frequency
+  presence); the rest of Step 2 is unchanged.
+- **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): ALL of them are CSQ
+  fields lifted by `bcftools +split-vep` with a `vep_` prefix — there are no `hprv_*` transfers
+  any more. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
+  `vep_BIOTYPE`, `vep_HGVSc`, `vep_HGVSp`, `vep_MANE_SELECT`, `vep_CADD_PHRED`, `vep_CLIN_SIG`,
+  `vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF` (the rarity oracle), plus `vep_MAX_AF` /
+  `vep_MAX_AF_POPS` / `vep_gnomAD{e,g}_AF` for REPORTING ONLY — never as filter fields (see rule
+  2). Add a new annotation by wiring it through Step 2's split-vep `want` list AND
+  `annotations.F`.
+- **`--pick` vs `--flag_pick`:** Step 2 runs VEP with `--flag_pick`, which keeps EVERY consequence
+  block and marks the chosen one `PICK=1`, so split-vep's `-s` selector decides — and an
+  externally-produced `--flag_pick` VCF takes the identical path. The selector auto-resolves to
+  `pick` when the CSQ has a PICK field, else `worst`; override with `resources.vep.csq_select`.
+  Watch out: a `--pick_order` starting with `rank` picks the WORST-consequence transcript, so
+  `SYMBOL` can name a non-MANE/readthrough gene that Step 6 then aggregates carriers under.
+- **`bcftools +split-vep` does not accept `--threads`** (it is a plugin; passing it aborts the
+  step). Thread the VEP call with `--fork` instead.
 - **Step 4 output**: per-trio `*.candidates.annotated.vcf.gz` + `trios.candidates.tsv`
   (`trio_id  candidates_vcf  ped`). Per-trio VCFs are the authoritative unit — no cohort genotype
   matrix is ever built.
@@ -100,15 +131,25 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Gotchas that WILL bite you
 
-- **gnomAD INFO tag names.** Defaults (`AF_joint`, `AF_grpmax_joint`, `fafmax_faf95_max_joint`,
-  `nhomalt_joint`) match gnomAD v4.1 *joint* conventions but **vary by how the file was
-  subset/downloaded**. Verify with `bcftools view -h $GNOMAD_SITES | grep INFO` and set the
-  `resources.gnomad.*_tag` config keys. Step 2 fails loudly if a tag is absent.
+- **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
+  field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
+  populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and
+  silently drops dominant candidates. Rarity comes from `annotations.frequency()` ONLY.
+  `tests/test_pure.py:test_frequency_excludes_bottlenecked_pops` and the GENEFND integration case
+  exist to catch a regression here.
+- **Absence of a cached AF is weak evidence.** VEP caches frequencies only for alleles
+  accessioned into **dbSNP** — an un-accessioned gnomAD variant returns no AF and reads as
+  "absent ⇒ rarest". Ensembl itself recommends `--custom` with the gnomAD VCF over `--af_gnomad*`
+  for this reason. Under the VEP-only contract we accept it; it biases toward retention.
+- **The predictor branches you may be tempted to re-add were dead.** REVEL/AlphaMissense/MPC are
+  missense-only; every missense is `IMPACT=MODERATE`; `selection.py` keeps it at an earlier branch
+  and returns. Re-adding dbNSFP without also narrowing `keep_impacts` buys exactly nothing at the
+  screen (it is only worth reporting/tiering value). CI asserts these reasons never fire.
 - **LOFTEE plugin code is baked into the image** at `/plugins` (the Dockerfile clones the
   `konradjk/loftee` **grch38** branch there — the base image ships all other VEP_plugins but
-  `--skip_plugins LoF`, and master LOFTEE is GRCh37-only). `loftee_path:/plugins`. Only the LOFTEE
-  **data** (human_ancestor/GERP/loftee.sql) is host-fetched. If the default LoF plugin string is
-  wrong for your data-file layout, override the whole thing with `HPRV_LOF_PLUGIN`.
+  `--skip_plugins LoF`, and master LOFTEE is GRCh37-only). The code ships; the **data**
+  (human_ancestor/GERP/loftee.sql) is not fetched and LOFTEE is **not invoked** under the
+  VEP-only contract. Kept in the image so re-enabling it is a config change, not a rebuild.
 - **`hiConfDeNovo` may be absent.** The Kids First genotype-refinement workflow may skip
   `VariantAnnotator PossibleDeNovo`. Step 5 requires the tag only when it is present in the
   callset header; otherwise it detects de novos from genotypes + QC. Don't assume the tag exists.
@@ -125,14 +166,15 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Running
 
-- **Resources first (one-time):** the image ships SOFTWARE; the reference DATA lands on the host
-  filesystem, prepared by `prepare_resources.sh --dir DIR fetch|verify|emit-env` run INSIDE the
-  image (the script + its pinned `resources/manifest.env` are baked in at `/opt/hprv/scripts` —
-  on PATH — and `/opt/hprv/resources/manifest.env`, so no host checkout is needed;
-  `HPRV_RESOURCE_MANIFEST` re-pins without a rebuild). Free resources auto-download+verify+index;
-  license-gated ones — dbNSFP/SpliceAI/CADD — are validated-if-provided. Never bake resource DATA
-  into the image (`.dockerignore` keeps `resources/*` except the manifest out of the build context).
-  See [docs/resources.md](docs/resources.md). `emit-env` writes the `${ENV}` exports the config expects.
+- **Resources (one-time, small):** under the VEP-only contract you need exactly two things on the
+  host — a **VEP 115 GRCh38 cache** (~24 GB; it carries gnomAD v4.1 frequencies + ClinVar) and the
+  **CADD** SNV+indel files. Nothing else: no gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE download.
+  `prepare_resources.sh --dir DIR fetch|verify|emit-env` still fetches these, runs INSIDE the image
+  (baked in at `/opt/hprv/scripts`, on PATH, with its pinned `/opt/hprv/resources/manifest.env`;
+  `HPRV_RESOURCE_MANIFEST` re-pins without a rebuild), and `emit-env` writes the `${ENV}` exports
+  the config expects. Never bake resource DATA into the image (`.dockerignore` keeps `resources/*`
+  except the manifest out of the build context). See [docs/resources.md](docs/resources.md).
+  Already have a VEP VCF? Skip all of it: set `resources.vep.annotated_vcf` and Step 2 ingests it.
 - **HPC (primary):** `apptainer exec --cleanenv --bind ... hprv.sif run_pipeline.sh --config
   config/config.yaml` (add `--from N --to M` for a subset).
 - **Dev/host:** run individual step scripts; python steps need `PYTHONPATH=src` and the container

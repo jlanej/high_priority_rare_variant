@@ -32,36 +32,38 @@ reference:
 # --- External, version-pinned, bind-mounted resources (never baked into the image) ---
 # Provide the ones you have; steps that need a missing resource fail loudly with a
 # clear message rather than silently skipping annotation.
+# VEP-ONLY CONTRACT. The annotation surface is a VEP 115 GRCh38 cache + the CADD plugin —
+# nothing else is downloaded or bind-mounted. Population frequency (gnomAD v4.1 per-population
+# AFs) and ClinVar (CLIN_SIG) come out of the cache itself via --af_gnomade/--af_gnomadg and
+# --check_existing. What that costs, in one place (details in docs/allele_frequency.md):
+#   * no faf95        — the cache has no AC/AN, so the 95% CI correction cannot be computed at
+#                       any price. Rarity uses a grpmax-PROXY point estimate instead, which runs
+#                       slightly stringent on low-count alleles (errs toward dropping).
+#   * no nhomalt      — the gnomAD-homozygote sanity check on de novo calls is gone.
+#   * no SpliceAI     — deep-intronic and exonic-synonymous splice variants are invisible to the
+#                       screen. CADD is a lossy proxy (v1.6+ ingests SpliceAI as a feature).
+#   * no LOFTEE       — no HC/LC pLoF confidence (was near-inert for selection; matters for tiering).
+#   * no ClinVar stars— the >=2-star gate is unimplementable; unstarred P/LP is honored instead.
+#   * no REVEL/AlphaMissense/MPC — these were already inert for selection (missense-only scores,
+#                       and every missense is IMPACT=MODERATE, which is kept at an earlier branch).
 resources:
   vep:
     cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
     version: 115
-    plugins_dir: ${VEP_PLUGINS}   # plugin CODE (CADD/dbNSFP/SpliceAI + LOFTEE grch38) — ships IN
-                                  # the image at /plugins; ${VEP_PLUGINS} defaults to /plugins via
-                                  # the image ENV. Override only if you relocate the plugin code.
-    # VEP is fed reference.fasta (above). To override the whole LOFTEE plugin string
-    # (data-file layout varies by build), export env HPRV_LOF_PLUGIN=<full --plugin arg>.
+    plugins_dir: ${VEP_PLUGINS}   # plugin CODE — ships IN the image at /plugins; ${VEP_PLUGINS}
+                                  # defaults to /plugins via the image ENV. Only CADD is used.
+    # Already have a VEP VCF? Point this at it and Step 2 skips the VEP call entirely, using
+    # your file as cohort.sites.annotated.vcf.gz. Must be VEP 115 GRCh38 and carry the CSQ
+    # fields above (Step 2 verifies the build and fails loudly if frequencies are absent).
+    annotated_vcf: ${VEP_ANNOTATED_VCF}
+    # Which CSQ block split-vep lifts when a variant has several. Auto: "pick" (PICK=1) when the
+    # VCF was made with --pick/--flag_pick, else "worst". Accepts: all|worst|primary|mane|pick|EXPR.
+    # NB: a --pick_order starting with `rank` picks the WORST-consequence transcript, so SYMBOL
+    # may name a non-MANE/readthrough gene that Step 6 then aggregates carriers under. Set this
+    # to "mane" if consistent gene attribution matters more to you than recall.
+    csq_select: ""
     cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
     cadd_indel: ${CADD_INDEL}     # gnomad indel CADD tsv.gz (+ .tbi)
-    dbnsfp: ${DBNSFP}             # dbNSFP academic build (REVEL/AlphaMissense/MPC/CADD/...)
-    spliceai_snv: ${SPLICEAI_SNV}
-    spliceai_indel: ${SPLICEAI_INDEL}
-    loftee_data: ${LOFTEE_DATA}   # human_ancestor.fa.gz, conservation db, etc. (GRCh38 fork)
-  gnomad:
-    version: "4.1"
-    sites_vcf: ${GNOMAD_SITES}    # gnomAD v4.1 joint sites VCF with AF/faf95 (GRCh38)
-    # INFO tag names in YOUR gnomAD file. Defaults below match gnomAD v4.1 *joint*
-    # release conventions — VERIFY with `bcftools view -h $GNOMAD_SITES | grep INFO`.
-    af_tag: AF_joint
-    grpmax_af_tag: AF_grpmax_joint
-    faf95_tag: fafmax_faf95_max_joint
-    nhomalt_tag: nhomalt_joint
-  clinvar:
-    vcf: ${CLINVAR_VCF}           # dated ClinVar VCF (GRCh38)
-    release_date: "REPLACE_WITH_DOWNLOAD_DATE"   # pin for reproducibility
-    sig_tag: CLNSIG
-    revstat_tag: CLNREVSTAT
-    sigconf_tag: CLNSIGCONF
   constraint:
     # One per-gene TSV with LOEUF (oe_lof_upper) / pLI / s_het / phaplo columns (any subset).
     gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF/s_het/pHaplo per gene
@@ -107,38 +109,44 @@ inputs:
 # --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
 filters:
   rarity:
-    field: grpmax_faf95           # [reserved] descriptive; the field order (faf95 -> grpmax AF)
-                                  #   is fixed in annotations.frequency(), not driven by this key
+    # THE rarity field is a gnomAD v4.1 grpmax PROXY: max AF over the grpmax-eligible ancestry
+    # groups (AFR/AMR/EAS/NFE/SAS) read from the VEP CSQ. Fixed in annotations.frequency() —
+    # this block sets the cutoffs, not the field. Two things to hold onto:
+    #  * It is a POINT ESTIMATE, not faf95. faf95 needs AC/AN; the cache has neither. So these
+    #    gates sit ~one CI-width stringent on low-count alleles (they err toward dropping).
+    #  * It deliberately EXCLUDES asj/fin/mid/ami/remaining, exactly as gnomAD's own grpmax does.
+    #    VEP's MAX_AF does not, and using it here would let one allele in a ~900-AN founder group
+    #    read as AF ~1e-3 and silently kill dominant candidates ten-fold under this cutoff.
     dominant_max: 1.0e-4          # dominant / de novo candidate
     recessive_max: 1.0e-2         # recessive / comp-het per-allele (permissive discovery)
     recessive_strict: 1.0e-3      # tags recessive/X-linked calls below this as high_conf_rarity
     benign_ba1: 0.05              # drop, never rescue (ClinGen BA1)
-    use_discordance_flag: true    # [reserved] gnomAD v4.1 exome/genome discordance flag not yet consulted
 
   functional:
-    # Step-3 selection keeps a variant on ANY of: HIGH/MODERATE impact, LOFTEE HC-no-flags,
-    # or a single calibrated predictor over its *supporting* cutoff. The moderate/strong PP3
-    # and BP4 tiers below are [reserved] for a future ACMG evidence-strength / tiering step.
-    keep_impacts: [HIGH, MODERATE]  # coarse VEP tier; splice handled separately below
-    loftee_require_hc: true         # require LOFTEE HC-no-flags for pLoF (PVS1-eligible) evidence
-    revel_pp3_supporting: 0.644     # active: keep threshold
-    revel_pp3_moderate:   0.773     # [reserved] tiering
-    revel_pp3_strong:     0.932     # [reserved] tiering
-    revel_bp4_supporting: 0.290     # [reserved] BP4 deprioritize (planned tiering step)
-    revel_bp4_moderate:   0.183     # [reserved] BP4
-    alphamissense_lp: 0.564         # active: keep threshold
-    alphamissense_lb: 0.34          # [reserved] BP4
-    spliceai_pp3: 0.2               # active: keep threshold (supporting)
-    spliceai_high: 0.5              # [reserved] canonical-splice high tier
-    spliceai_bp4: 0.1               # [reserved] BP4
-    mpc_strong: 2.0                 # active: keep threshold
-    cadd_phred_supporting: 25.3     # active: keep threshold (Pejaver-2022 PP3-supporting)
+    # Step-3 selection keeps a variant on EITHER: HIGH/MODERATE VEP impact, or CADD over its
+    # cutoff. That is the whole ladder — see src/hprv/selection.py. The predictor stack this
+    # used to carry (REVEL/AlphaMissense/MPC/SpliceAI/LOFTEE) is gone with its resource files.
+    keep_impacts: [HIGH, MODERATE]
+    # CADD is the ONLY functional predictor, and the ONLY keep-path for anything VEP rates below
+    # MODERATE — so this one number IS the entire non-coding screen. Two honest caveats:
+    #  1. PROVENANCE. 25.3 is Pejaver-2022's PP3-supporting cutoff, calibrated on MISSENSE ONLY.
+    #     Missense never reaches this branch (it is MODERATE, kept above), so in practice 25.3 is
+    #     applied exclusively to the non-coding variants it was NOT calibrated for. Treat it as a
+    #     discovery rank (~top 0.3% genome-wide), not as ACMG PP3 evidence.
+    #  2. There is no ClinGen-endorsed CADD threshold for non-coding variants to replace it with.
+    #     Lowering it widens non-coding discovery at a steep cost in review volume (PHRED 20 =
+    #     top 1%; 15 = top ~3%). Change it deliberately, not by taste.
+    cadd_phred_supporting: 25.3
 
   clinvar:
-    auto_promote_min_stars: 2     # active: ClinVar P/LP override fires only at >= this star level
+    # NOTE: the >=2-star auto_promote_min_stars gate is RETIRED. It needed CLNREVSTAT, which the
+    # VEP cache does not carry (it exposes CLIN_SIG only), so review status is simply unavailable
+    # and a 1-star single-submitter P/LP is now indistinguishable from an expert-panel one. The
+    # override therefore fires on ANY unstarred P/LP assertion — over-retention (more to review),
+    # not over-dropping. ClinVar here is also as stale as the cache (VEP 115 = ClinVar 2025-02),
+    # where a ClinVar VCF would have been monthly.
     promote_sigs: ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]  # [reserved]
     flag_sigs: ["Conflicting_classifications_of_pathogenicity", "Uncertain_significance"]  # [reserved]
-    exclude_zero_star_from_auto: true   # [reserved] (0★ already excluded implicitly by the >=2★ gate)
 
   genotype_qc:                    # applied to the REFINED (PP-derived) genotypes
     min_gq: 20
@@ -156,7 +164,9 @@ filters:
     use_hiconf_tag: true          # GATK hiConfDeNovo (child-membership checked)
     parent_max_alt_ad: 1          # parental "cleanliness"
     parent_min_dp: 10
-    require_gnomad_absent_or_singleton: true
+    # (require_gnomad_absent_or_singleton removed: it was implemented as nhomalt > 1 — a
+    #  HOMOZYGOTE-count test, never the allele-count test its name promised — and nhomalt does
+    #  not exist in the VEP cache. The dominant_max rarity gate still applies to de novo calls.)
     crosscheck_prerefinement_pl: true   # guard the gnomAD-prior suppression failure mode
 
   constraint_weighting:           # RANKING WEIGHTS — never exclusion filters. A gene is
@@ -194,10 +204,13 @@ burden:
   min_carriers: 2                 # a gene is "recurrent" at >= this many distinct individuals
   # Calibrated recurrence null: observed carriers (>= min_carriers) are tested against
   # Binomial(N_trios, p) with a MODEL-APPROPRIATE p over the gene's qualifying variants
-  # (absent -> floor): dominant het p = 1 - prod_v (1-faf95_v)^2 (PRIMARY ranked signal);
-  # biallelic p = (sum_v faf95_v)^2; X-linked-male p = 1 - prod_v (1-faf95_v). Yields
+  # (absent -> floor): dominant het p = 1 - prod_v (1-q_v)^2 (PRIMARY ranked signal);
+  # biallelic p = (sum_v q_v)^2; X-linked-male p = 1 - prod_v (1-q_v). Yields
   # p_recurrence (+ per-mode p) + BH q + exome-wide flag.
-  absent_faf95_floor: 1.0e-6      # gnomAD detection-limit floor for variants absent from gnomAD
+  # q_v is the grpmax-proxy AF (annotations.frequency()). It reads slightly HIGH vs faf95 on
+  # low-count alleles, which inflates the null and makes these p-values conservative — the
+  # right direction for a discovery claim.
+  absent_af_floor: 1.0e-6         # gnomAD detection-limit floor for variants absent from gnomAD
   weight_by_constraint: true      # rank recurrent+constrained genes highest
   # OPTIONAL secondary signals (reported, not the primary rank):
   denovo_enrichment: true         # Samocha per-gene Poisson if a mutation_rate_table is given

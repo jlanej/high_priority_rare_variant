@@ -71,24 +71,42 @@ def test_ped(tmp="/tmp/_hprv_test.ped"):
 
 
 def test_annotations_frequency_and_predictors():
-    v = FakeVar({"hprv_gnomad_faf95": "0.0001", "hprv_gnomad_grpmax_af": "0.002",
-                 "vep_REVEL_score": "0.8&0.9", "vep_AlphaMissense_score": "0.7",
-                 "vep_SpliceAI_pred_DS_AG": "0.1", "vep_SpliceAI_pred_DS_DL": "0.45"})
-    assert abs(A.faf95(v) - 0.0001) < 1e-12
-    assert A.frequency(v) == 0.0001                       # faf95 preferred
-    assert abs(A.revel(v) - 0.9) < 1e-9                   # max over &-joined
-    assert abs(A.spliceai_max(v) - 0.45) < 1e-9           # max over the 4 DS
+    v = FakeVar({"vep_gnomADe_NFE_AF": "0.002", "vep_gnomADg_EAS_AF": "0.004",
+                 "vep_gnomADe_AFR_AF": "0.001", "vep_CADD_PHRED": "12.0&26.5"})
+    assert abs(A.grpmax_af(v) - 0.004) < 1e-12            # max across e/g and pops
+    assert A.frequency(v) == A.grpmax_af(v)               # frequency() IS the grpmax proxy
+    assert abs(A.cadd(v) - 26.5) < 1e-9                   # max over &-joined
     assert A.frequency(FakeVar({})) is None               # absent = rarest
 
 
+def test_frequency_excludes_bottlenecked_pops():
+    """The whole point of the grpmax proxy: a founder-group-only allele must NOT drive rarity.
+
+    gnomAD's grpmax excludes ami/asj/fin/mid/remaining because their small ANs make a point AF
+    unrepresentative. VEP's MAX_AF does not exclude them — so if frequency() ever regressed to
+    reading MAX_AF, this variant would report 1.1e-3, blow the 1e-4 dominant gate, and a real
+    ultra-rare candidate would be silently dropped. It must read None (no eligible group).
+    """
+    ami_only = FakeVar({"vep_gnomADg_AMI_AF": "0.0011", "vep_gnomADe_FIN_AF": "0.0009",
+                        "vep_gnomADe_ASJ_AF": "0.0015", "vep_gnomADe_MID_AF": "0.002",
+                        "vep_MAX_AF": "0.002", "vep_MAX_AF_POPS": "gnomADe_MID"})
+    assert A.frequency(ami_only) is None
+    # ...but a real NFE signal on the same variant IS counted.
+    plus_nfe = FakeVar({"vep_gnomADg_AMI_AF": "0.0011", "vep_gnomADe_NFE_AF": "3e-5",
+                        "vep_MAX_AF": "0.0011"})
+    assert abs(A.frequency(plus_nfe) - 3e-5) < 1e-12
+
+
 def test_annotations_clinvar():
-    assert A.clnsig_is_plp(FakeVar({"hprv_clnsig": "Pathogenic"}))
-    assert A.clnsig_is_plp(FakeVar({"hprv_clnsig": "Pathogenic/Likely_pathogenic"}))
-    assert not A.clnsig_is_plp(FakeVar({"hprv_clnsig": "Conflicting_classifications_of_pathogenicity"}))
-    assert not A.clnsig_is_plp(FakeVar({"hprv_clnsig": "Benign"}))
-    assert A.clinvar_stars(FakeVar({"hprv_clnrevstat": "reviewed_by_expert_panel"})) == 3
-    assert A.clinvar_stars(FakeVar({"hprv_clnrevstat": "no_assertion_criteria_provided"})) == 0
-    assert A.clinvar_stars(FakeVar({})) == 0
+    # VEP CLIN_SIG is lowercase and '&'-joined; the ClinVar VCF's CLNSIG was Capitalised and
+    # '/'-joined. Both must parse, so the predicate survives either annotation source.
+    assert A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "pathogenic"}))
+    assert A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "pathogenic&likely_pathogenic"}))
+    assert A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "Pathogenic/Likely_pathogenic"}))
+    assert not A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "conflicting_classifications_of_pathogenicity"}))
+    assert not A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "conflicting_interpretations_of_pathogenicity"}))
+    assert not A.clnsig_is_plp(FakeVar({"vep_CLIN_SIG": "benign"}))
+    assert not A.clnsig_is_plp(FakeVar({}))
 
 
 def test_genotype_qc():
@@ -150,42 +168,36 @@ def test_audit_record_and_summarize(tmpdir="/tmp/_hprv_audit"):
 
 def test_step3_classifier():
     cfg = {"filters": {"rarity": {"benign_ba1": 0.05, "recessive_max": 1e-2},
-                       "functional": {"revel_pp3_supporting": 0.644,
-                                      "alphamissense_lp": 0.564, "spliceai_pp3": 0.2,
-                                      "cadd_phred_supporting": 20.0, "mpc_strong": 2.0,
+                       "functional": {"cadd_phred_supporting": 20.0,
                                       "keep_impacts": ["HIGH", "MODERATE"]}}}
     classify = build_classifier(cfg)
     # BA1-common -> dropped, never rescued
-    assert classify(FakeVar({"hprv_gnomad_faf95": "0.2"})) == (False, "ba1")
+    assert classify(FakeVar({"vep_gnomADe_NFE_AF": "0.2"})) == (False, "ba1")
     # rare + HIGH impact -> kept with reason
     assert classify(FakeVar({"vep_IMPACT": "HIGH"})) == (True, "impact_high")
-    # rare + LOFTEE HC -> kept
-    assert classify(FakeVar({"vep_LoF": "HC"})) == (True, "loftee_hc")
-    # ClinVar P/LP overrides missing function only at >= 2 stars
-    keep, why = classify(FakeVar({"hprv_clnsig": "Pathogenic",
-                                  "hprv_clnrevstat": "criteria_provided,_multiple_submitters,_no_conflicts"}))
-    assert keep and why == "clinvar_plp"
-    # a 1-star P/LP does NOT auto-override (single submitter)
-    k1, _ = classify(FakeVar({"hprv_clnsig": "Pathogenic",
-                              "hprv_clnrevstat": "criteria_provided,_single_submitter"}))
-    assert not k1
+    assert classify(FakeVar({"vep_IMPACT": "MODERATE"})) == (True, "impact_moderate")
+    # ClinVar P/LP overrides missing function. No star gate: the VEP cache has no CLNREVSTAT,
+    # so an unstarred assertion is all there is and it is honored (over-retains by design).
+    assert classify(FakeVar({"vep_CLIN_SIG": "pathogenic"})) == (True, "clinvar_plp")
+    # ...and it rescues a variant that is otherwise too common for the permissive gate
+    assert classify(FakeVar({"vep_gnomADe_NFE_AF": "0.02",
+                             "vep_CLIN_SIG": "likely_pathogenic"})) == (True, "clinvar_plp")
+    # ...but never a BA1-common one
+    assert classify(FakeVar({"vep_gnomADe_NFE_AF": "0.2",
+                             "vep_CLIN_SIG": "pathogenic"})) == (False, "ba1")
     # rare but non-functional -> dropped
     assert classify(FakeVar({"vep_IMPACT": "MODIFIER"})) == (False, "not_functional")
     # too common for permissive recessive gate, no P/LP -> dropped
-    assert classify(FakeVar({"hprv_gnomad_faf95": "0.02", "vep_IMPACT": "HIGH"})) == (False, "too_common")
-    # --- functional-predictor keep branches (reached only when impact is not HIGH/MODERATE) ---
-    # SpliceAI Δ >= 0.2 (checked first)
-    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_SpliceAI_pred_DS_DL": "0.3"})) == (True, "spliceai")
-    # REVEL >= 0.644 supporting
-    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_REVEL_score": "0.7"})) == (True, "revel")
-    # AlphaMissense >= 0.564
-    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_AlphaMissense_score": "0.6"})) == (True, "alphamissense")
-    # CADD PHRED >= 25.3
+    assert classify(FakeVar({"vep_gnomADe_NFE_AF": "0.02", "vep_IMPACT": "HIGH"})) == (False, "too_common")
+    # --- CADD: the ONLY functional branch, and the only keep-path below MODERATE impact ---
     assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "26"})) == (True, "cadd")
-    # MPC >= 2.0
-    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_MPC_score": "2.5"})) == (True, "mpc")
-    # sub-threshold predictor -> dropped
-    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_REVEL_score": "0.5"})) == (False, "not_functional")
+    assert classify(FakeVar({"vep_IMPACT": "LOW", "vep_CADD_PHRED": "26"})) == (True, "cadd")
+    # sub-threshold -> dropped
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "12"})) == (False, "not_functional")
+    # A MODERATE variant is kept by IMPACT and never consults CADD — so a low CADD cannot
+    # drop it. This is why the old missense-predictor branches were unreachable: any variant
+    # carrying REVEL/AlphaMissense/MPC is missense => MODERATE => already returned here.
+    assert classify(FakeVar({"vep_IMPACT": "MODERATE", "vep_CADD_PHRED": "0.1"})) == (True, "impact_moderate")
 
 
 def test_contamination():
