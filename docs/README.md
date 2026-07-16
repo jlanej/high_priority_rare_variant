@@ -37,42 +37,93 @@ This is the **single source of truth** for every threshold in the pipeline. All 
 **configurable defaults** (see [`config/config.example.yaml`](../config/config.example.yaml)),
 not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic cutoff here.
 
-### Frequency oracle
-- **gnomAD v4.1** (GRCh38; 730,947 exomes + 76,215 genomes), **joint** (exome+genome) AF/AN.
-- Filter field = **grpmax `faf95`** (filtering allele frequency, 95% CI lower bound), *not* the
-  point-estimate popmax AF. Fall back to grpmax AF only when `faf95` is unavailable.
-- **Never** use internal cohort AC/AN as population frequency; internal recurrence is valid only
-  as an artifact/blocklist signal. *(Target: also heed the v4.1 exome/genome **discordance flag** —
-  not yet consulted by code.)*
+> ### ⚠ VEP-only contract — read this before the tables
+>
+> Every annotation the pipeline reads comes from **one** source: a VEP 115 GRCh38 cache plus the
+> CADD plugin. No gnomAD / ClinVar / dbNSFP / SpliceAI / LOFTEE file is downloaded or
+> bind-mounted. Several rows below therefore describe **targets and reference science, not
+> what runs** — each is marked. The **IMPLEMENTED** column is what the code does.
+>
+> Not available under this contract, and what each costs:
+> | Absent | Consequence |
+> |--------|-------------|
+> | `faf95` | The cache has no AC/AN, so the 95% CI correction **cannot be computed at any price**. Rarity uses a grpmax **point-estimate proxy**, which runs slightly stringent on low-count alleles. |
+> | `nhomalt` | No gnomAD-homozygote sanity check on de novo calls. |
+> | SpliceAI | **Deep-intronic and exonic-synonymous splice variants are invisible to the screen.** CADD is a lossy proxy (v1.6+ ingests SpliceAI as an input feature). The single largest loss. |
+> | LOFTEE | No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for the planned tiering step. |
+> | ClinVar stars | No `CLNREVSTAT` ⇒ the ≥2★ gate is unimplementable; unstarred P/LP is honored. ClinVar is also as stale as the cache (VEP 115 ⇒ ClinVar 2025-02). |
+> | REVEL / AlphaMissense / MPC | **No loss to selection** — see the note under the functional table. |
 
-### Rarity gates (grpmax `faf95`) — a screening gate, distinct from the ACMG **PM2** criterion
-| Mode | Keep candidate if `faf95` < | Notes |
-|------|----------------------------|-------|
-| Dominant / de novo | **1e-4** | de novo additionally requires low `nhomalt` (≤ 1); an AC-based absent-or-singleton test is a target refinement |
+### Frequency oracle — IMPLEMENTED
+- **gnomAD v4.1** (GRCh38; 730,947 exomes + 76,215 genomes), read from the **VEP cache** via
+  `--af_gnomade` / `--af_gnomadg`.
+- Filter field = **grpmax proxy** = max AF over the grpmax-**eligible** ancestry groups only:
+  `AFR, AMR, EAS, NFE, SAS` (`src/hprv/annotations.py:GRPMAX_POPS`).
+- Two things this is deliberately **not**:
+  - **Not `faf95`.** It is a point estimate. faf95 needs AC/AN; the cache carries neither.
+  - **Not VEP's `MAX_AF`.** MAX_AF maximises over the bottlenecked founder groups gnomAD's own
+    grpmax *excludes* (`ami` AN≈900, `asj`, `fin`, `mid`) **and** the tiny 1000 Genomes
+    populations. One allele in `ami` reads as AF≈1.1e-3 — ten-fold over the dominant gate — so
+    using MAX_AF would **silently drop real ultra-rare candidates**. Excluding those groups is
+    the entire reason the proxy is defensible. (Enforced by a test; see
+    `tests/test_pure.py:test_frequency_excludes_bottlenecked_pops`.)
+- **Never** use internal cohort AC/AN as population frequency; internal recurrence is valid only
+  as an artifact/blocklist signal.
+- Caveat: cache frequencies exist only for alleles **accessioned into dbSNP**, so an
+  un-accessioned gnomAD variant returns no AF and reads as "absent ⇒ rarest". That biases toward
+  retention (more review), not toward missed calls.
+
+### Rarity gates (grpmax proxy AF) — IMPLEMENTED. A screening gate, distinct from ACMG **PM2**
+| Mode | Keep candidate if AF < | Notes |
+|------|----------------------|-------|
+| Dominant / de novo | **1e-4** | the old `nhomalt ≤ 1` de novo condition is **removed** (no nhomalt) |
 | Recessive / comp-het | **1e-2** per allele (permissive); **1e-3** high-confidence tier | applied per variant, not per gene |
-| Benign, all modes | drop if `faf95` ≥ **0.05** (ClinGen BA1) | never rescue |
+| Benign, all modes | drop if AF ≥ **0.05** (ClinGen BA1) | never rescue |
 
 PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity gate itself.
 
-### Functional / in-silico (report **one** predictor per variant — never stack correlated tools)
-| Signal | Tier / cutoff |
-|--------|---------------|
-| pLoF | LOFTEE **HC, no flags**; grade PVS1 by Abou-Tayoun tree (NMD-escape/last-exon/single-exon downgrade), gated on ClinGen validity ≥ Moderate + known LoF mechanism |
-| Missense (primary **REVEL**, Pejaver-2022) | PP3 supporting ≥ 0.644, moderate ≥ 0.773, strong ≥ 0.932; BP4 supporting ≤ 0.290, moderate ≤ 0.183 |
-| Missense (orthogonal **AlphaMissense**) | likely_pathogenic ≥ 0.564; ambiguous 0.34–0.564; likely_benign ≤ 0.34 |
-| Splicing (**SpliceAI** masked, Walker-2023) | PP3 Δ ≥ 0.2; BP4 Δ ≤ 0.1; 0.1–0.2 uninformative; canonical ±1,2 with Δ ≥ 0.5 = high tier |
-| Regional missense | MPC ≥ 2 up-weights; missense Z > 3.09 gene-level support |
-| Benign deprioritize (BP4) *(target — planned tiering step, not applied at the Step-3 screen)* | REVEL ≤ 0.183 **and** AlphaMissense ≤ 0.34 **and** SpliceAI Δ ≤ 0.1 |
+### Functional / in-silico
+**IMPLEMENTED — the entire ladder is two rungs**, tried in order (`src/hprv/selection.py`):
 
-*Note: Step-3 selection is a permissive keep/drop screen that keeps on the **supporting** cutoff of
-one predictor (or HIGH/MODERATE impact, LOFTEE HC-no-flags, or ClinVar P/LP ≥ 2★). The moderate/
-strong PP3 and BP4 tiers above specify a **planned ACMG evidence-strength / tiering step**.*
+| # | Signal | Cutoff | Reaches |
+|---|--------|--------|---------|
+| 1 | VEP **IMPACT** | keep if `HIGH` or `MODERATE` | all pLoF + all missense + inframe indels |
+| 2 | **CADD PHRED** | keep if ≥ **25.3** | everything below MODERATE — intronic / synonymous / UTR / regulatory |
+
+CADD is therefore the **only** functional predictor, and the **only** keep-path for any
+non-coding variant. Two honest caveats on that 25.3:
+- **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on
+  **missense only**. Missense never reaches rung 2 (it is MODERATE, kept at rung 1), so in
+  practice 25.3 is applied *exclusively* to the non-coding variants it was **not** calibrated for.
+  Read it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3 evidence.
+- There is no ClinGen-endorsed non-coding CADD threshold to replace it with.
+
+**Why REVEL / AlphaMissense / MPC are not listed — they never did anything.** They are
+missense-only scores; every missense is `IMPACT=MODERATE`; rung 1 keeps it and returns *before*
+any predictor is consulted. So those branches were **unreachable even when the code contained
+them** — removing dbNSFP cost the screen exactly zero discrimination. This is asserted in CI
+(`assert_integration.py`: no site may be kept via `revel`/`alphamissense`/`mpc`).
+
+**On "never stack correlated tools":** the ladder is an OR, but with one live functional rung
+there is nothing to stack. If you ever narrow `keep_impacts` to `[HIGH]`, missense would fall
+through to CADD alone — coherent, but note ClinGen's one-tool rule governs **PP3/BP4 evidence
+assignment**, and this screen assigns no ACMG weight.
+
+*TARGET (not implemented — needs resources this contract does not have):* LOFTEE HC-no-flags +
+Abou-Tayoun PVS1 grading; REVEL PP3 0.644/0.773/0.932 + BP4 ≤0.290/≤0.183; AlphaMissense
+≥0.564; SpliceAI Δ≥0.2 (Walker-2023, calibrated on **raw** scores); MPC ≥2. These specify the
+planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one** predictor
+(REVEL is the ClinGen-calibrated choice), chosen before seeing results.
 
 ### Clinical evidence
-- **ClinVar**: pin a dated release; auto-promote **P/LP at ≥ 2★** (no conflicts); 1★ → prioritize
-  + human review; Conflicting/VUS → flag, never auto-promote; exclude 0★ from auto-logic.
-- Classifier backbone = **AutoGVP** (CHOP/Kids First). Combining = **Tavtigian/ClinGen points**
-  (P ≥ 10, LP 6–9, VUS 0–5), **PM2 at Supporting**.
+- **IMPLEMENTED**: ClinVar `CLIN_SIG` from the VEP cache. P/LP (excluding `conflicting`)
+  overrides a failed rarity/function screen. **No star gate** — the cache has no `CLNREVSTAT`,
+  so a 1★ single-submitter assertion is indistinguishable from an expert-panel one and is
+  honored. Over-retention (more to review), never over-dropping. Release is pinned by the cache
+  (VEP 115 ⇒ ClinVar 2025-02), not independently.
+- *TARGET*: auto-promote P/LP at **≥2★** only; 1★ → prioritize + human review; Conflicting/VUS →
+  flag; exclude 0★. Classifier backbone **AutoGVP**; combining via **Tavtigian/ClinGen points**
+  (P ≥ 10, LP 6–9, VUS 0–5), **PM2 at Supporting**. All require a ClinVar VCF.
 
 ### Gene constraint — a **ranking weight, never a standalone exclusion filter**
 - gnomAD **v2.1.1** LOEUF (established) primary; pLI ≥ 0.9 / LOEUF_v2 < 0.35 (v4 < 0.6, flagged

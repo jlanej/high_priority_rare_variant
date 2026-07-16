@@ -154,7 +154,7 @@ def main(argv=None) -> int:
     do_enrich = bool(get(cfg, "burden.denovo_enrichment", True))
     # For the recurrence null, an allele absent from gnomAD is floored at the detection
     # limit (~1 / 2*N_gnomAD alleles) so its expected carriers are tiny but non-zero.
-    absent_floor = float(get(cfg, "burden.absent_faf95_floor", 1e-6))
+    absent_floor = float(get(cfg, "burden.absent_af_floor", 1e-6))
 
     # --- aggregate distinct individuals per gene, by model ---
     genes, trios = {}, set()
@@ -171,13 +171,12 @@ def main(argv=None) -> int:
             })
             g["all"].add(trio)
             # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
-            # faf95 preferred; fall back to grpmax AF (mirrors annotations.frequency) BEFORE the
-            # absent-floor, so a variant with a grpmax AF but no faf95 is not treated as ultra-rare
-            # (which would make the recurrence p anti-conservative).
+            # grpmax_af is Step 5's rarity column (annotations.frequency()). It is a point
+            # estimate, not faf95, so it sits ~one CI-width high on low-AC alleles; that makes
+            # the recurrence p slightly CONSERVATIVE (a larger q inflates the null probability
+            # of seeing carriers), which is the direction to prefer for a discovery claim.
             key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
-            faf = _num(r.get("faf95"))
-            if faf is None:
-                faf = _num(r.get("grpmax_af"))
+            faf = _num(r.get("grpmax_af"))
             if mode in DOMINANT_MODES:
                 g["dom"].add(trio); g["dom_faf"][key] = faf
             elif mode in BIALLELIC_MODES:

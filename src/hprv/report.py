@@ -113,7 +113,7 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
         ("Gene consolidation", "Genes ranked by recurrence across individuals (dominant het / "
                                "biallelic / X-linked), weighted by constraint. The headline result."),
         ("Candidate calls", "One row per candidate per trio: inheritance mode, genotypes, and "
-                            "annotations (gnomAD faf95, REVEL/AlphaMissense/SpliceAI, ClinVar)."),
+                            "annotations (gnomAD grpmax AF, CADD, ClinVar)."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
         ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex, and contamination "
                "(verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),
@@ -142,9 +142,13 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
 
     # key thresholds
     line("Key thresholds (configurable defaults)", "", h2=True)
-    line("Dominant / de novo rarity", f"gnomAD grpmax faf95 < {get(cfg, 'filters.rarity.dominant_max', 1e-4)}")
-    line("Recessive rarity", f"faf95 < {get(cfg, 'filters.rarity.recessive_max', 1e-2)}")
-    line("Benign (never rescued)", f"faf95 >= {get(cfg, 'filters.rarity.benign_ba1', 0.05)} (ClinGen BA1)")
+    line("Rarity field", "gnomAD v4.1 grpmax-proxy AF = max AF over the grpmax-eligible ancestry "
+                         "groups (AFR/AMR/EAS/NFE/SAS), from the VEP cache. A POINT ESTIMATE: "
+                         "faf95 (the 95% CI lower bound) needs AC/AN, which the cache does not "
+                         "carry, so these gates run slightly stringent on low-count alleles.")
+    line("Dominant / de novo rarity", f"grpmax AF < {get(cfg, 'filters.rarity.dominant_max', 1e-4)}")
+    line("Recessive rarity", f"grpmax AF < {get(cfg, 'filters.rarity.recessive_max', 1e-2)}")
+    line("Benign (never rescued)", f"grpmax AF >= {get(cfg, 'filters.rarity.benign_ba1', 0.05)} (ClinGen BA1)")
     line("Genotype QC", f"GQ >= {get(cfg, 'filters.genotype_qc.min_gq', 20)}, "
                         f"DP >= {get(cfg, 'filters.genotype_qc.min_dp', 10)}, "
                         f"het AB {get(cfg, 'filters.genotype_qc.het_ab_min', 0.25)}-"
