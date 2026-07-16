@@ -5,6 +5,26 @@ From a 10-domain SOTA literature review (2023–2026) against the current repo. 
 constrained inherited variants = candidates*. Effort is "to add here." This is a living document —
 update it as items land. (Out of scope by design: de novo review, mtDNA — separate pipelines.)
 
+## Restoring the VEP-only contract's gaps (start here — best ROI in the repo)
+
+The first pass runs on a VEP 115 cache + CADD alone; see **[limitations.md](limitations.md)** for
+the full ledger of what that costs and why each was an acceptable trade. Each row below is
+**additive**: one `bcftools annotate` transfer in `02_annotate_sites.sh` plus its INFO field in
+`annotations.F`. Nothing in the architecture blocks any of them. Ranked by clinical value per GB.
+
+| # | Restore | Size | Buys | Notes |
+|---|---------|:----:|------|-------|
+| R1 | **ClinVar VCF** | ~0.18 GB | `CLNREVSTAT` ⇒ the ≥2★ auto-promote gate, + a monthly release instead of the cache's ClinVar 2025-02 | Cheapest win by an order of magnitude. |
+| R2 | **SpliceAI slim (Δ≥0.1)** | ~0.6 GB | Deep-intronic + exonic-synonymous splice — **a whole variant class the screen currently cannot nominate** | Highest clinical value. Filter the free Ensembl MANE mirror; lossless (keep-only rule). SNV-only — no indel file exists on the free mirror. Guard contig naming (`1` vs `chr1`): a mismatched tabix query returns empty at **exit 0**. |
+| R3 | **gnomAD slim (5 of 664 INFO fields)** | ~10 GB | True `faf95` (restores the CI correction) + `nhomalt` (the recessive false-positive tell) | Stream-slim the 24 joint chrom VCFs; nothing but the slim lands. GCS egress is free. Requires htslib built with libcurl — check `samtools --version` (not `bcftools --version`, which prints no feature line). |
+| R4 | **Dedicated REVEL (+ AlphaMissense)** | ~1.3 GB | Reporting/tiering columns; the ClinGen-calibrated predictor for a PP3/BP4 step | **Buys the *screen* nothing** — see limitations.md §7. Use the dedicated files, **not** dbNSFP (30 GB for 5 columns, and its URL is dead: S3 `NoSuchBucket`, now registration-gated). Trap: Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`, not `AlphaMissense_score`. |
+| R5 | **LOFTEE data** | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | Plugin code already in the image; near-inert for *selection* (HIGH impact already keeps every pLoF), so this is a tiering prerequisite. |
+
+Not a download, but on this list because it gates the same reasoning: **CADD's threshold is
+off-label.** 25.3 is Pejaver-2022's *missense* PP3-supporting cutoff, and missense never reaches
+the CADD rung — so it is applied only to the non-coding variants it was never calibrated for, with
+no ClinGen-endorsed alternative to swap in. Region-stratified calibration is research, not a fetch.
+
 ## Dependency spine (build in this order)
 
 1. **Per-sample ancestry + relatedness/swap QC (somalier)** — prerequisite for *any* honest
