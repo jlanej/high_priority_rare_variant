@@ -79,19 +79,64 @@ jobs:
 
   integration:
     # End-to-end pipeline over generated mock data with REAL bcftools + the python
-    # steps. Only Step 2's VEP invocation is mocked (cache too heavy for CI), so no
-    # image build is needed. Gates publishing.
+    # steps. Only the `vep` binary is mocked (its cache is 24 GB); Step 2 itself runs.
+    # Gates publishing.
+    #
+    # bcftools comes from bioconda at the SAME PIN as env/environment.yml, read from that
+    # file rather than duplicated here. `apt-get install bcftools` used to be good enough and
+    # is not: Ubuntu ships an older bcftools than the image, so CI silently validated a
+    # different tool than production. That is how `+split-vep -s pick` (needs a recent
+    # bcftools) passed locally and died in CI. Test what you ship.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install bcftools / samtools / bedtools / htslib
-        run: sudo apt-get update && sudo apt-get install -y bcftools samtools bedtools tabix
+      - name: Resolve the pinned bcftools/samtools versions from env/environment.yml
+        id: pins
+        run: |
+          # Single source of truth: if environment.yml moves, CI moves with it.
+          bcf="$(sed -nE 's/^[[:space:]]*-[[:space:]]*bcftools[[:space:]]*=[[:space:]]*([0-9.]+).*/\1/p' env/environment.yml | head -1)"
+          sam="$(sed -nE 's/^[[:space:]]*-[[:space:]]*samtools[[:space:]]*=[[:space:]]*([0-9.]+).*/\1/p' env/environment.yml | head -1)"
+          [ -n "$bcf" ] && [ -n "$sam" ] || { echo "FATAL: could not parse the bcftools/samtools pins out of env/environment.yml — CI would silently test a different version than the image ships" >&2; exit 1; }
+          echo "bcftools=$bcf" >> "$GITHUB_OUTPUT"
+          echo "samtools=$sam" >> "$GITHUB_OUTPUT"
+          echo "pinned: bcftools=$bcf samtools=$sam"
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: hprv-ci
+          condarc: |
+            channels: [conda-forge, bioconda]
+          create-args: >-
+            python=3.11
+            bcftools=${{ steps.pins.outputs.bcftools }}
+            samtools=${{ steps.pins.outputs.samtools }}
+            bedtools
+            htslib
       - name: Install python deps
+        shell: micromamba-shell {0}
         run: pip install cyvcf2 pysam numpy scipy pyyaml openpyxl
+      - name: Assert CI's bcftools matches the image's pin
+        shell: micromamba-shell {0}
+        run: |
+          got="$(bcftools --version | head -1 | awk '{print $2}')"
+          want="${{ steps.pins.outputs.bcftools }}"
+          echo "bcftools: got=$got want=$want"
+          case "$got" in "$want"*) ;; *) echo "FATAL: CI bcftools $got != pinned $want" >&2; exit 1;; esac
+          # The selector Step 2 depends on must exist in this build, or the integration test is
+          # not exercising the code path production takes. Read the selector list specifically —
+          # `--help` is the trigger (no-args prints nothing useful), and grepping the whole usage
+          # would match 'mane' inside "MANE_SELECT" in the prose.
+          # `|| true`: +split-vep --help exits 255 (the usage dump is its error path), which would
+          # otherwise fail this step under the runner's `set -e`. The regex matches both the old
+          # ("TR, transcript:") and new ("TR, filter transcripts:") usage wordings.
+          keys="$( { bcftools +split-vep --help 2>&1 || true; } | sed -n 's/.*TR, \(filter \)*transcripts*:[[:space:]]*//p' | head -1)"
+          echo "split-vep selectors: ${keys:-<unparsed>}"
+          case "$keys" in *pick*) echo "OK: split-vep supports -s pick";; *)
+            echo "FATAL: this bcftools's +split-vep has no 'pick' selector — CI would not be testing what the image runs" >&2; exit 1;; esac
       - name: Run integration test
+        shell: micromamba-shell {0}
         run: bash tests/integration/run_integration.sh
 
   build-publish:
