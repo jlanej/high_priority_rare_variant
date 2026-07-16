@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import os
 
-CONTIGS = {"chr1": 20000, "chr2": 20000, "chrX": 2782200}  # chrX > PAR1 end (2,781,479)
+# chrM is present ON PURPOSE: Step 1 must EXCLUDE it (it is out of scope; see
+# 01_make_cohort_sites.sh EXCLUDE_CONTIGS). A mock without chrM cannot prove the filter works.
+CONTIGS = {"chr1": 20000, "chr2": 20000, "chrX": 2782200, "chrM": 16569}  # chrX > PAR1 end (2,781,479)
 BASES = "ACGT"
 
 
@@ -33,13 +35,19 @@ def altbase(pos):
     return BASES[(pos + 1) % 4]
 
 
-def ad(gt, dp):
+def ad(gt, dp, n_alt=1):
+    """Biallelic-style AD for a genotype. n_alt > 1 pads the Number=R array to REF + n ALTs.
+
+    A non-ref/non-ref (1/2) genotype must NOT use this — its AD is the whole point of the test
+    and is supplied explicitly via `adov` (see the GENECH2 comp-het case).
+    """
+    pad = ",0" * (n_alt - 1)
     if gt == "0/0":
-        return f"{dp},0"
+        return f"{dp},0{pad}"
     if gt == "1/1":
-        return f"0,{dp}"
+        return f"0,{dp}{pad}"
     h = dp // 2
-    return f"{dp - h},{h}"
+    return f"{dp - h},{h}{pad}"
 
 
 # Sample groupings per VCF file (note fileB order is shuffled and has an extra sib).
@@ -190,6 +198,31 @@ add(file="A", chrom="chr2", pos=17000, gene="GENEFND", csq="missense_variant", i
     af=0.002, af_pop="gnomADe_MID_AF",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
+# --- MULTIALLELIC trans compound het: child is 1/2 (one allele from each parent), which is the
+#     textbook presentation of a recessive diagnosis. `bcftools norm -m-` splits this into two
+#     records and, WITHOUT --keep-sum AD, discards the other ALT's reads from each leg — leaving
+#     ref_ad~0, so allele_balance() reads ~1.0, the het band rejects BOTH legs, and the whole
+#     compound_het vanishes with no warning and no audit counter. This case is the regression
+#     test for that (Step 4's --keep-sum AD): expect a compound_het pair in GENECH2.
+#     AD is explicit because it IS the thing under test:
+#       CH_A 1/2 -> 0 ref, 19 for G, 20 for T  (legs must read AB 0.487 / 0.513, not 1.0)
+#       FA_A 0/1 -> transmits G ;  MO_A 0/2 -> transmits T   => trans, not cis. ---
+add(file="A", chrom="chr1", pos=19000, gene="GENECH2", csq="missense_variant", impact="MODERATE",
+    alt2="T", af=5e-5,
+    gts={"CH_A": ("1/2", 99, 39), "FA_A": ("0/1", 99, 38), "MO_A": ("0/2", 99, 38)},
+    adov={"CH_A": "0,19,20", "FA_A": "18,20,0", "MO_A": "17,0,21"})
+
+# --- chrM: MUST be excluded at Step 1 (out of scope; a dedicated mtDNA pipeline owns it).
+#     Modelled on the real failure: m.8860A>G is a near-fixed rCRS haplogroup variant, so the
+#     WHOLE TRIO is hom-alt. Left un-excluded it fires hom_recessive in every trio, and with no
+#     gnomAD mito AF the rarity gate passes unconditionally -> Step 6 floors q -> p ~ 1e-12 ->
+#     it lands in the recurrent exome-wide-significant tier above real nuclear candidates. ---
+add(file="A", chrom="chrM", pos=8860, gene="MT-ATP6", csq="missense_variant", impact="MODERATE",
+    gts={"CH_A": ("1/1", 99, 400), "FA_A": ("1/1", 99, 400), "MO_A": ("1/1", 99, 400)})
+add(file="B", chrom="chrM", pos=8860, gene="MT-ATP6", csq="missense_variant", impact="MODERATE",
+    gts={"CH_B": ("1/1", 99, 400), "FA_B": ("1/1", 99, 400), "MO_B": ("1/1", 99, 400),
+         "SIB_B": ("1/1", 99, 400)})
+
 # --- Trio C: duo only (mom MO_C absent everywhere) -> resolver unresolved ---
 add(file="C", chrom="chr1", pos=9000, gene="GENE8", csq="missense_variant", impact="MODERATE",
     af=1e-3, gts={"CH_C": ("0/1", 99, 40), "FA_C": ("0/1", 99, 40)})
@@ -231,17 +264,28 @@ def write_vcf(path, samples, variants):
             fh.write(f"##contig=<ID={c},length={n}>\n")
         fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n")
         for v in sorted(variants, key=lambda x: (list(CONTIGS).index(x["chrom"]), x["pos"])):
-            ref, alt = refbase(v["pos"]), altbase(v["pos"])
-            ac = sum(g[0].count("1") for g in v["gts"].values())
+            ref = refbase(v["pos"])
+            alt = altbase(v["pos"])
+            n_alt = 1
+            if v.get("alt2"):            # multiallelic: ALT becomes "G,T"
+                alt = f"{alt},{v['alt2']}"
+                n_alt = 2
+            # AC/AF are Number=A: ONE VALUE PER ALT, counted per allele index. A single summed
+            # count is not just imprecise, it is malformed for a multiallelic — bcftools rejects
+            # it outright ("wrong number of fields in INFO/AF ... expected 2, found 1").
             an = 2 * len(samples)
-            info = f"AC={ac};AN={an};AF={ac / an:.4g}"
+            acs = [sum(g[0].replace("|", "/").split("/").count(str(i))
+                       for g in v["gts"].values())
+                   for i in range(1, n_alt + 1)]
+            info = ("AC=" + ",".join(str(a) for a in acs) + f";AN={an};AF="
+                    + ",".join(f"{a / an:.4g}" for a in acs))
             if v["hidenovo"]:
                 info += f";hiConfDeNovo={v['hidenovo']}"
             cells = []
-            adov = v.get("adov", {})     # per-sample AD override, e.g. contamination at hom-alt
+            adov = v.get("adov", {})     # per-sample AD override (contamination; multiallelic AD)
             for s in samples:
                 gt, gq, dp = v["gts"][s]
-                a = adov.get(s, ad(gt, dp))
+                a = adov.get(s, ad(gt, dp, n_alt))
                 cells.append(f"{gt}:{a}:{dp}:{gq}")
             fh.write(f"{v['chrom']}\t{v['pos']}\t.\t{ref}\t{alt}\t100\t{v['filter']}\t"
                      f"{info}\tGT:AD:DP:GQ\t" + "\t".join(cells) + "\n")
@@ -318,19 +362,27 @@ def main(argv=None) -> int:
     # an external sites VCF, so there is nothing to mock. Frequency + CLIN_SIG go into the CSQ
     # (see mock_vep.py), which is where a real `vep --af_gnomade --check_existing` puts them.
 
-    # annotation lookup for mock_vep.py -> becomes the CSQ
+    # annotation lookup for mock_vep.py -> becomes the CSQ.
+    # Keyed per (chrom, pos, ALT), not per site: Step 1's `norm -m-` splits a multiallelic into
+    # one record per ALT, and mock_vep.py matches on the exact allele — so a site with alt2 needs
+    # BOTH alleles here or the second leg reaches Step 3 with no CSQ and is dropped as
+    # not_functional, quietly destroying the very comp-het the multiallelic case exists to test.
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
         fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\n")
         seen = set()
         for v in V:
-            key = (v["chrom"], v["pos"])
-            if key in seen:
-                continue
-            seen.add(key)
-            af = "" if v["af"] is None else f"{v['af']:.6g}"
-            fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{altbase(v['pos'])}\t"
-                     f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
-                     f"{v['af_pop']}\t{v['clnsig']}\n")
+            alts = [altbase(v["pos"])]
+            if v.get("alt2"):
+                alts.append(v["alt2"])
+            for a in alts:
+                key = (v["chrom"], v["pos"], a)
+                if key in seen:
+                    continue
+                seen.add(key)
+                af = "" if v["af"] is None else f"{v['af']:.6g}"
+                fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{a}\t"
+                         f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
+                         f"{v['af_pop']}\t{v['clnsig']}\n")
 
     # Step-6 tables
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:

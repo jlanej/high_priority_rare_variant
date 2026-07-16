@@ -94,8 +94,26 @@ def main(argv=None) -> int:
 
     check(has("CH_A", "denovo", "chr1", 5000, "GENE1"), "CH_A de novo GENE1")
     check(has("CH_A", "hom_recessive", "chr1", 8000, "GENE2"), "CH_A hom recessive GENE2")
-    ch = [r for r in calls if r["trio_id"] == "CH_A" and r["mode"] == "compound_het"]
-    check(len(ch) == 2 and all(r["symbol"] == "GENE3" for r in ch), "CH_A compound het pair in GENE3")
+
+    # --- MULTIALLELIC trans comp-het (child 1/2). `norm -m-` splits it and, without
+    # --keep-sum AD, strips the other ALT's reads -> ref_ad~0 -> allele_balance ~1.0 -> the het
+    # band rejects BOTH legs and the pair vanishes silently. This is a MISSED DIAGNOSIS channel:
+    # it hits exactly the loci where comp-hets concentrate, and no counter records the loss. ---
+    ch2 = [r for r in calls if r["trio_id"] == "CH_A" and r["symbol"] == "GENECH2"]
+    check(len([r for r in ch2 if r["mode"] == "compound_het"]) == 2,
+          "multiallelic (1/2) child yields a compound_het PAIR in GENECH2 — the --keep-sum AD fix")
+    check(len({r["pair_id"] for r in ch2 if r["mode"] == "compound_het"}) == 1,
+          "both GENECH2 legs share one pair_id (a genuine trans pair, not two singletons)")
+    # ...and the child's allele balance must be the corrected ~0.5, not the 1.0 the bug produced
+    for r in ch2:
+        ab = float(r["child_ab"]) if r["child_ab"] else 0.0
+        check(0.25 <= ab <= 0.75,
+              f"GENECH2 leg chr1:{r['pos']} child_ab={ab:.3f} inside the het band (bug gave 1.000)")
+    # scoped to GENE3: CH_A now also has a legitimate multiallelic comp-het in GENECH2 (below),
+    # so an unscoped count of every CH_A compound_het row would be 4, not 2.
+    ch = [r for r in calls if r["trio_id"] == "CH_A" and r["mode"] == "compound_het"
+          and r["symbol"] == "GENE3"]
+    check(len(ch) == 2, f"CH_A compound het pair in GENE3 (got {len(ch)})")
     # comp-het requires TRANS: two cis (both maternal) hets in GENEC must NOT be a compound_het
     genec = [r for r in calls if r["trio_id"] == "CH_A" and r["symbol"] == "GENEC"]
     check(genec and all(r["mode"] != "compound_het" for r in genec),
@@ -147,6 +165,35 @@ def main(argv=None) -> int:
     # GENE1 (de novo only) must NOT get an inherited recurrence p-value
     check(not genes.get("GENE1", {}).get("p_recurrence"),
           "GENE1 (de novo only) has no inherited recurrence p-value")
+
+    # --- chrM is OUT OF SCOPE and must never reach any output. The mock carries a near-fixed
+    # rCRS haplogroup variant (m.8860A>G, whole trio hom-alt) in BOTH trios. Un-excluded it fires
+    # hom_recessive everywhere and — with no gnomAD mito AF to fail the rarity gate — floors q in
+    # Step 6 and lands in the recurrent, exome-wide-significant tier above real nuclear genes. ---
+    check(not any(r["chrom"] in ("chrM", "chrMT", "M", "MT") for r in calls),
+          "no chrM call in candidates.calls.tsv (chrM excluded at Step 1)")
+    check("MT-ATP6" not in genes,
+          "MT-ATP6 absent from genes.ranked.tsv — a haplogroup variant never reaches the "
+          "recurrent tier")
+    for v in VCF(os.path.join(W, "cohort.sites.vcf.gz")):
+        if v.CHROM in ("chrM", "chrMT", "M", "MT"):
+            check(False, f"chrM leaked into the cohort union at {v.CHROM}:{v.POS}")
+            break
+    else:
+        check(True, "cohort.sites.vcf.gz contains no chrM records")
+
+    # --- GATK's de novo tags must SURVIVE Step 4. A blanket `annotate -x INFO` stripped them,
+    # which silently made Step 5's has_hiconf permanently False and filters.denovo.use_hiconf_tag
+    # a no-op — invisible, because de novo is still called when the tag is simply absent. ---
+    trio_vcfs = {r["trio_id"]: r["candidates_vcf"] for r in rows(os.path.join(W, "trios.candidates.tsv"))}
+    if check("CH_A" in trio_vcfs, "CH_A candidate VCF in the manifest"):
+        hdr = VCF(trio_vcfs["CH_A"]).raw_header
+        check("ID=hiConfDeNovo" in hdr,
+              "hiConfDeNovo header SURVIVES Step 4's INFO strip (else the de novo gate is dead code)")
+        check(any(v.INFO.get("hiConfDeNovo") for v in VCF(trio_vcfs["CH_A"])),
+              "at least one candidate record still carries a hiConfDeNovo value")
+        check(any(str(k).startswith("vep_") for v in VCF(trio_vcfs["CH_A"]) for k, _ in v.INFO),
+              "vep_* annotations still transfer into the per-trio VCF")
 
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")

@@ -82,6 +82,15 @@ Deep-learning site filtering has moved from the deprecated CNNScoreVariants to *
 
 These gates apply to every inheritance mode. AB (allele balance) is computed from **AD** as `alt / (ref + alt)`; it is not a native GATK FORMAT field.
 
+> **Multiallelic caveat — why Step 4 passes `--keep-sum AD`.** That formula is only correct if
+> `AD[0]` really counts "reads not supporting this ALT". `bcftools norm -m-` subsets the
+> `Number=R` AD array per allele and **discards the other ALT's reads**, so a non-ref/non-ref
+> (`1/2`) genotype splits into two legs with `ref_ad ≈ 0` and AB reads **≈ 1.0 on both** — the het
+> band then rejects a genuine trans compound het, silently. `--keep-sum AD`
+> (`04_subset_and_annotate_trios.sh`) folds the other ALT's reads back into `AD[0]`, restoring the
+> intended semantic: the same legs read AB 0.487 / 0.513, and a biallelic het is unchanged.
+> Regression-tested by the `GENECH2` case in `tests/integration/`.
+
 | Gate | Default | Notes |
 |------|---------|-------|
 | FILTER | `PASS` only | site-level |
