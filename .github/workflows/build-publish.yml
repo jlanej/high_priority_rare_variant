@@ -24,8 +24,8 @@ permissions:
 
 jobs:
   lint:
-    # Advisory only — does NOT gate publishing. A genuinely broken Dockerfile
-    # fails the build job below on its own.
+    # Gates publishing (see build-publish's `needs`). Kept to `severity: error` /
+    # `failure-threshold: error` so style nits don't block a release.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
           failure-threshold: error
 
   test:
-    # Fast, host-only pure-logic tests (no container). Advisory (does not gate publish).
+    # Fast, host-only pure-logic tests (no container). Gates publishing.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,10 +51,36 @@ jobs:
       - name: Pure-logic tests
         run: python tests/test_pure.py
 
+      # The image bakes in resources/manifest.env, and prepare_resources.sh reads it by a path
+      # relative to itself. .gitignore's `resources/` rule silently swallowed the manifest for
+      # most of this repo's life (fixed in e2c09f0): it existed on every dev box, so nothing
+      # noticed, while a clean clone — and therefore the image — had no manifest at all. These
+      # two steps run on a clean checkout, which is exactly the condition that catches it.
+      - name: Pinned manifest is tracked and not ignored
+        run: |
+          git ls-files --error-unmatch resources/manifest.env
+          if git check-ignore -q resources/manifest.env; then
+            echo "FATAL: resources/manifest.env matches a .gitignore rule — 'git add' will" \
+                 "silently drop edits to it. Keep the 'resources/* + !resources/manifest.env'" \
+                 "exception intact." >&2
+            exit 1
+          fi
+          echo "OK: resources/manifest.env is tracked and not ignored"
+
+      - name: prepare_resources.sh resolves its manifest from a clean clone
+        run: |
+          # emit-env, NOT verify: verify legitimately exits 1 here (a clean clone has no prepared
+          # resources). emit-env exits 0 iff the manifest was found and sourced, which is the one
+          # thing under test — and it needs no bio tools, so it runs in this host-only job.
+          out="$(bash scripts/prepare_resources.sh --dir "$(mktemp -d)" emit-env)"
+          echo "$out"
+          echo "$out" | grep -q '^export GNOMAD_SITES=.*gnomad.joint.v4.1' \
+            || { echo "FATAL: emit-env produced no manifest-derived exports" >&2; exit 1; }
+
   integration:
     # End-to-end pipeline over generated mock data with REAL bcftools + the python
     # steps. Only Step 2's VEP invocation is mocked (cache too heavy for CI), so no
-    # image build is needed. Advisory (does not gate publish).
+    # image build is needed. Gates publishing.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,7 +148,10 @@ jobs:
       # env — catches the conda-Perl-shadow class of bug the mocked integration test cannot), and
       # LOFTEE's Perl deps + all four plugin .pm must be present in VEP's Perl. Any failure here
       # fails the job before the push below, so a broken image is never published.
-      - name: Smoke test — real VEP + LOFTEE Perl deps + plugin code
+      # This runs as the image's unprivileged runtime user, so it also proves the baked
+      # prepare_resources.sh is reachable and executable the way a user actually invokes it —
+      # the Dockerfile's own probe runs as root and cannot show that.
+      - name: Smoke test — real VEP + LOFTEE Perl deps + plugin code + resource prep
         run: |
           docker run --rm hprv:ci bash -c '
             set -eu
@@ -134,6 +163,9 @@ jobs:
             for p in LoF CADD dbNSFP SpliceAI; do
               test -f "/plugins/$p.pm" && echo "OK: plugin /plugins/$p.pm"
             done
+            command -v prepare_resources.sh >/dev/null && echo "OK: prepare_resources.sh on PATH"
+            prepare_resources.sh --dir /tmp/_probe emit-env | grep -q "^export GNOMAD_SITES=" \
+              && echo "OK: in-image pinned manifest resolves (no host checkout needed)"
           '
 
       - name: Build and push
