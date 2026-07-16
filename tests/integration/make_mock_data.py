@@ -7,10 +7,9 @@ Writes under --out:
   vcfs/fileB.vcf              FAMILY VCF: [MO_B, SIB_B, CH_B, FA_B] (extra sibling,
                               shuffled order) — de novo (recurrent gene) + X-linked
   vcfs/fileC.vcf              duo CH_C/FA_C (mom absent) — resolver "unresolved" case
-  gnomad.sites.vcf            external AF (faf95/AF/AF_grpmax/nhomalt) for some sites
-  clinvar.vcf                 CLNSIG/CLNREVSTAT for a P/LP site
   trios.tsv                   #kid dad mom (A, B resolvable; C unresolvable)
-  annot.tsv                   per-site VEP-like lookup for mock_annotate.py
+  annot.tsv                   per-site lookup mock_vep.py turns into a VEP CSQ (frequency +
+                              CLIN_SIG + CADD included — there is no external sites VCF)
   mutrate.tsv, constraint.tsv gene tables for Step 6
   config.mock.yaml            config pointing at the above (concrete paths, ephemeral)
 
@@ -50,85 +49,88 @@ FILES = {
     "C": ["CH_C", "FA_C"],
 }
 
-# Each variant: file, chrom, pos, gene, csq, impact, revel, am, spliceai, loftee,
-# faf95 (None=absent from gnomAD), clnsig, clnrevstat, filter, hidenovo, gts.
+# Each variant: file, chrom, pos, gene, csq, impact, cadd, af (None = absent from gnomAD),
+# af_pop (which gnomAD CSQ population carries `af`), clnsig, filter, hidenovo, gts.
+#
+# VEP-only contract: there is no gnomAD/ClinVar/dbNSFP/SpliceAI/LOFTEE file to mock, because the
+# pipeline no longer reads one. Frequency and CLIN_SIG are emitted INTO the CSQ by mock_vep.py,
+# exactly as a real `vep --af_gnomade --af_gnomadg --check_existing` run would.
+#
+# af_pop defaults to a grpmax-ELIGIBLE group, so `af` drives annotations.frequency(). Set it to a
+# bottlenecked group (ami/asj/fin/mid) to model an allele grpmax deliberately ignores.
 V = []
 
 
 def add(**k):
-    k.setdefault("revel", ""); k.setdefault("am", ""); k.setdefault("spliceai", "")
-    k.setdefault("loftee", ""); k.setdefault("faf95", None); k.setdefault("clnsig", "")
-    k.setdefault("clnrevstat", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
+    k.setdefault("cadd", ""); k.setdefault("af", None); k.setdefault("af_pop", "gnomADe_NFE_AF")
+    k.setdefault("clnsig", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
     V.append(k)
 
 
 # --- Trio A (autosomal), CH_A female ---------------------------------------
 # 1) de novo, HIGH LoF, absent -> expect mode=denovo
 add(file="A", chrom="chr1", pos=5000, gene="GENE1", csq="stop_gained", impact="HIGH",
-    loftee="HC", hidenovo="CH_A",
+    hidenovo="CH_A",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 2) homozygous recessive, MODERATE missense, rare -> mode=hom_recessive
 add(file="A", chrom="chr1", pos=8000, gene="GENE2", csq="missense_variant", impact="MODERATE",
-    revel="0.95", faf95=5e-4,
+    af=5e-4,
     gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/1", 99, 40)})
 # 3+4) compound het in GENE3 (var3 maternal, var4 paternal) -> mode=compound_het
 add(file="A", chrom="chr2", pos=5000, gene="GENE3", csq="missense_variant", impact="MODERATE",
-    revel="0.80", faf95=1e-3,
+    af=1e-3,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 add(file="A", chrom="chr2", pos=6000, gene="GENE3", csq="missense_variant", impact="MODERATE",
-    revel="0.80", faf95=1e-3,
+    af=1e-3,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 5) common (BA1) -> dropped at Step 3 (never a candidate)
 add(file="A", chrom="chr1", pos=12000, gene="GENE4", csq="missense_variant", impact="MODERATE",
-    revel="0.70", faf95=0.2,
+    af=0.2,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 6) low-GQ de-novo-looking (no hiConfDeNovo) -> passes Step 3, FAILS Step 5 QC
-add(file="A", chrom="chr1", pos=15000, gene="GENE5", csq="stop_gained", impact="HIGH", loftee="HC",
-    gts={"CH_A": ("0/1", 12, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
+add(file="A", chrom="chr1", pos=15000, gene="GENE5", csq="stop_gained", impact="HIGH", gts={"CH_A": ("0/1", 12, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 7) non-PASS -> dropped at Step 1
-add(file="A", chrom="chr1", pos=17000, gene="GENE6", csq="stop_gained", impact="HIGH", loftee="HC",
-    filter="VQSRTrancheSNP99.00to99.90+", hidenovo="CH_A",
+add(file="A", chrom="chr1", pos=17000, gene="GENE6", csq="stop_gained", impact="HIGH", filter="VQSRTrancheSNP99.00to99.90+", hidenovo="CH_A",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 8) ClinVar P/LP but LOW impact (synonymous) -> kept at Step 3 via clinvar_plp override
 add(file="A", chrom="chr2", pos=8000, gene="GENE7", csq="synonymous_variant", impact="LOW",
-    faf95=2e-4, clnsig="Pathogenic",  # > dominant_max: kept via ClinVar but not a dominant call
-    clnrevstat="criteria_provided,_multiple_submitters,_no_conflicts",
+    af=2e-4, clnsig="pathogenic",  # > dominant_max: kept via ClinVar but not a dominant call
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
 # --- Trio B (CH_B male), family VCF with extra sibling ----------------------
 # 9) de novo in GENE1 (recurrent across trios A+B) -> mode=denovo; drives Step-6 burden
 add(file="B", chrom="chr1", pos=5100, gene="GENE1", csq="stop_gained", impact="HIGH",
-    loftee="HC", hidenovo="CH_B",
+    hidenovo="CH_B",
     gts={"CH_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("0/0", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 # 10) X-linked recessive (male hemizygous), carrier mother -> mode=x_linked_recessive
 add(file="B", chrom="chrX", pos=2781600, gene="GENEX", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=1e-4,
+    af=1e-4,
     gts={"CH_B": ("1/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("0/1", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 # 11-13) chrX filler (common) so CH_B is inferred MALE (hemizygous alt -> low het ratio)
 for i, p in enumerate((2781700, 2781800, 2781900)):
     add(file="B", chrom="chrX", pos=p, gene=f"XFILL{i}", csq="missense_variant", impact="MODERATE",
-        faf95=0.3,
+        af=0.3,
         gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 99, 40),
              "SIB_B": ("0/1", 99, 40)})
 
 # --- DOMINANT RECURRENCE: same rare functional inherited het in GENED, in BOTH trios
 #     (CH_A inherits from dad, CH_B from mom) -> Step 6 nominates GENED (n_dominant=2) ---
 add(file="A", chrom="chr2", pos=10000, gene="GENED", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=5e-5,
+    af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 add(file="B", chrom="chr2", pos=10000, gene="GENED", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=5e-5,
+    af=5e-5,
     gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 
 # --- CONTAMINATION: a common hom-alt site where FA_B carries reference reads at a hom-alt
-#     genotype (verifyBamID-style contamination). Common (faf95=0.3) so Step 3 drops it and it
+#     genotype (verifyBamID-style contamination). Common (af=0.3) so Step 3 drops it and it
 #     never becomes a candidate — it only exercises Step 0's CHARR gate. Mendelian-consistent
 #     (all 1/1) so it adds no MIE. Expect: CH_B contam_flag=1 (dad), kid/mom clean. ---
 add(file="B", chrom="chr2", pos=14000, gene="XCONTAM", csq="missense_variant", impact="MODERATE",
-    faf95=0.3,
+    af=0.3,
     gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("1/1", 99, 40),
          "SIB_B": ("1/1", 99, 40)},
     adov={"FA_B": "6,34"})   # 6 ref reads at a hom-alt site -> CHARR 0.15 > 0.02 threshold
@@ -137,23 +139,23 @@ add(file="B", chrom="chr2", pos=14000, gene="XCONTAM", csq="missense_variant", i
 #     must STILL be called (father transmits Y, not X, to a son) -> tests the father-genotype
 #     relaxation. Flag 'father_carries_x_allele' expected. ---
 add(file="B", chrom="chrX", pos=2782000, gene="GENEXAF", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=1e-4,
+    af=1e-4,
     gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 
 # --- autosomal hom-recessive with a HOM-ALT parent (consanguinity-like): FA_A hom-alt, MO_A het,
 #     CH_A hom-alt -> hom_recessive via the {HET,HOM_ALT} carrier rule (tests carrier_ok HOM_ALT). ---
 add(file="A", chrom="chr1", pos=8500, gene="GENE2H", csq="missense_variant", impact="MODERATE",
-    revel="0.95", faf95=5e-4,
+    af=5e-4,
     gts={"CH_A": ("1/1", 99, 40), "FA_A": ("1/1", 99, 40), "MO_A": ("0/1", 99, 40)})
 
 # --- DISTINCT-variant dominant recurrence across trios A+B in GENEDD (two DIFFERENT rare hets) ->
 #     the stronger 'gene signal'; recurrence_kind=distinct_variant (ranks above same-variant GENED). ---
 add(file="A", chrom="chr2", pos=11000, gene="GENEDD", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=5e-5,
+    af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 add(file="B", chrom="chr2", pos=11100, gene="GENEDD", csq="missense_variant", impact="MODERATE",
-    revel="0.90", faf95=5e-5,
+    af=5e-5,
     gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
 
@@ -161,15 +163,36 @@ add(file="B", chrom="chr2", pos=11100, gene="GENEDD", csq="missense_variant", im
 #     (cis). compound_het requires TRANS (mat x pat), so these must NOT be paired; each is a
 #     dominant (maternal-origin) call instead. Guards the trans-pairing logic. ---
 add(file="A", chrom="chr2", pos=16000, gene="GENEC", csq="missense_variant", impact="MODERATE",
-    revel="0.85", faf95=5e-5,
+    af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 add(file="A", chrom="chr2", pos=16100, gene="GENEC", csq="missense_variant", impact="MODERATE",
-    revel="0.85", faf95=5e-5,
+    af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
+
+# --- CADD-only keep: a deep-intronic MODIFIER with no impact-based evidence. CADD is the ONLY
+#     functional predictor left, so this is the sole path by which any non-coding variant can
+#     survive Step 3. If the CADD branch ever breaks, the screen silently goes coding-only and
+#     this is the assertion that notices. Inherited het -> also a dominant call in GENEIN. ---
+add(file="A", chrom="chr1", pos=18000, gene="GENEIN", csq="intron_variant", impact="MODIFIER",
+    cadd="27.5", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+# ...and its control: same intronic MODIFIER, CADD BELOW the cutoff -> must be dropped.
+add(file="A", chrom="chr1", pos=18500, gene="GENEINLO", csq="intron_variant", impact="MODIFIER",
+    cadd="3.0", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
+# --- FOUNDER-POPULATION allele: frequent ONLY in a bottlenecked group gnomAD's grpmax excludes
+#     (mid, ~AN 700). MAX_AF reports 0.002 — 20x over dominant_max — but grpmax-eligible groups
+#     report nothing, so annotations.frequency() must return None and the variant must SURVIVE as
+#     a dominant candidate. This is the concrete false-negative that using VEP's MAX_AF as the
+#     rarity field would cause, and the reason frequency() reads only GRPMAX_POPS. ---
+add(file="A", chrom="chr2", pos=17000, gene="GENEFND", csq="missense_variant", impact="MODERATE",
+    af=0.002, af_pop="gnomADe_MID_AF",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
 # --- Trio C: duo only (mom MO_C absent everywhere) -> resolver unresolved ---
 add(file="C", chrom="chr1", pos=9000, gene="GENE8", csq="missense_variant", impact="MODERATE",
-    faf95=1e-3, gts={"CH_C": ("0/1", 99, 40), "FA_C": ("0/1", 99, 40)})
+    af=1e-3, gts={"CH_C": ("0/1", 99, 40), "FA_C": ("0/1", 99, 40)})
 
 
 def write_reference(path):
@@ -291,38 +314,23 @@ def main(argv=None) -> int:
         write_vcf(os.path.join(W, "vcfs", f"file{fk}.vcf"), samples,
                   [v for v in V if v["file"] == fk])
 
-    # gnomAD sites (only variants with an faf95)
-    gnomad_hdr = [
-        '##INFO=<ID=AF,Number=1,Type=Float,Description="af">',
-        '##INFO=<ID=AF_grpmax,Number=1,Type=Float,Description="grpmax af">',
-        '##INFO=<ID=faf95,Number=1,Type=Float,Description="faf95">',
-        '##INFO=<ID=nhomalt,Number=1,Type=Integer,Description="nhomalt">',
-    ]
-    gwant = [(v, f"AF={v['faf95']:.4g};AF_grpmax={v['faf95']:.4g};faf95={v['faf95']:.4g};nhomalt=0")
-             for v in V if v["faf95"] is not None]
-    write_sites(os.path.join(W, "gnomad.sites.vcf"), gnomad_hdr, gwant)
+    # No gnomad.sites.vcf / clinvar.vcf: under the VEP-only contract nothing is transferred from
+    # an external sites VCF, so there is nothing to mock. Frequency + CLIN_SIG go into the CSQ
+    # (see mock_vep.py), which is where a real `vep --af_gnomade --check_existing` puts them.
 
-    # ClinVar sites
-    cv_hdr = [
-        '##INFO=<ID=CLNSIG,Number=.,Type=String,Description="clinical significance">',
-        '##INFO=<ID=CLNREVSTAT,Number=.,Type=String,Description="review status">',
-    ]
-    cwant = [(v, f"CLNSIG={v['clnsig']};CLNREVSTAT={v['clnrevstat']}")
-             for v in V if v["clnsig"]]
-    write_sites(os.path.join(W, "clinvar.vcf"), cv_hdr, cwant)
-
-    # annotation lookup for mock_annotate.py
+    # annotation lookup for mock_vep.py -> becomes the CSQ
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
-        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\trevel\tam\tspliceai\tloftee\n")
+        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\n")
         seen = set()
         for v in V:
             key = (v["chrom"], v["pos"])
             if key in seen:
                 continue
             seen.add(key)
+            af = "" if v["af"] is None else f"{v['af']:.6g}"
             fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{altbase(v['pos'])}\t"
-                     f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['revel']}\t{v['am']}\t"
-                     f"{v['spliceai']}\t{v['loftee']}\n")
+                     f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
+                     f"{v['af_pop']}\t{v['clnsig']}\n")
 
     # Step-6 tables
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:
@@ -344,6 +352,9 @@ def main(argv=None) -> int:
 runtime: {{image: none, engine: native, tmpdir: {W}/work/tmp, threads: 1}}
 reference: {{fasta: {W}/reference.fa}}
 resources:
+  # Step 2 ingests this instead of invoking `vep` (mock_vep.py writes it). Everything else in
+  # Step 2 — build checks, split-vep, selector, frequency guard — runs for real against it.
+  vep: {{annotated_vcf: {W}/cohort.sites.vep.vcf.gz, version: 115}}
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
   cram_map: {W}/cram_map.tsv

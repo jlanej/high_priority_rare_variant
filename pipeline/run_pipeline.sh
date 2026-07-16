@@ -54,32 +54,32 @@ is_set "${HPRV_TRIOS_FILE:-}"  || die "inputs.trios_file is unresolved — set t
 is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf_dir and/or inputs.vcf_list"
 
 # ---------------------------------------------------------------------------
-# Resource preflight — the annotation resources are an IDEMPOTENT UPSTREAM
-# REQUIREMENT: prepare them ONCE with prepare_resources.sh, which ships in the image (see
-# docs/resources.md), and every run just re-verifies them here before doing work.
-# Hard-fail on the resources without which the screen is meaningless (VEP cache +
-# the gnomAD faf95 rarity oracle); loudly flag missing OPTIONAL predictors (they
-# remove specific evidence, not the whole run). Only enforced when Step 2 (which actually
-# consumes these) is in the --from/--to range — a `--from 3` re-run reads already-transferred
-# annotations and needs none of them, so it must not be blocked.
+# Resource preflight. Under the VEP-only contract the entire surface is: a VEP 115 GRCh38
+# cache (which carries gnomAD v4.1 frequencies + ClinVar itself) and the CADD plugin files.
+# No gnomAD / ClinVar / dbNSFP / SpliceAI / LOFTEE download exists to check.
+# Only enforced when Step 2 actually runs — a `--from 3` re-run reads annotations that are
+# already in the VCF and needs none of this. If resources.vep.annotated_vcf is set, VEP is
+# not invoked at all, so only that file has to exist.
 # ---------------------------------------------------------------------------
 if run_step 2; then
     r_missing=()
     _need() { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then r_missing+=("$2 -> \$$v='${!v:-}'"); fi; }
     _opt()  { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then warn "resource DEGRADED: $2 missing (\$$v) — that evidence will be unavailable"; fi; }
-    _need HPRV_VEP_CACHE     "VEP cache (resources.vep.cache_dir)"
-    _need HPRV_GNOMAD_SITES  "gnomAD v4.1 sites (resources.gnomad.sites_vcf) = the faf95 rarity oracle"
-    _opt  HPRV_CLINVAR_VCF    "ClinVar (P/LP override)"
-    _opt  HPRV_DBNSFP         "dbNSFP (REVEL/AlphaMissense/MPC)"
-    _opt  HPRV_SPLICEAI_SNV   "SpliceAI SNV"
-    _opt  HPRV_SPLICEAI_INDEL "SpliceAI indel"
-    _opt  HPRV_LOFTEE_DATA    "LOFTEE (pLoF HC/LC)"
-    _opt  HPRV_CADD_SNV       "CADD SNV"
-    _opt  HPRV_CADD_INDEL     "CADD indel"
+    if is_set "${HPRV_VEP_ANNOTATED_VCF:-}"; then
+        _need HPRV_VEP_ANNOTATED_VCF "pre-annotated VEP VCF (resources.vep.annotated_vcf)"
+    else
+        _need HPRV_VEP_CACHE "VEP cache (resources.vep.cache_dir) — supplies transcripts, gnomAD v4.1 AFs, and ClinVar"
+        # CADD is the ONLY functional predictor here, and the only evidence that can keep a
+        # variant VEP rates below MODERATE. Without it the screen is impact-only: every
+        # intronic / synonymous / UTR / regulatory candidate is unreachable. Loud, not fatal —
+        # an impact-only screen is still a coherent (if narrower) run.
+        _opt HPRV_CADD_SNV   "CADD SNV (the only non-coding evidence in this contract)"
+        _opt HPRV_CADD_INDEL "CADD indel (the only indel-capable score in this contract)"
+    fi
     if [[ ${#r_missing[@]} -gt 0 ]]; then
-        warn "Required annotation resources are missing — prepare them ONCE, upstream:"
+        warn "Required resources are missing:"
         for m in "${r_missing[@]}"; do warn "  - $m"; done
-        die "run prepare_resources.sh (fetch -> verify -> emit-env) inside this image, source the emitted env, then re-run. See docs/resources.md."
+        die "point resources.vep.cache_dir at a VEP ${HPRV_VEP_VERSION:-115} GRCh38 cache (or set resources.vep.annotated_vcf to a VEP VCF you already have), then re-run. See docs/resources.md."
     fi
 fi
 
@@ -115,9 +115,15 @@ if run_step 1; then
 fi
 
 if run_step 2; then
-    log "== Step 2: annotate sites (VEP once) =="
-    bash "$HERE/02_annotate_sites.sh" --sites "$W/cohort.sites.vcf.gz" \
-        --ref "$HPRV_REF_FASTA" --out "$W/cohort.sites.annotated.vcf.gz"
+    s2_args=(--sites "$W/cohort.sites.vcf.gz" --ref "$HPRV_REF_FASTA"
+             --out "$W/cohort.sites.annotated.vcf.gz")
+    if is_set "${HPRV_VEP_ANNOTATED_VCF:-}"; then
+        log "== Step 2: ingest pre-annotated VEP VCF (VEP not run) =="
+        s2_args+=(--vep-vcf "$HPRV_VEP_ANNOTATED_VCF")
+    else
+        log "== Step 2: annotate sites (VEP once) =="
+    fi
+    bash "$HERE/02_annotate_sites.sh" "${s2_args[@]}"
 fi
 
 if run_step 3; then

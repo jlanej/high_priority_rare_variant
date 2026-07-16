@@ -2,9 +2,12 @@
 # =============================================================================
 # run_integration.sh — end-to-end pipeline test over generated mock data.
 #
-# Exercises resolve + Steps 0,1,3,4,5,6 for real (bcftools + the python steps).
-# Only Step 2's VEP invocation is mocked (VEP cache is too heavy for CI) — the
-# gnomAD/ClinVar transfer runs real `bcftools annotate`.
+# Exercises resolve + Steps 0-8 for real (bcftools + the python steps). ONLY the `vep`
+# binary itself is mocked (its cache is 24 GB — too heavy for CI): mock_vep.py writes a
+# VEP-shaped CSQ, and Step 2 then runs for real via its --vep-vcf ingest path, so the
+# build checks, the split-vep lift, the transcript selector and the frequency guard are
+# all under test. There is no gnomAD/ClinVar transfer to exercise — under the VEP-only
+# contract those annotations come from the CSQ.
 #
 # Requires on PATH: bcftools, samtools, bgzip, tabix, and a python with
 # cyvcf2/pysam/numpy/scipy/pyyaml. Runs on a laptop (conda env) or in CI.
@@ -29,31 +32,20 @@ for s in "$W"/crams_src/*.sam; do
     samtools sort -O cram --reference "$W/reference.fa" -o "$b.cram" "$s"
     samtools index "$b.cram"
 done
-bgzip -f "$W/gnomad.sites.vcf"; tabix -f -p vcf "$W/gnomad.sites.vcf.gz"
-bgzip -f "$W/clinvar.vcf";      tabix -f -p vcf "$W/clinvar.vcf.gz"
-
 CFG="$W/config.mock.yaml"
 WORK="$W/work"
 
 # --- resolve + Step 0 (QC) + Step 1 (cohort sites) ---
 bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 0 --to 1
 
-# --- mock Step 2: VEP fields + real gnomAD/ClinVar transfer ---
-python3 "$HERE/mock_annotate.py" --in "$WORK/cohort.sites.vcf.gz" \
-    --lookup "$W/annot.tsv" --out "$WORK/cohort.sites.vep.vcf"
-bgzip -f "$WORK/cohort.sites.vep.vcf"; tabix -f -p vcf "$WORK/cohort.sites.vep.vcf.gz"
-bcftools annotate -a "$W/gnomad.sites.vcf.gz" \
-    -c 'INFO/hprv_gnomad_af:=INFO/AF,INFO/hprv_gnomad_grpmax_af:=INFO/AF_grpmax,INFO/hprv_gnomad_faf95:=INFO/faf95,INFO/hprv_gnomad_nhomalt:=INFO/nhomalt' \
-    -Oz -o "$WORK/cohort.sites.gn.vcf.gz" "$WORK/cohort.sites.vep.vcf.gz"
-tabix -f -p vcf "$WORK/cohort.sites.gn.vcf.gz"
-bcftools annotate -a "$W/clinvar.vcf.gz" \
-    -c 'INFO/hprv_clnsig:=INFO/CLNSIG,INFO/hprv_clnrevstat:=INFO/CLNREVSTAT' \
-    -Oz -o "$WORK/cohort.sites.annotated.vcf.gz" "$WORK/cohort.sites.gn.vcf.gz"
-tabix -f -p vcf "$WORK/cohort.sites.annotated.vcf.gz"
-touch "$WORK/cohort.sites.annotated.vcf.gz.done"
+# --- stand in for the `vep` binary only: produce a VEP-shaped CSQ over the cohort union ---
+python3 "$HERE/mock_vep.py" --in "$WORK/cohort.sites.vcf.gz" \
+    --lookup "$W/annot.tsv" --out "$W/cohort.sites.vep.vcf"
+bgzip -f "$W/cohort.sites.vep.vcf"; tabix -f -p vcf "$W/cohort.sites.vep.vcf.gz"
 
-# --- Steps 3-8 (includes xlsx summary + igv export) ---
-bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 3 --to 8
+# --- Steps 2-8 for real. Step 2 ingests the VEP VCF above (resources.vep.annotated_vcf in the
+#     mock config), so its build checks + split-vep + selector + frequency guard all execute. ---
+bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 2 --to 8
 
 # --- assertions ---
 python3 "$HERE/assert_integration.py" --work "$WORK"

@@ -29,9 +29,11 @@ from hprv.ped import parse_ped
 
 COLS = [
     "trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
-    "consequence", "impact", "faf95", "grpmax_af", "nhomalt", "revel",
-    "alphamissense", "spliceai_max", "loftee", "loftee_flags", "clnsig",
-    "clinvar_stars", "child_gt", "child_gq", "child_dp", "child_ab",
+    # grpmax_af is THE rarity field (annotations.frequency()); max_af/max_af_pops ride
+    # along for review only, so a curator can see when a call is being driven by a
+    # founder-group frequency that grpmax deliberately ignores.
+    "consequence", "impact", "grpmax_af", "max_af", "max_af_pops", "cadd",
+    "clnsig", "child_gt", "child_gq", "child_dp", "child_ab",
     "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck", "flags",
 ]
 
@@ -62,11 +64,9 @@ def base_row(trio_id, v, gt, mode, pair_id=""):
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
-        "faf95": fmt(A.faf95(v)), "grpmax_af": fmt(A.grpmax_af(v)),
-        "nhomalt": fmt(A.nhomalt(v)), "revel": fmt(A.revel(v)),
-        "alphamissense": fmt(A.alphamissense(v)), "spliceai_max": fmt(A.spliceai_max(v)),
-        "loftee": A._str(v, "loftee") or "", "loftee_flags": A.loftee_flags(v) or "",
-        "clnsig": A.clnsig(v) or "", "clinvar_stars": A.clinvar_stars(v),
+        "grpmax_af": fmt(A.grpmax_af(v)), "max_af": fmt(A._max_float(v, "max_af")),
+        "max_af_pops": A._str(v, "max_af_pops") or "", "cadd": fmt(A.cadd(v)),
+        "clnsig": A.clnsig(v) or "",
         "child_gt": (v.gt_bases[gt.c] if v.gt_bases is not None else ""),
         "child_gq": fmt(G.gq(v, gt.c)), "child_dp": fmt(G.dp(v, gt.c)),
         "child_ab": fmt(G.allele_balance(v, gt.c)),
@@ -82,7 +82,9 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     dom_max = float(get(cfg, "filters.rarity.dominant_max", 1e-4))
     rec_max = float(get(cfg, "filters.rarity.recessive_max", 1e-2))
     require_hiconf = bool(get(cfg, "filters.denovo.use_hiconf_tag", True))
-    require_absent = bool(get(cfg, "filters.denovo.require_gnomad_absent_or_singleton", True))
+    # NB: filters.denovo.require_gnomad_absent_or_singleton is retired — it was implemented as
+    # nhomalt > 1 (a HOMOZYGOTE-count test, never the allele-count test its name promised), and
+    # nhomalt does not exist in the VEP cache. Removed rather than silently no-op'd.
     crosscheck = bool(get(cfg, "filters.denovo.crosscheck_prerefinement_pl", True))
     # Focus is INHERITED variation. De novo detection is retained for cross-reference
     # only (dedicated de novo filtering/review lives in separate machinery); the
@@ -97,8 +99,13 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         return fr is None or fr < limit
 
     def tag_strict(r, v):
-        """Flag a recessive/X-linked call whose faf95 is below the high-confidence tier."""
-        fr = A.faf95(v)
+        """Flag a recessive/X-linked call whose frequency is below the high-confidence tier.
+
+        Reads frequency() — the same chokepoint rare() uses — rather than a field getter
+        directly; the two previously disagreed (this read faf95 with no grpmax fallback,
+        so a variant with only a grpmax AF silently never earned the flag).
+        """
+        fr = A.frequency(v)
         if fr is not None and fr < rec_strict:
             r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "high_conf_rarity"
         return r
@@ -142,9 +149,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             ok = (G.sample_qc(v, c, thr, child_kind) and parents_clean and rare(v, dom_max))
             if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
                 ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
-            nh = A.nhomalt(v)
-            if require_absent and nh is not None and nh > 1:
-                ok = False
+            # The gnomAD-homozygote gate that used to sit here is gone with nhomalt: the VEP
+            # cache carries no homozygote count. rare(v, dom_max) above still applies the
+            # frequency gate, which is the bulk of what it did. De novo is secondary here
+            # (dedicated machinery owns it), so this is the cheapest place to absorb the loss.
             if require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name):
                 ok = False  # tag exists in this callset but not a hiConf de novo for THIS child
             if ok:

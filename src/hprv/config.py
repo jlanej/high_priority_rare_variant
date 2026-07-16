@@ -65,26 +65,19 @@ SH_MAP = {
     "HPRV_TRIOS_FILE": "inputs.trios_file",
     "HPRV_VCF_DIR": "inputs.vcf_dir",
     "HPRV_VCF_LIST": "inputs.vcf_list",
+    # VEP-only contract: the cache + the CADD plugin are the whole resource surface. The
+    # gnomAD / ClinVar / dbNSFP / SpliceAI / LOFTEE keys are gone because nothing reads them —
+    # population frequency and ClinVar now ride in the CSQ from the cache itself. See
+    # src/hprv/annotations.py and docs/allele_frequency.md.
     "HPRV_VEP_CACHE": "resources.vep.cache_dir",
     "HPRV_VEP_VERSION": "resources.vep.version",
     "HPRV_VEP_PLUGINS": "resources.vep.plugins_dir",
+    "HPRV_VEP_ANNOTATED_VCF": "resources.vep.annotated_vcf",
+    "HPRV_CSQ_SELECT": "resources.vep.csq_select",
     "HPRV_CADD_SNV": "resources.vep.cadd_snv",
     "HPRV_CADD_INDEL": "resources.vep.cadd_indel",
-    "HPRV_DBNSFP": "resources.vep.dbnsfp",
-    "HPRV_SPLICEAI_SNV": "resources.vep.spliceai_snv",
-    "HPRV_SPLICEAI_INDEL": "resources.vep.spliceai_indel",
-    "HPRV_LOFTEE_DATA": "resources.vep.loftee_data",
-    "HPRV_GNOMAD_SITES": "resources.gnomad.sites_vcf",
-    "HPRV_GNOMAD_AF_TAG": "resources.gnomad.af_tag",
-    "HPRV_GNOMAD_GRPMAX_AF_TAG": "resources.gnomad.grpmax_af_tag",
-    "HPRV_GNOMAD_FAF95_TAG": "resources.gnomad.faf95_tag",
-    "HPRV_GNOMAD_NHOMALT_TAG": "resources.gnomad.nhomalt_tag",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
-    "HPRV_CLINVAR_VCF": "resources.clinvar.vcf",
-    "HPRV_CLINVAR_SIG_TAG": "resources.clinvar.sig_tag",
-    "HPRV_CLINVAR_REVSTAT_TAG": "resources.clinvar.revstat_tag",
-    "HPRV_CLINVAR_SIGCONF_TAG": "resources.clinvar.sigconf_tag",
 }
 
 

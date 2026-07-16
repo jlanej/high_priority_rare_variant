@@ -59,10 +59,26 @@ def main(argv=None) -> int:
     for v in VCF(os.path.join(W, "plausible.sites.vcf.gz")):
         plaus[(v.CHROM, v.POS)] = v.INFO.get("hprv_keep_reason")
     check(("chr2", 8000) in plaus and plaus[("chr2", 8000)] == "clinvar_plp",
-          "ClinVar P/LP (LOW impact) kept via clinvar_plp")
+          "ClinVar P/LP (LOW impact) kept via clinvar_plp — on UNSTARRED CLIN_SIG from the VEP "
+          "cache (there is no CLNREVSTAT, so the old >=2-star gate cannot and does not apply)")
     check(("chr1", 12000) not in plaus, "BA1-common variant dropped at Step 3")
     check(("chr1", 17000) not in plaus, "non-PASS variant dropped before Step 3")
     check(("chr1", 5000) in plaus, "de novo site retained as plausible")
+
+    # --- VEP-only contract: CADD is the ONLY functional predictor, hence the ONLY way any
+    # variant below MODERATE impact can survive. If this regresses the screen silently goes
+    # coding-only and every intronic/synonymous candidate vanishes. ---
+    check(plaus.get(("chr1", 18000)) == "cadd",
+          "deep-intronic MODIFIER kept via CADD (the sole non-coding keep-path)")
+    check(("chr1", 18500) not in plaus,
+          "intronic MODIFIER with sub-threshold CADD dropped (the CADD gate really gates)")
+
+    # --- The gating-dead predictors must not reappear. REVEL/AlphaMissense/MPC are missense-only
+    # scores, and every missense is IMPACT=MODERATE, which selection.py keeps at an earlier
+    # branch — so these keep-reasons were unreachable even when the code still had them. This is
+    # the audit's falsifiable prediction, enforced: they must be exactly 0, cohort-wide. ---
+    for dead in ("revel", "alphamissense", "mpc", "spliceai", "loftee_hc"):
+        check(dead not in set(plaus.values()), f"no site kept via '{dead}' (removed / unreachable)")
 
     # --- Step 5: inheritance calls ---
     calls = rows(os.path.join(W, "candidates.calls.tsv"))
@@ -97,6 +113,21 @@ def main(argv=None) -> int:
     # dominant model: rare functional inherited het, recurrent across individuals
     check(has("CH_A", "dominant", "chr2", 10000, "GENED"), "CH_A dominant inherited het GENED")
     check(has("CH_B", "dominant", "chr2", 10000, "GENED"), "CH_B dominant inherited het GENED")
+    # Rarity oracle = grpmax PROXY, not VEP's MAX_AF. GENEFND is at AF 0.002 in gnomAD 'mid' — a
+    # bottlenecked group gnomAD's own grpmax excludes — and absent from every grpmax-eligible
+    # group. MAX_AF therefore reports 0.002, 20x over dominant_max=1e-4, and reading it would
+    # silently DROP this call. frequency() must see None and the call must survive.
+    check(has("CH_A", "dominant", "chr2", 17000, "GENEFND"),
+          "founder-population-only allele (MAX_AF=0.002 in 'mid') still called dominant — "
+          "grpmax proxy correctly ignores bottlenecked groups")
+    fnd = [r for r in calls if r["symbol"] == "GENEFND"]
+    check(fnd and all(not r["grpmax_af"] for r in fnd),
+          "GENEFND reports an EMPTY grpmax_af (no eligible group carries it)")
+    check(fnd and all(r["max_af"] for r in fnd),
+          "GENEFND still reports max_af for the reviewer to see why it looked common")
+    # CADD-only keep survives into an actual call, not just Step 3
+    check(has("CH_A", "dominant", "chr1", 18000, "GENEIN"),
+          "deep-intronic CADD-kept variant becomes a dominant call")
 
     # --- Step 6: recurrence-based gene consolidation ---
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}
