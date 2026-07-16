@@ -177,7 +177,7 @@ Reproducibility of a *decision* is only as good as the pipeline's coverage. Stat
 | ensembl-vep | **115** (matches working annotate script) |
 | Python | `cyvcf2` / `pysam` (htslib 1.22) / `pandas` / `numpy`, all lock-pinned |
 | VEP cache | **external, bind-mounted, release-matched** to the VEP binary; annotate against **GRCh38** |
-| Frequency oracle | **gnomAD v4.1** (external only), grpmax **faf95** as the filter field |
+| Frequency oracle | **gnomAD v4.1** (external only), read from the **VEP cache**; filter field is the grpmax **proxy** (point estimate). `faf95` = TARGET — the cache carries no AC/AN ([limitations.md §2](limitations.md)) |
 | CI / publish | buildx → **GHCR** per commit; tag by git SHA + branch; `provenance: true` + `sbom: true` + `attest-build-provenance`; **amd64-only**; consume by `@sha256:` digest |
 | Apptainer runtime | `APPTAINER_TMPDIR`/`CACHEDIR` → node scratch; **no `--containall`**; `--bind $SCRATCH/tmp:/tmp` + refs; `--cleanenv` |
 | Repo hygiene | config-driven paths + env vars; `.gitignore` all VCF/BAM/CRAM/PED/results; dbGaP data never committed |

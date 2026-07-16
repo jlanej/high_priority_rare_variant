@@ -78,7 +78,7 @@ Proband phenotypes are standardized to **HPO** terms, then genes are ranked by p
 
 ## Tiered integration strategy
 
-Lists and phenotype scores map candidates to reporting tiers. Rarity/impact/QC gating (gnomAD v4.1 grpmax `faf95`, VEP consequence + calibrated in-silico, GATK genotype-refinement PP/GQ) is applied **independently and before** the priors below, so no tier assignment can exclude a variant that already passed.
+Lists and phenotype scores map candidates to reporting tiers. Rarity/impact/QC gating (gnomAD v4.1 grpmax **proxy** AF — a point estimate, **not** `faf95`; VEP consequence + CADD; GATK genotype-refinement PP/GQ) is applied **independently and before** the priors below, so no tier assignment can exclude a variant that already passed.
 
 | Tier | Definition | Threshold treatment | Outcome |
 | --- | --- | --- | --- |
@@ -107,7 +107,7 @@ Tier-2 constraint up-weighting uses the pipeline's constraint defaults (see [gen
 | Cancer panels | PanelApp GE **Green** on panels **243** + **245** (+ PanelApp-AUS cancer/KidGen) | Pin panel `version`; see pediatric_cancer.md |
 | COSMIC | **v104** (May 2026), germline-flagged subset | Added-gene names not asserted |
 | Never-drop rule | Tier-3 (no-list) variants passing rarity + impact + trio-QC | Retained at lower prior |
-| Rarity gating (applied first) | grpmax `faf95` < **1e-4** dominant/de novo; < **1e-2** recessive (**1e-3** high-conf tier); ≥ **0.05** hard benign | See allele_frequency.md; gene-specific ClinGen VCEP overrides generic cutoffs |
+| Rarity gating (applied first) | grpmax **proxy** AF (point estimate; `faf95` is the TARGET) < **1e-4** dominant/de novo; < **1e-2** recessive (**1e-3** high-conf tier); ≥ **0.05** hard benign | See [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md); gene-specific ClinGen VCEP overrides generic cutoffs |
 | Reproducibility | Pin OMIM date, COSMIC vNN, PanelApp versions, ClinGen dates, ACMG SF vN.N, Exomiser data `YYMM` | Per-run manifest; freeze copies |
 
 ## Known scope limitations

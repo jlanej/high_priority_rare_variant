@@ -77,7 +77,7 @@ ClinGen dosage curation (`HI` / `TS`) is authoritative where present and is repo
 
 ## Interpreting constraint by inheritance model
 
-- **Dominant / haploinsufficient genes:** constraint is directly informative. Low LOEUF, high pLI, high s_het, high pHaplo, or ClinGen HI = 3 → strong prior for pLoF pathogenicity. A high-confidence pLoF (LOFTEE HC, no flags — see [functional_annotation.md](functional_annotation.md)) in a constrained gene is a top nomination.
+- **Dominant / haploinsufficient genes:** constraint is directly informative. Low LOEUF, high pLI, high s_het, high pHaplo, or ClinGen HI = 3 → strong prior for pLoF pathogenicity. A high-confidence pLoF (LOFTEE HC, no flags — see [functional_annotation.md](functional_annotation.md)) in a constrained gene is a top nomination. *(The LOFTEE HC qualifier is a **TARGET**: no LOFTEE data files are fetched under the VEP-only contract, so "pLoF" today means VEP `IMPACT=HIGH`, unfiltered for NMD-escape — [limitations.md §5](limitations.md).)*
 - **Recessive genes:** most are **NOT** LoF-constrained (biallelic loss is rare in the population), so a tolerant pLI / high LOEUF does **not** argue against pathogenicity. **Do not down-weight recessive (compound-het / homozygous) candidates using pLoF constraint.** Missense metrics (MPC, missense Z) retain some value; rely otherwise on ClinGen recessive curation and variant-level evidence (see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)).
 - **Pediatric cancer genes:** defer to curated lists (ClinGen HI = 3, COSMIC Cancer Gene Census germline, established predisposition genes — see [pediatric_cancer.md](pediatric_cancer.md)) over generic constraint, since several are recessive or tumor-suppressor genes with variable constraint.
 

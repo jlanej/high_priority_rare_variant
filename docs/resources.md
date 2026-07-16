@@ -10,40 +10,93 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 > gap between "image pulled" and "pipeline runs" is preparing this data and pointing the env vars at
 > it — which `prepare_resources.sh --dir DIR emit-env` does for you.
 
+> **STATUS — the VEP-only contract (read this before you download anything).**
+> The pipeline's annotation source is **a VEP 115 GRCh38 cache + the CADD plugin, and nothing
+> else**. Step 2 performs **no external `bcftools annotate` transfers**. **gnomAD, ClinVar, dbNSFP,
+> SpliceAI and LOFTEE data are no longer fetched, bind-mounted or read** — the config keys that
+> pointed at them are gone. The **required** acquisition therefore collapses to: **VEP cache
+> (~24 GB) + CADD SNV+indel (~82 GB)**, plus two small optional tables for Step-6 ranking.
+> Everything else on this page is retained as the **shopping list for building on top** and is
+> clearly marked *not currently used*. What the reduced set costs the screen — and what each
+> re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
+> truth for thresholds is [Canonical defaults](README.md#canonical-defaults). Neither is restated here.
+>
+> `prepare_resources.sh` follows the contract: bare `fetch` prepares only the required set
+> (reference, VEP cache, CADD, constraint) — it will **not** start the ~877 GB gnomAD download —
+> `verify` requires only that set and reports the rest as *not required*, and `emit-env` exports
+> only the `${ENV}` vars the config still has keys for. The retired resources stay reachable
+> behind an explicit `--only gnomad_sites,clinvar,…` so the [roadmap
+> restorations](ROADMAP.md) are one flag away. One upstream fact to know regardless: the
+> **pinned dbNSFP URL is dead** (see below).
+
 ## Why a prepare script, not a bundled image
 
-1. **Size.** VEP cache ≈ 25 GB, gnomAD v4.1 joint sites are hundreds of GB (we slim them to tens),
-   dbNSFP ≈ 30 GB, CADD SNV ≈ 80 GB, SpliceAI ≈ 40 GB. Baking that into a public image makes it
-   un-pullable and violates the golden rule (the VEP cache is *never* baked; resources bind-mount).
-2. **License.** dbNSFP (redistribution-restricted), SpliceAI/Illumina (login-gated, non-commercial),
-   and CADD (not redistributable) legally **cannot** ship inside a public image. ClinVar, gnomAD,
-   the LOFTEE data, and the constraint tables are free to fetch and prepare automatically.
-3. **Freshness / reproducibility.** ClinVar is weekly, gnomAD/dbNSFP are versioned. You pin a
-   version + checksum per resource (recorded in [`resources/manifest.env`](../resources/manifest.env))
-   so a run is reproducible and re-poolable, exactly as the reproducibility hardening prescribes.
+1. **Size.** VEP cache ≈ 24 GB and CADD SNV ≈ 81 GB — even the *reduced* required set is ~107 GB.
+   Baking that into a public image makes it un-pullable and violates the golden rule (the VEP cache
+   is *never* baked; resources bind-mount).
+2. **License.** CADD (not redistributable) legally **cannot** ship inside a public image. The VEP
+   cache, reference FASTA, and the constraint tables are free to fetch and prepare automatically.
+3. **Freshness / reproducibility.** The cache and CADD are versioned. You pin a version + checksum
+   per resource (recorded in [`resources/manifest.env`](../resources/manifest.env)) so a run is
+   reproducible and re-poolable, exactly as the reproducibility hardening prescribes.
+   Note the corollary the contract inherits: **the cache freezes its own gnomAD and ClinVar
+   snapshots** (VEP 115 pins ClinVar 2025-02), so "re-pin ClinVar" now means "move the cache".
 
 So: **image = software; `prepare_resources.sh` = data.** Free resources auto-download, verify
 (sha256), and index; license-gated resources are validated *if you provide them*, with precise
 acquisition instructions printed otherwise. Nothing is installed — only downloaded.
 
-## The resources
+## The resources you actually need
 
 | Resource | Feeds | Config key (`${ENV}`) | Acquisition | ~Size |
 |---|---|---|---|---|
-| GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~3 GB |
-| VEP indexed cache (r115) | VEP core | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~25 GB |
-| VEP plugin **code** (`.pm`) | CADD/dbNSFP/SpliceAI + LOFTEE grch38 | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
-| gnomAD v4.1 **joint** sites | rarity oracle (**faf95**) | `resources.gnomad.sites_vcf` (`GNOMAD_SITES`) | free, large (slimmed) | ~tens GB |
-| ClinVar GRCh38 VCF | clinical evidence | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free | ~0.2 GB |
-| dbNSFP | REVEL/AlphaMissense/MPC/MetaRNN (its CADD_phred is **not** requested — CADD comes from the plugin) | `resources.vep.dbnsfp` (`DBNSFP`) | **license-gated** | ~30 GB |
-| CADD SNV + indel | CADD plugin — **the complete, genome-wide CADD** (dbNSFP CADD dropped) | `CADD_SNV` / `CADD_INDEL` | **license-gated**, huge | ~80 GB |
-| SpliceAI precomputed | splicing (SpliceAI plugin) | `SPLICEAI_SNV` / `SPLICEAI_INDEL` | **license-gated** | ~40 GB |
-| LOFTEE GRCh38 data | pLoF confidence (LoF plugin) | `resources.vep.loftee_data` (`LOFTEE_DATA`) | free | ~several GB |
-| Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
-| Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
+| GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~1 GB (gz) |
+| VEP indexed cache (r115) | **everything**: consequence/IMPACT, gnomAD v4.1 AFs, ClinVar `CLIN_SIG` | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~24 GB |
+| CADD SNV + indel | CADD plugin — the sole functional predictor, genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
+| VEP plugin **code** (`.pm`) | CADD (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
+| Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) — **optional**, skipped if unset | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
+| Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) — **optional**, skipped if unset | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
+
+That is the whole required set. The constraint/mutation-rate tables are genuinely optional:
+`run_pipeline.sh` passes them to Step 6 only when the path is set *and* exists, so Step 6 degrades
+rather than fails without them.
 
 Gene-list / phenotype resources (`ACMG_SF_LIST`, `PANELAPP_*`, `RECESSIVE_CPG_LIST`, `HPO_TERMS`)
 are **reserved** (the overlay is not yet wired) and are not required to run the pipeline.
+
+### What the cache supplies — and the one place it silently under-delivers
+
+The VEP 115 GRCh38 cache carries gnomAD **v4.1** frequencies (since VEP r113) for **both** exomes
+and genomes, plus a ClinVar snapshot, so `--af_gnomade --af_gnomadg --max_af --check_existing` is
+the entire annotation acquisition story. Two properties of that source are load-bearing and are
+**not** fixable by downloading something else:
+
+- **Point AFs only.** The cache has **no `faf95`/`fafmax` field and no AC/AN**, so faf95's CI
+  correction cannot be recomputed downstream at any price. `frequency()` is a *grpmax proxy* —
+  the max AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — not faf95. See
+  [limitations.md §2](limitations.md).
+- **Cache frequencies exist only for alleles accessioned into dbSNP.** An un-accessioned gnomAD
+  variant silently returns *no* frequency and reads as "absent ⇒ rarest". Ensembl itself
+  recommends `--custom` with the gnomAD VCF over `--af_gnomad*` for exactly this reason. The bias
+  is toward **retention** (extra review), not toward missed calls — which is why the first pass
+  accepts it.
+
+**Do not "improve" the rarity field with `MAX_AF` or global `AF`.** Both are present in the CSQ,
+both look better, and both are regressions in *opposite* directions. See
+[limitations.md §2a](limitations.md); it is guarded by tests.
+
+## Skipping acquisition entirely — bring your own VEP VCF
+
+If you **already have a VEP 115 GRCh38 VCF** (e.g. from the group's existing DNM annotate run),
+point `resources.vep.annotated_vcf` (`${VEP_ANNOTATED_VCF}`) at it, or pass `--vep-vcf` to Step 2.
+Step 2 then **skips the VEP call entirely** and ingests your file as `cohort.sites.annotated.vcf.gz`
+— **no cache, no CADD, no downloads at all**. It is not a blind trust: Step 2 **verifies the
+assembly/build** rather than trusting the filename (a GRCh37 or older-release VCF would otherwise
+annotate "successfully") and **asserts that frequencies actually landed**, failing loudly if they
+did not — because with no gnomAD fields anywhere, rarity filtering would silently pass everything.
+
+This is the cheapest path to a first run by a wide margin, and for many sites it is the *only*
+step needed. Your VCF must carry the CSQ fields listed in `src/hprv/annotations.py` (`F`).
 
 **Plugin code vs. plugin data.** VEP plugin *code* (the `.pm` scripts) is **software → baked into the
 image**, not fetched. The `ensemblorg/ensembl-vep:release_115.0` base bundles the `Ensembl/VEP_plugins`
@@ -51,68 +104,61 @@ image**, not fetched. The `ensemblorg/ensembl-vep:release_115.0` base bundles th
 **LOFTEE is a separate repo** — so our Dockerfile additionally bakes in the **`konradjk/loftee` grch38
 branch** (master is GRCh37-only) at `/plugins` and installs its one missing Perl dep (`DBD::SQLite`;
 `Bio::DB::BigFile`/Kent lib is already compiled into the base). `VEP_PLUGINS` therefore defaults to
-`/plugins` via the image and needs no setup. Only the plugin **data** (CADD tsv, dbNSFP tsv, SpliceAI
-VCF, and LOFTEE's `human_ancestor.fa.gz` / GERP bigwig / `loftee.sql`) is host-fetched by this script.
+`/plugins` via the image and needs no setup. Under the current contract **only `CADD.pm` is invoked**;
+the rest of the plugin code sits inert in the image, which is what makes re-enabling any of the
+optional resources below a *config* change rather than an image rebuild.
 
 Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../resources/manifest.env)
-(re-pin there). Verified specifics:
+(re-pin there). Verified specifics for the **required** set:
 
 - **VEP cache** — Ensembl **r115 indexed** cache `homo_sapiens_vep_115_GRCh38.tar.gz` (Ensembl FTP; use
   the plain Ensembl build, **not** refseq/merged). The cache version **must equal** the VEP binary (115).
-  Reference FASTA = Ensembl **primary_assembly** (not toplevel). Open license.
-- **gnomAD v4.1 joint** — `gs://gcp-public-data--gnomad/release/4.1/vcf/joint/…` (also S3 / HTTPS).
-  Raw is **~877 GB across 24 files**; the script downloads each chromosome, keeps **only** the 4 INFO
-  tags below, deletes the raw, and concatenates → tens of GB persistent. The v4.1 joint tag spellings
-  are **confirmed to match the config defaults exactly**: `AF_joint`, `AF_grpmax_joint`,
-  `fafmax_faf95_max_joint`, `nhomalt_joint`. Public domain.
-- **ClinVar** — dated monthly GRCh38 VCF from NCBI (pin the date in `manifest.env`). Public domain.
-- **dbNSFP `4.9a`** — the **academic** build (S3, direct URL, `--accept-license`). Pin **4.9a**, not
-  v5.x (the VEP-115 plugin can't parse v5 filenames) and the **`a`** build, not `c` (which omits
-  REVEL/CADD/AlphaMissense). Columns confirmed present: `REVEL_score, AlphaMissense_score,
-  AlphaMissense_pred, MPC_score, MetaRNN_score, CADD_phred`. Heavy prep (a genome-wide sort — point
-  scratch at real disk with tens of GB free). Non-commercial + citation.
+  Reference FASTA = Ensembl **primary_assembly** (not toplevel). Open license. Note the cache
+  precomputes **only SIFT and PolyPhen-2** as predictors — no REVEL/AlphaMissense/CADD/SpliceAI/MPC —
+  which is why CADD is a separate download and why the others are absent from the screen.
 - **CADD v1.7 — the complete CADD source.** `whole_genome_SNVs.tsv.gz` scores every possible SNV
-  genome-wide (coding **and** non-coding) plus the precomputed indel set — strictly more complete than
-  dbNSFP's coding-only `CADD_phred`, which is therefore **dropped** from the dbNSFP column list. Step 2
-  sources CADD only from the plugin (`vep_CADD_PHRED`). Fetched by default (with `--accept-license`);
-  point `CADD_SNV`/`CADD_INDEL` at your existing files to reuse them. Free-academic, non-redistributable.
-- **SpliceAI** — the full genome-wide set is Illumina **BaseSpace (login-gated)**; the script instead
-  auto-fetches the **no-login Ensembl MANE mirror** for SNVs (`--accept-license`), and instructs you to
-  supply the indel file from BaseSpace. The MANE mirror covers MANE-select transcripts only. Non-commercial.
-- **LOFTEE** — GRCh38 data from the Broad host (`human_ancestor.fa.gz` + `.fai`/`.gzi`, `loftee.sql.gz`
-  → gunzip, 12 GB GERP bigwig). Use the plugin **`grch38` branch** (master is GRCh37-only). Free.
+  genome-wide (coding **and** non-coding) plus the precomputed indel set. Step 2 sources CADD only
+  from the plugin (`vep_CADD_PHRED`). Fetched with `--accept-license`; point `CADD_SNV`/`CADD_INDEL`
+  at your existing files to reuse them (**the group's existing DNM VEP call already runs this exact
+  plugin**, so those files can very likely be reused as-is). Free-academic, non-redistributable.
+  Read [limitations.md §4](limitations.md) before trusting `cadd_phred_supporting: 25.3`: because
+  every missense is MODERATE and kept a rung earlier, that missense-calibrated cutoff is in practice
+  applied *exclusively* to non-coding variants it was never calibrated for. It is a discovery rank,
+  not ACMG PP3 evidence.
 - **Constraint** — gnomAD v2.1.1 `lof_metrics.by_gene` (LOEUF `oe_lof_upper` + pLI) + Zeng-2024 s_het
   (Zenodo) + Collins-2022 pHaplo (Zenodo), left-joined by `scripts/join_constraint.py` into one
   per-gene TSV. All free (CC-BY/CC0). gnomAD v4 has no equivalent by-gene LOEUF flatfile — v2.1.1 is canonical.
 
-> **Disk budget.** Plan for roughly: VEP cache ~25 GB + FASTA ~1 GB + gnomAD slimmed ~tens of GB
-> (transient ~900 GB streamed if you don't `--only` a subset) + ClinVar ~0.2 GB + dbNSFP ~30 GB
-> (+ ~50 GB transient sort) + LOFTEE ~13 GB + constraint <10 MB. Point `TMPDIR`/`APPTAINER_TMPDIR`
-> at real disk with headroom.
+> **Disk budget.** The required set is roughly: VEP cache ~24 GB (+ ~24 GB transient for the
+> tarball) + FASTA ~1 GB + CADD ~82 GB + constraint <10 MB ≈ **110 GB**. Point
+> `TMPDIR`/`APPTAINER_TMPDIR` at real disk with headroom. If you bring your own VEP VCF (above),
+> the budget is **zero**.
 
-## Can the VEP cache replace any of these? (No — a documented trap)
+## Can the VEP cache replace these? (Deliberately, yes — with a documented price)
 
-A `--everything` VEP run emits gnomAD **AF** (`gnomADe_AF`/`gnomADg_AF`/`MAX_AF`), a coarse
-cache-frozen `CLIN_SIG`, and `SIFT`/`PolyPhen` straight from the cache — so it is tempting to skip
-the downloads below. **Do not.** None of them replace a load-bearing resource for this pipeline:
+An earlier version of this page argued "no, never skip the downloads." **The pipeline now does
+exactly that, on purpose.** The trade was ~1.4 TB of acquisition — each piece with its own version
+pin, license gate, index and contig-naming hazard — against a simple, sound, reproducible spine:
+one annotation source, one frequency chokepoint, one two-rung functional ladder. The first pass
+takes the spine. The price, per resource, is honest and bounded:
 
-- **gnomAD** — the cache gives point **AF** (exome & genome *separately*), not **`faf95`** (the sole
-  rarity oracle, golden rule #2), not the **v4.1 *joint*** combine, and not **`nhomalt`** (needed for
-  the recessive / de-novo `nhomalt ≤ 1` checks). `frequency()` intentionally has **no AF fallback**;
-  wiring cache AF in would silently re-break the faf95 contract. → keep the sites VCF.
-- **ClinVar** — the cache's `CLIN_SIG` has **no `CLNREVSTAT`** (star rating → the ≥2★ auto-promote
-  gate can't run), no `CLNSIGCONF`, and is frozen at the cache's ClinVar version. → keep the dated VCF.
-- **dbNSFP / SpliceAI** — the cache only carries the legacy `SIFT`/`PolyPhen`, not
-  **REVEL / AlphaMissense / MPC / MetaRNN** or **SpliceAI** (the Step-3 functional/splice gate). → keep both.
-- **LOFTEE** — VEP's own `IMPACT` is not LOFTEE's **`LoF`/`LoF_flags`** HC/LC confidence. → keep it.
-- **CADD** — the one overlap. We keep the **dedicated plugin** (genome-wide `CADD_PHRED`, the most
-  complete) and **drop dbNSFP's coding-only `CADD_phred`** so there is a single authoritative CADD
-  field. dbNSFP is still required for REVEL/AlphaMissense/MPC. (Your existing DNM VEP call already runs
-  this exact CADD plugin, so those files can be reused.)
+| Dropped | What the cache gives instead | The real price |
+|---|---|---|
+| gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | no **faf95** (unrecoverable — no AC/AN), no **nhomalt**. Rarity is a point estimate, erring toward *dropping* |
+| ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | no **CLNREVSTAT** ⇒ no star gate; stale. Over-*retains* |
+| SpliceAI | VEP positional splice terms only | **the biggest loss**: deep-intronic + synonymous splice variants are invisible |
+| LOFTEE | VEP `IMPACT` | near-zero for *selection*; costs PVS1 tiering |
+| dbNSFP (REVEL/AM/MPC/MetaRNN) | SIFT/PolyPhen (unused) | **zero selection power** — see below |
 
-Where the cache *does* help: `gnomADe_AF`/`MAX_AF` are a good **cheap pre-filter + QC cross-check**
-against faf95, and since AF is free from the cache, the gnomAD slim strictly only needs
-`fafmax_faf95_max_joint` + `nhomalt_joint` (we also keep `AF_joint`/`AF_grpmax_joint` for reporting).
+**The dbNSFP row is the one that surprises people, so it is worth stating plainly:** REVEL,
+AlphaMissense, MPC and MetaRNN are **missense-only** scores; every missense is `IMPACT=MODERATE`;
+`selection.py` keeps MODERATE at the impact rung and **returns before any predictor is consulted**.
+Those branches were therefore **unreachable even back when the code contained them and dbNSFP was
+configured**. Removing a 30 GB download cost the screen **exactly zero** discrimination — CI now
+asserts those keep-reasons never fire. The genuine loss is *reporting/tiering*, not detection.
+
+Full ledger, with the cost-to-fix for each: **[limitations.md](limitations.md)**. Do not read the
+table above as a to-do list — read §2a there first.
 
 ## Usage
 
@@ -120,33 +166,85 @@ Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host i
 The script ships in the image at `/opt/hprv/scripts/` and is on `PATH`, so call it by name — you do
 not need a checkout of this repo on the host:
 
+> **Always pass `--only`.** The script predates the VEP-only contract and has not been trimmed: a
+> bare `fetch` still runs `prep_gnomad`, `prep_clinvar`, `prep_loftee`, `prep_dbnsfp` and
+> `prep_spliceai` — i.e. it will happily begin streaming **~877 GB of gnomAD** the pipeline will
+> never open. The `--only` list below is the contract's required set.
+
 ```bash
-# 1. fetch + prepare everything free; validate any gated files you've placed under --dir
+# 1. fetch + prepare ONLY what the VEP-only contract reads
 apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources fetch
+    prepare_resources.sh --dir /data/hprv_resources fetch \
+    --only reference,vep_cache,cadd,constraint --accept-license
 
-# 2. check every expected file is present + indexed (gnomAD INFO tags verified against config)
-apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources verify
-
-# 3. emit the export lines your config's ${ENV} placeholders expect
+# 2. emit the export lines your config's ${ENV} placeholders expect
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 source /data/hprv_resources/resources.env      # then run_pipeline.sh --config ...
 ```
 
-The pinned manifest ships alongside it at `/opt/hprv/resources/manifest.env`. To re-pin a version
-(say, a newer ClinVar) without rebuilding the image, bind-mount an edited copy and point
-`HPRV_RESOURCE_MANIFEST` at it.
+Valid `--only` ids: `reference`, `vep_cache`, `gnomad_sites`, `clinvar`, `loftee`, `constraint`,
+`dbnsfp`, `spliceai`, `cadd`.
+
+The pinned manifest ships alongside the script at `/opt/hprv/resources/manifest.env`. To re-pin a
+version without rebuilding the image, bind-mount an edited copy and point `HPRV_RESOURCE_MANIFEST`
+at it.
 
 `fetch` is idempotent (skips a target that already exists and matches its checksum) and resumable.
-Use `--only gnomad_sites,clinvar` to prepare a subset, and `--accept-license` to acknowledge the
-non-commercial terms of the gated resources you supply.
+`--accept-license` acknowledges the non-commercial terms of the gated resources (CADD, here).
+
+### What each mode covers
+
+- **`fetch`** (default) prepares `reference`, `vep_cache`, `cadd`, `constraint` — the required set,
+  nothing more. Pass `--only gnomad_sites,clinvar,loftee,dbnsfp,spliceai` (any subset) to also
+  prepare a retired resource for a [roadmap restoration](ROADMAP.md); they are never fetched by
+  default, because an ~877 GB gnomAD download for data no step reads is not a sane default.
+- **`verify`** requires exactly the set `fetch` prepares, and reports the retired resources as
+  *not required* rather than failing on them. `run_pipeline.sh` additionally preflights what it
+  actually needs before doing work.
+- **`emit-env`** exports only the `${ENV}` placeholders `config/config.example.yaml` still has
+  keys for. It also prints a commented `VEP_ANNOTATED_VCF` line — uncomment it to skip the VEP
+  call entirely (see above).
 
 ## License-gated resources — what you must provide
 
-dbNSFP, CADD, and SpliceAI are free for academic/non-commercial use but **cannot be redistributed**,
-so the script will not download them for you. Obtain them through your institution and drop them
-under `--dir` (the script prints the exact expected filenames); `fetch`/`verify` then validate and
-index them. See the per-resource instructions the script prints, and the pinned sources in
-`resources/manifest.env`.
+**CADD** is free for academic/non-commercial use but **cannot be redistributed**; the script fetches
+it from the UW host under `--accept-license`, or you can point `CADD_SNV`/`CADD_INDEL` at copies your
+institution already has and skip it (`--only reference,vep_cache,constraint`).
+
+**dbNSFP's pinned URL is dead** — `https://dbnsfp.s3.amazonaws.com/dbNSFP4.9a.zip` returns
+`NoSuchBucket`; distribution moved to registration-gated downloads. The manifest entry and
+`prep_dbnsfp` are both retained but **cannot succeed**. This is moot under the current contract
+(dbNSFP is not used, and per the section above it never contributed selection power), and if you
+ever do want those scores, the replacement is the **dedicated files, not dbNSFP** — see below.
+
+## Optional resources — NOT currently fetched or used
+
+**None of the following is downloaded, bind-mounted or read by the pipeline today.** This is the
+shopping list for building on top: each is re-enabled by **one `bcftools annotate` transfer in
+`02_annotate_sites.sh` plus its INFO field in `annotations.F`** — the contract is a single seam, and
+the plugin code is already in the image. Ordered by value-per-GB. Sizes and rationale come from
+[limitations.md](limitations.md); the diagnostic cost of each absence lives there, not here.
+
+| Resource | ~Size | Why you'd add it | Acquisition trap |
+|---|---|---|---|
+| **ClinVar** GRCh38 VCF | ~0.18 GB | restores `CLNREVSTAT` ⇒ the ≥2★ gate, `CLNSIGCONF`, and un-stales ClinVar (monthly vs. the cache's 2025-02) | none — free, public domain, dated monthly release from NCBI |
+| **SpliceAI** slim | ~0.6 GB | **the highest-value addition**: recovers deep-intronic + synonymous splice variants | filter the free Ensembl MANE mirror to Δ ≥ 0.1 (~99% of the 27 GB table is dead weight). Mirror is **SNV-only** (indels are BaseSpace/login-gated) and uses Ensembl contigs (`1`, `X`) vs. GMKF's `chr` — **a mismatched `tabix` query returns empty with exit code 0**, so assert a non-zero record count |
+| **REVEL + AlphaMissense** (dedicated) | ~1.3 GB | missense scores for *reporting/tiering* and a future PP3/BP4 step — **not** selection power | use `AlphaMissense_hg38.tsv.gz` (643 MB) + `revel-v1.3_all_chromosomes.zip` (667 MB), **never** the 30 GB dbNSFP (dead URL, 5 useful columns). Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`/`am_class`, **not** `AlphaMissense_score` |
+| **gnomAD v4.1 joint** slim | ~10 GB | restores real **faf95** + **nhomalt** (the homozygote sanity check) | stream-slim the 24 chromosome VCFs to ~5 of their 664 INFO fields; nothing but the slim output lands on disk and GCS egress is free. Confirmed v4.1 joint tags: `AF_joint`, `AF_grpmax_joint`, `fafmax_faf95_max_joint`, `nhomalt_joint` |
+| **LOFTEE** GRCh38 data | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | mostly the GERP bigwig. Use the plugin's **`grch38` branch** (already baked in; master is GRCh37-only) |
+
+### SpliceAI: raw vs. masked — a correction
+
+Earlier versions of this doc — and of the note in `resources/manifest.env`, now corrected — claimed
+the Step-3 cutoff of 0.2 was calibrated on **masked** SpliceAI scores, and that the free raw mirror
+was therefore permissive. **That was backwards.** Walker-2023 calibrated on
+**raw** scores — the paper states it used the maximum raw SpliceAI delta score, and the word
+"masked" does not appear in it at all. Since masked ≤ raw always, applying a raw-calibrated 0.2 to
+*masked* scores is **more stringent**, i.e. a sensitivity loss, not a permissive one. The free
+Ensembl mirror being raw is therefore **correct for this threshold**, not a compromise. (A free
+masked MANE mirror does also exist on the Ensembl FTP if you want one.)
+
+The real caveat is the **window**, which the old note omitted: Walker used ±4,999 nt, whereas
+SpliceAI's precomputed files default to `-D 50`. Distant cryptic-site effects are outside the
+precomputed set regardless of which build you pick.
