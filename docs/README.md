@@ -16,6 +16,7 @@ the single source of truth; if a document ever disagrees with it, the table wins
 
 | Document | Covers |
 |----------|--------|
+| **[limitations.md](limitations.md)** | **What the first pass cannot see, why, and the cost to fix each. Read before interpreting a negative result.** |
 | [pipeline_design.md](pipeline_design.md) | Vetted end-to-end flow; critique of the original 5-step proposal; data artifacts; scope limits |
 | [ROADMAP.md](ROADMAP.md) | Prioritized high-priority gaps vs state of the art (from a SOTA review); dependency-ordered |
 | [cohort_construction.md](cohort_construction.md) | Why a naive `merge` of non-joint trios corrupts AC/AN; the site-only union recipe |
@@ -133,8 +134,9 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 ### Inheritance models (Step 5) & genotype QC (GATK-refined trios)
 - Trust **refined `PP`-derived GQ**. GQ ≥ 20; DP ≥ 10; het AB 0.25–0.75; hom-alt AB ≥ 0.90;
   hom-ref AB ≤ 0.10 (AB from AD); FILTER = PASS only.
-- **Dominant** (inherited): rare (`faf95 < 1e-4`), functional **het** transmitted from ≥ 1 parent
-  (origin recorded) — the recurrence signal Step 6 consolidates.
+- **Dominant** (inherited): rare (grpmax **proxy** AF `< 1e-4` — the field defined under
+  [Frequency oracle](#frequency-oracle--implemented), **not** `faf95`), functional **het**
+  transmitted from ≥ 1 parent (origin recorded) — the recurrence signal Step 6 consolidates.
 - **Recessive**: homozygous, or **compound het** = two rare hets, same gene, in **trans**
   (parent-of-origin; WhatsHap fallback).
 - **X-linked recessive**: male hemizygous + carrier mother; sex-aware ploidy, drop male non-PAR
@@ -167,15 +169,19 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 - **Calibrated recurrence null (primary signal):** observed carriers (≥ **min_carriers** — a lone
   carrier is not recurrence) are tested against `Binomial(N_trios, p)` with a **model-appropriate**
   per-individual carriage probability over the gene's qualifying variants (absent → floor
-  `absent_faf95_floor`, default 1e-6): **dominant het** `p = 1 − Π_v (1 − faf95_v)²` (the primary,
-  FDR-corrected headline); **biallelic** `p = (Σ_v faf95_v)²`; **X-linked male** `p = 1 − Π_v
-  (1 − faf95_v)` (hemizygous). A recessive/hemizygous carrier is **not** a ≥1-of-two-alleles event,
+  `burden.absent_af_floor`, default 1e-6). `q_v` is the per-variant **grpmax proxy** AF (Step 5's
+  `grpmax_af` column), **not** `faf95`: **dominant het** `p = 1 − Π_v (1 − q_v)²` (the primary,
+  FDR-corrected headline); **biallelic** `p = (Σ_v q_v)²`; **X-linked male** `p = 1 − Π_v
+  (1 − q_v)` (hemizygous). A recessive/hemizygous carrier is **not** a ≥1-of-two-alleles event,
   so it is never charged the dominant probability. → per-gene `p_recurrence` (+ `p_recurrence_biallelic`,
   `p_recurrence_xlinked`), BH `q`, and an exome-wide flag (`p < burden.exome_wide_p`, default 2.5e-6).
   `N_trios` is the **screened** population (passed explicitly; never inferred from the trios that
   happened to have a call). This makes 2 carriers of a *private* variant genome-wide significant
-  while 2 carriers of a common-ish one are not. *(Case-only approximation from in-cohort variants; a
-  gnomAD-derived per-gene cumulative-AF test — TRAPD/CoCoRV — is the upgrade.)*
+  while 2 carriers of a common-ish one are not. The proxy reads slightly **high** vs `faf95`, which
+  inflates `p` — so these p-values are **conservative**, the safe direction for a discovery claim
+  (the same substitution is *un*favourable at the rarity gate; see
+  [gene_burden.md](gene_burden.md#multiple-testing-correction)). *(Case-only approximation from in-cohort
+  variants; a gnomAD-derived per-gene cumulative-AF test — TRAPD/CoCoRV — is the upgrade.)*
 - A gene is **recurrent** at ≥ **min_carriers** (default **2**) distinct individuals; rank
   recurrent-first, **then by `p_recurrence`**, then **weighted by constraint** (LOEUF / pLI /
   s_het / pHaplo — a recurrent het in a haploinsufficient gene is the most compelling).

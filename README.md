@@ -20,6 +20,15 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 > runtime via `${ENV}` placeholders in the config. The `.gitignore` enforces this — keep it
 > that way.
 
+> 📋 **VEP-only contract — know what the screen cannot see *before* you run it.** Every
+> annotation comes from **one** source: a **VEP 115 GRCh38 cache + the CADD plugin**. No gnomAD,
+> ClinVar, dbNSFP, SpliceAI or LOFTEE file is downloaded or bind-mounted. That buys a simple,
+> sound, reproducible first pass and costs real coverage: **no `faf95`** (rarity is a grpmax
+> point-estimate proxy), **no SpliceAI** (deep-intronic and exonic-synonymous splice variants are
+> invisible), **no LOFTEE**, **no ClinVar star ratings**. Every gap is *additive* to fix — one
+> `bcftools annotate` transfer each. The full ledger, with the cost to close each item, is
+> **[docs/limitations.md](docs/limitations.md)**. Read it before you interpret a negative result.
+
 ## What it does
 
 A resolve preflight + nine-step flow (Steps 0–8; see **[docs/pipeline_design.md](docs/pipeline_design.md)**
@@ -30,7 +39,7 @@ for the vetted design and the artifact each step produces):
 | resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
 | 0 | Per-trio QC gate (Mendelian error + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
-| 2 | Annotate the union **once** (VEP + LOFTEE + dbNSFP + SpliceAI + gnomAD faf95 + ClinVar) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
+| 2 | Annotate the union **once** (VEP 115 cache + CADD plugin; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
 | 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
@@ -60,26 +69,42 @@ internal cohort AC/AN would be fiction. The trios' stale embedded annotations (o
 are stripped here and re-computed fresh.
 
 **2. Annotate once.** The cohort site list is annotated a single time (VEP is *never* run per
-trio): VEP consequence/IMPACT + LOFTEE (HC/LC pLoF), dbNSFP predictors (REVEL, AlphaMissense,
-MPC), SpliceAI, CADD, plus external **gnomAD v4.1** frequency and dated **ClinVar** transferred
-by `bcftools annotate`.
+trio), from a **single source**: VEP 115 (consequence/IMPACT/SYMBOL/HGVS/MANE) + the **CADD**
+plugin, with gnomAD v4.1 per-population AFs (`--af_gnomade`/`--af_gnomadg`) and ClinVar
+`CLIN_SIG` (`--check_existing`) coming out of the cache itself. The CSQ fields are lifted to
+INFO with a `vep_` prefix (`bcftools +split-vep`); **nothing is transferred in from an external
+sites VCF**. Already have a VEP 115 VCF? Point `resources.vep.annotated_vcf` at it and Step 2
+skips the VEP call entirely.
 
-**3. Frequency oracle.** Rarity is judged on **gnomAD v4.1 group-max `faf95`** (the filtering
-allele frequency — a CI lower bound), not internal counts. Benign-common variants
-(`faf95 ≥ 0.05`, ClinGen BA1) are dropped and never rescued.
+**3. Frequency oracle.** Rarity is judged on **gnomAD v4.1**, never on internal counts — as the
+max AF over the **grpmax-eligible** ancestry groups (AFR/AMR/EAS/NFE/SAS), mirroring gnomAD's own
+grpmax inclusion set. This is a **point estimate standing in for `faf95`, not `faf95` itself**:
+the CI lower bound needs AC/AN, which the VEP cache does not carry, so it is unrecoverable rather
+than approximated — the proxy therefore errs slightly toward *dropping* low-count alleles
+([why, and the cost](docs/limitations.md#2-no-faf95--the-rarity-gate-is-a-point-estimate)).
+VEP's `MAX_AF` and the global AFs are **reporting only, never filter fields** — they fail in
+opposite directions and neither is a safe substitute. Benign-common variants (`≥ 0.05`, ClinGen
+BA1) are dropped and never rescued.
 
 **4. Plausible-variant selection.** An inheritance-agnostic filter keeps a site if it is rare
-(permissive-union cutoff) **and** functionally credible — HIGH/MODERATE VEP impact, LOFTEE-HC
-pLoF, calibrated missense (REVEL / AlphaMissense / MPC), CADD, or SpliceAI — with **ClinVar P/LP**
-(**≥ 2★**, no conflicts) kept as an override. Each kept site is tagged with *why*
+(permissive-union cutoff) **and** functionally credible. The functional ladder is deliberately
+**two rungs**: HIGH/MODERATE VEP impact, else **CADD ≥ 25.3**. **ClinVar P/LP** (no conflicts) is
+an override, and also rescues a variant from the rarity gate. Each kept site is tagged with *why*
 (`hprv_keep_reason`). Gene lists and constraint are **not** applied here (never-drop rule), so
 novel genes survive.
+
+Two caveats a reader must hold onto. **CADD is the entire non-coding screen** — every missense is
+IMPACT=MODERATE and is kept a rung earlier, so 25.3 (Pejaver-2022's PP3-supporting cutoff,
+calibrated on *missense only*) is applied exclusively to non-coding variants it was never
+calibrated for. Treat it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3
+evidence. And the P/LP override is **unstarred** — the cache has no `CLNREVSTAT`, so the ≥2★ gate
+is unimplementable; this over-retains (more to curate) rather than over-drops.
 
 **5. Per-trio inheritance screen (inherited focus).** Real per-trio genotypes are recovered at
 the plausible sites and classified with refined-`GQ` genotype QC (GQ ≥ 20, DP ≥ 10, allele
 balance bands from `AD`):
-- **Dominant** — a rare (`faf95 < 1e-4`), functional **heterozygous** variant transmitted from
-  ≥ 1 parent (origin recorded). This is the signal Step 6 consolidates.
+- **Dominant** — a rare (`dominant_max`, default AF < 1e-4), functional **heterozygous** variant
+  transmitted from ≥ 1 parent (origin recorded). This is the signal Step 6 consolidates.
 - **Recessive** — homozygous, or **compound het in trans** (parent-of-origin: maternal + paternal).
 - **X-linked recessive** — male hemizygous with a carrier mother (sex-aware ploidy; kid sex
   inferred from chrX heterozygosity when the PED is unknown).
@@ -107,9 +132,10 @@ variant-review server.
 - **Focus on inherited variation; dominant recurrence is a first-class signal.** Heterozygous
   variants become interesting when they *stack up across individuals* in the same gene. De novo
   and mtDNA are handled by separate dedicated pipelines.
-- **gnomAD v4.1 `faf95` is the only population-frequency oracle.** Because the trios are not
-  jointly genotyped, internal cohort AC/AN is meaningless (absent ≠ hom-ref) and is used only
-  as an artifact/blocklist signal.
+- **gnomAD v4.1 is the only population-frequency oracle** (currently a grpmax point-estimate
+  proxy from the VEP cache; `faf95` is the target — see [limitations](docs/limitations.md#2-no-faf95--the-rarity-gate-is-a-point-estimate)).
+  Because the trios are not jointly genotyped, internal cohort AC/AN is meaningless
+  (absent ≠ hom-ref) and is used only as an artifact/blocklist signal.
 - **Gene lists and constraint are priors/tiers, never hard filters** ("never-drop rule") — so
   novel-gene discovery survives.
 - **One container, config-driven, no hard paths.** The same image runs on a laptop (Docker) and
@@ -123,22 +149,28 @@ variant-review server.
 apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:latest
 
 # 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
-#    Free resources auto-download + verify + index; license-gated ones (dbNSFP/SpliceAI/CADD)
-#    are validated if you provide them. prepare_resources.sh + its pinned manifest ship IN the
-#    image (on PATH) — no checkout needed on the host. See docs/resources.md.
+#    Under the VEP-only contract the pipeline needs FOUR things: a reference FASTA, a VEP 115
+#    GRCh38 cache, the CADD plugin data (license-gated, ~82 GB), and the per-gene constraint
+#    table (Step 6 ranking only). Nothing else is used — do not fetch the rest.
+#    prepare_resources.sh + its pinned manifest ship IN the image (on PATH). See docs/resources.md.
 apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
-apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources verify
+    prepare_resources.sh --dir /data/hprv_resources --accept-license \
+    --only reference,vep_cache,cadd,constraint fetch
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 
+#    Already have a VEP 115 GRCh38 VCF of your sites? Set resources.vep.annotated_vcf and Step 2
+#    skips the VEP call entirely — no cache fetch needed.
+#    NB: prepare_resources.sh still knows the pre-contract resource set; `fetch` without --only
+#    downloads ~1.4 TB the pipeline never reads, and `verify` still checks (and fails on) the
+#    retired gnomAD/ClinVar/LOFTEE files. Use --only; skip `verify` for now.
+
 # 3. Configure. Copy the example; point the ${ENV} placeholders at your prepared resources.
 cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
-source /data/hprv_resources/resources.env            # exports VEP_CACHE / GNOMAD_SITES / CLINVAR_VCF / ...
+source /data/hprv_resources/resources.env            # exports REF_FASTA / VEP_CACHE / CADD_SNV / ...
 export HPRV_WORK=/path/to/work
-#    (gnomAD v4.1 joint tag names already match the config defaults; verify with
-#     `bcftools view -h $GNOMAD_SITES | grep INFO` if you slimmed a different file)
+#    (emit-env also exports GNOMAD_SITES / CLINVAR_VCF / DBNSFP / SPLICEAI_* / LOFTEE_DATA —
+#     leftovers from the pre-contract resource set; no step reads them.)
 
 # 4. Provide inputs (git-ignored):
 #    - a trios file: TSV with a header naming kid/dad/mom (any order); IDs match the VCFs:
@@ -190,12 +222,26 @@ src/hprv/        shared python: config, annotations, genotype QC, ped, selection
 **Handled by separate dedicated pipelines (out of scope here):** **de novo** variant filtering
 and review (detected here only as a lightweight cross-reference), and **mtDNA heteroplasmy**.
 
-**Known limitations of this pipeline:** SNV/indel only — **CNV/SV are a real blind spot**
-(10–15% of pediatric-cancer/rare-disease diagnoses); pseudogene/seg-dup regions (*PMS2*,
-*CYP21A2*, *SMN1*) are low-confidence from short reads; the phenotype (Exomiser/HPO) prior is
-planned. The pipeline is exercised end-to-end by an **integration test** on generated mock data
-(`tests/integration/`, real bcftools) but is **not yet validated on real data** — GIAB/CMRG truth
-sets and a positive-control panel are the next step. See
+**Known limitations of this pipeline:** the full ledger — what the screen cannot see, why, and
+what each item costs to fix — is **[docs/limitations.md](docs/limitations.md)**. It is the anchor;
+the headlines are:
+
+- **From the VEP-only contract:** no SpliceAI (deep-intronic / exonic-synonymous splice variants
+  are invisible — the largest loss); no `faf95` (rarity is a point-estimate proxy); no `nhomalt`;
+  no LOFTEE; no ClinVar star ratings. Each is one `bcftools annotate` transfer away.
+- **Structural, independent of the contract:** SNV/indel only — **CNV/SV are a real blind spot**
+  (10–15% of pediatric-cancer/rare-disease diagnoses); pseudogene/seg-dup regions (*PMS2*,
+  *CYP21A2*, *SMN1*) are low-confidence from short reads; the phenotype (Exomiser/HPO) prior is
+  planned.
+- **Not yet validated on real data.** The pipeline is exercised end-to-end by an **integration
+  test** on generated mock data (`tests/integration/`, real bcftools), but sensitivity/precision
+  are **unmeasured**, not measured-and-acceptable — GIAB/CMRG truth sets and a positive-control
+  panel are the next step.
+
+**Reading a negative result:** "no candidate" means no *coding* (or CADD-high non-coding) variant
+passing a *point-estimate* rarity gate in a *SNV/indel* callset, without phenotype weighting,
+splice prediction, CNV calling, or star-gated clinical evidence. That is a useful screen; it is
+not an exclusion. See also
 [pipeline_design.md](docs/pipeline_design.md#known-scope-limitations-stated-honestly-not-hidden).
 
 ## License

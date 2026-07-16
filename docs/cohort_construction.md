@@ -11,7 +11,7 @@ How to combine independently-called GMKF Kids First per-trio VCFs into a defensi
 - **Absent record ≠ hom-ref.** "No record for this sample at this site" conflates true hom-ref with a genuine no-call (uncovered / unassessed). The GVCF reference-block info that would disambiguate is already gone.
 - Therefore an internal cohort **AC/AN is uninterpretable and is never a population frequency.** Do **not** `bcftools merge` these files into a genotype matrix, and never use `--missing-to-ref`.
 - Build a **site-only union** instead: normalize each trio, drop genotypes, then union with dedup. This is legitimate for "which loci appear anywhere" and a coarse trio-**recurrence** count — nothing more.
-- The frequency oracle is **external gnomAD v4.1** joint **grpmax `faf95`** (see [allele_frequency.md](allele_frequency.md)). Internal recurrence is valid **only** as an artifact/blocklist signal.
+- The frequency oracle is **external gnomAD v4.1**, read through the **VEP cache** as a **grpmax point-estimate proxy** — **not** `faf95`, which the cache cannot supply (no AC/AN) and which remains the TARGET (see [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md)). The argument below is unaffected: the point is that the denominator is *external*, never internal. Internal recurrence is valid **only** as an artifact/blocklist signal.
 - Normalize **before** any union: `norm -m-` (split multiallelics), left-align/`-c` against the **exact GRCh38 build** the trios were called on, then `view -G` to drop genotypes.
 - If a real genotype matrix is ever required, re-run true **joint genotyping from the per-trio gVCFs** (GLnexus or GATK `GenomicsDBImport`→`GenotypeGVCFs`) — you cannot recover it from variant-only VCFs.
 - Pin **bcftools/htslib 1.22** (project default, overridable; see [tooling_and_reproducibility.md](tooling_and_reproducibility.md)).
@@ -114,7 +114,7 @@ glnexus_cli --config gatk ${TRIO_GVCF_GLOB} > cohort.joint.bcf
 
 Internal cohort recurrence has exactly one valid use: a **batch/artifact filter**. A site seen in an implausibly large fraction of your trios — given that gnomAD says it is rare — flags a recurrent sequencing/mapping/annotation artifact or a batch effect; remove or down-weight it. It must **never** substitute for gnomAD as the population-rarity denominator, precisely because the non-joint merge makes AN uninterpretable.
 
-The population-rarity decision lives entirely with the external oracle: **gnomAD v4.1** (GRCh38-native; 730,947 exomes + 76,215 genomes), joint (exome+genome) frequencies, filtering on **grpmax `faf95`** (the 95%-CI-based filtering allele frequency, not the point-estimate popmax AF), and heeding the v4.1 **exome/genome discordance flag**. gnomAD v4.1 (April 2024) fixed the v4.0 allele-number bug and added the harmonized joint AF/AN/FAF. Full frequency logic, gene-specific ClinGen VCEP BA1/BS1 overrides, and the FAF rationale are in [allele_frequency.md](allele_frequency.md); ClinGen issued guidance on using gnomAD v4 for BA1/BS1 evidence in March 2024.
+The population-rarity decision lives entirely with the external oracle: **gnomAD v4.1** (GRCh38-native; 730,947 exomes + 76,215 genomes). **As implemented**, those frequencies are read from the **VEP cache** and reduced to a **grpmax proxy** — the max *point-estimate* AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS). Filtering on the 95%-CI-based **grpmax `faf95`** (and heeding the v4.1 **exome/genome discordance flag**) is the **TARGET**: both need the gnomAD sites VCF, since the cache carries no AC/AN and no FAF ([limitations.md §2](limitations.md)). gnomAD v4.1 (April 2024) fixed the v4.0 allele-number bug and added the harmonized joint AF/AN/FAF. Full frequency logic, gene-specific ClinGen VCEP BA1/BS1 overrides, and the FAF rationale are in [allele_frequency.md](allele_frequency.md); ClinGen issued guidance on using gnomAD v4 for BA1/BS1 evidence in March 2024.
 
 ## Known scope limitations (stated honestly)
 
@@ -137,7 +137,7 @@ The population-rarity decision lives entirely with the external oracle: **gnomAD
 | Union + dedup | `concat -a -D` → `sort` → `norm -d exact` | Collapse residual representation duplicates |
 | Per-trio FILTER/INFO | Strip (`annotate -x INFO,FILTER`) | Incomparable across independent calls |
 | Internal recurrence | Self-computed; **artifact/blocklist signal only** | Never a population frequency |
-| Frequency oracle | **External gnomAD v4.1**, joint **grpmax `faf95`** | See [allele_frequency.md](allele_frequency.md) |
+| Frequency oracle | **External gnomAD v4.1** via the VEP cache, **grpmax proxy** (point estimate). `faf95` = TARGET, not implemented | See [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md) |
 | Genotype matrix (if ever needed) | Joint-genotype from **gVCFs** (GLnexus / GATK) | Cannot be recovered from variant-only VCFs |
 | Tool versions | **bcftools/htslib 1.22** (default, overridable) | See [tooling_and_reproducibility.md](tooling_and_reproducibility.md) |
 
