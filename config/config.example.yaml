@@ -23,6 +23,13 @@ runtime:
   image: ${HPRV_IMAGE}            # e.g. ghcr.io/<owner>/high_priority_rare_variant@sha256:...
   engine: auto                    # auto | apptainer | singularity | docker | native
   tmpdir: ${HPRV_TMPDIR}          # MUST be real disk, not tmpfs (avoids --containall OOM)
+  # SIZE THIS TO YOUR ALLOCATION — the default of 4 is a laptop default, not an HPC one.
+  # Step 2 passes it to `vep --fork`, and Step 2 is by far the dominant cost of the whole run,
+  # so on a 32-core node this is the single highest-leverage number in the file.
+  # What it does NOT do: bcftools `--threads` only adds BGZF (de)compression workers. The actual
+  # work in `norm` — reference lookups and left-alignment — is single-threaded whatever you set,
+  # so raising this will not speed up Steps 1/4. Those are per-trio and currently run serially;
+  # see docs/limitations.md if you are running WGS across many trios.
   threads: 4
 
 reference:

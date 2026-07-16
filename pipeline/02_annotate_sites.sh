@@ -239,14 +239,25 @@ index_vcf "$split_vcf"
 # rarity gate then reads None ("rarest") and keeps everything. So assert on the VALUES.
 cur="$split_vcf"
 freq_expr='INFO/vep_gnomADe_AF!="." || INFO/vep_gnomADg_AF!="." || INFO/vep_MAX_AF!="."'
-n_freq="$(hprv_run -- bcftools view -H -i "$freq_expr" "$cur" | wc -l | tr -d '[:space:]')"
+# `query -f '\n'`, not `view -H | wc -l`: we want a COUNT, and view -H reconstructs every matching
+# record — all 25 vep_* INFO fields of it — just to throw it away at wc. query emits one byte per
+# match. Measured on the integration data: 15,521 bytes vs 22 for the identical count of 22; that
+# ratio is what scales, and at WGS it is tens of GB of formatting through a pipe for a number.
+n_freq="$(hprv_run -- bcftools query -i "$freq_expr" -f '\n' "$cur" | wc -l | tr -d '[:space:]')"
 log "Step 2: gnomAD frequency present on $n_freq / $n_sites sites"
 [[ "$n_freq" -gt 0 || "$n_sites" -eq 0 ]] || \
     die "0/$n_sites sites carry ANY gnomAD frequency — the cache lookup is not working. A cohort union \
 always contains some known alleles, so this is a broken cache/build, not a very rare cohort. Rarity \
 filtering would silently pass everything. Check --af_gnomade/--af_gnomadg and the cache version."
 
-cp "$cur" "$OUT"; index_vcf "$OUT"
+# `mv`, not `cp`+re-index: $cur is the split-vep output under HPRV_TMPDIR — the same filesystem as
+# $OUT under run_pipeline.sh — and at WGS scale it is tens of GB that are ALREADY indexed. Copying
+# and re-indexing is two more full passes over the data for nothing. mv degrades to a copy across
+# filesystems, so this is never worse than what it replaces.
+mv "$cur" "$OUT"
+if   [[ -f "$cur.tbi" ]]; then mv "$cur.tbi" "$OUT.tbi"
+elif [[ -f "$cur.csi" ]]; then mv "$cur.csi" "$OUT.csi"
+else index_vcf "$OUT"; fi
 require_intact_bgzip "$OUT"; mark_done "$OUT"
 audit 02_annotate annotated_sites "$(count_variants "$OUT")"
 log "Step 2 complete: $OUT"
