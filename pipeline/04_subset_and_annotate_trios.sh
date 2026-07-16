@@ -120,6 +120,29 @@ for row in "${rows[@]}"; do
     # post-split), and STRIP the source INFO (stale internal AC/AN/AF + GATK site fields must
     # not survive into the authoritative candidate VCF; the plausible-site INFO is transferred
     # below). `norm -c w` warns, never silently rewrites, on a REF mismatch.
+    #
+    # --keep-sum AD is LOAD-BEARING, not a nicety. `norm -m-` subsets the Number=R AD array per
+    # allele and DISCARDS the other ALT's reads. For a non-ref/non-ref (1/2) genotype that leaves
+    # ref_ad ~ 0 on BOTH legs, so genotype.allele_balance() — alt/(ref+alt) — reads ~1.0, fails the
+    # het band, and a REAL trans compound het is dropped with no warning and no audit counter:
+    #   child 1/2 AD=0,19,20 -> legs 1/0:0,19 and 0/1:0,20 -> AB=1.000, 1.000 -> het rejected.
+    # --keep-sum folds the other ALT's reads back into AD[0], which is the CORRECT per-allele
+    # semantic ("reads not supporting THIS alt"): the same legs then read AB 0.487/0.513, the
+    # parents' genotypes stay right, and a biallelic het is byte-identical (verified). It
+    # hard-errors when AD is absent, so gate on the header — and read the header ONCE into a
+    # variable rather than piping into grep, which would SIGPIPE bcftools under `set -o pipefail`.
+    nargs=(-m- -f "$REF" -c w)
+    vcf_hdr="$(bcftools view -h "$vcf")"
+    case "$vcf_hdr" in
+        *'##FORMAT=<ID=AD,'*) nargs+=(--keep-sum AD) ;;
+        *) warn "  [$trio] no FORMAT/AD in the trio VCF — allele-balance QC is unavailable, and a multiallelic (1/2) het cannot have its AB corrected, so such calls may be dropped" ;;
+    esac
+    # Strip the stale source INFO but KEEP GATK's de novo tags: they are FORMAT-less INFO fields
+    # that Step 5 reads (annotations.F hiconf_denovo/loconf_denovo), and the plausible-site file
+    # is site-only so nothing would restore them. A blanket `-x INFO` silently removed both,
+    # which made Step 5's `has_hiconf` permanently False and filters.denovo.use_hiconf_tag a
+    # no-op. `^` inverts: keep exactly these, drop the rest.
+    xargs_info=(-x '^INFO/hiConfDeNovo,INFO/loConfDeNovo')
     if [[ "$use_region" -eq 1 ]]; then
         log "  [$trio] region-restrict + subset-to-trio + norm + intersect + annotate"
         # `-R` emits records in regions-file order (contigs grouped lexically); `bcftools sort`
@@ -128,28 +151,28 @@ for row in "${rows[@]}"; do
         # already being coordinate-sorted for its index step to succeed.
         if [[ -n "$samples" ]]; then
             bcftools view -s "$samples" -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
-                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou - \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-                | bcftools annotate -x INFO --threads "$THREADS" -Ou - \
+                | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Ou - \
                 | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
         else
             bcftools view -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
-                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou - \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-                | bcftools annotate -x INFO --threads "$THREADS" -Ou - \
+                | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Ou - \
                 | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
         fi
     else
         log "  [$trio] subset-to-trio + norm + intersect + annotate"
         if [[ -n "$samples" ]]; then
             bcftools view -s "$samples" --threads "$THREADS" -Ou "$vcf" \
-                | bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou - \
+                | bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou - \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-                | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+                | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Oz -o "$norm" -
         else
-            bcftools norm -m- -f "$REF" -c w --threads "$THREADS" -Ou "$vcf" \
+            bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou "$vcf" \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
-                | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$norm" -
+                | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Oz -o "$norm" -
         fi
     fi
     index_vcf "$norm"

@@ -79,9 +79,26 @@ done
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"
 export HPRV_BIND
 
+# chrM is OUT OF SCOPE (see CLAUDE.md: mtDNA heteroplasmy has a dedicated pipeline). Excluded
+# HERE, at the union, rather than with a guard in Step 5, so every downstream artifact agrees
+# chrM was never analyzed — the annotation, the audit funnel, and the Step-7 workbook alike.
+#
+# It MUST be excluded, not merely left un-modelled: every inheritance mode here is DIPLOID, and
+# genotype.py's is_x_nonpar/is_y_nonpar know only X and Y — so a chrM record routes through
+# hom_recessive / dominant / compound_het as though it were an autosome. Against rCRS the
+# near-fixed haplogroup variants (m.8860A>G in MT-ATP6, m.15326A>G in MT-CYB) are HOM_ALT in
+# every member INCLUDING the father, so every trio fires hom_recessive at the same MT genes. The
+# amplifier: the VEP cache carries no gnomAD mito AF, so frequency() returns None, rare() passes
+# unconditionally, and Step 6 floors q to absent_af_floor -> p ~ 1e-12 -> those MT genes land in
+# the recurrent, exome-wide-significant tier, ranked ABOVE every genuine non-recurrent nuclear
+# candidate. Both chr-prefixed and Ensembl-style names are listed; naming an absent contig is a
+# no-op in bcftools (verified), so this is safe on either convention.
+EXCLUDE_CONTIGS="${HPRV_EXCLUDE_CONTIGS:-chrM,chrMT,M,MT}"
+
 log "Step 1: building cohort site-only union from ${#rows[@]} trios"
 log "  reference: $REF"
 log "  output:    $OUT"
+log "  excluding contigs (out of scope): $EXCLUDE_CONTIGS"
 
 # --- per-trio: PASS -> norm -> site-only -> strip INFO -> index ---
 for row in "${rows[@]}"; do
@@ -106,13 +123,13 @@ for row in "${rows[@]}"; do
     # REF mismatch — a build/contig problem should be visible, not masked.
     log "  [$trio] subsetting to trio + normalizing + dropping genotypes"
     if [[ -n "$samples" ]]; then
-        bcftools view -s "$samples" -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+        bcftools view -s "$samples" -f "$FILTER" -t "^$EXCLUDE_CONTIGS" --threads "$THREADS" -Ou "$vcf" \
             | bcftools norm -m- -f "$REF" -c w -Ou - \
             | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     else
-        bcftools view -f "$FILTER" --threads "$THREADS" -Ou "$vcf" \
+        bcftools view -f "$FILTER" -t "^$EXCLUDE_CONTIGS" --threads "$THREADS" -Ou "$vcf" \
             | bcftools norm -m- -f "$REF" -c w -Ou - \
             | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
@@ -143,4 +160,17 @@ mark_done "$OUT"
 n="$(count_variants "$OUT")"
 audit 01_cohort_sites trios "${#site_files[@]}"
 audit 01_cohort_sites union_sites "$n"
-log "Step 1 complete: $OUT ($n unique sites)"
+# Record the exclusion so it is an auditable decision rather than a silent disappearance: a
+# reader of audit/counts.tsv can see chrM was dropped on purpose and how much was dropped.
+# Counted on the union's OWN contigs (a $OUT that still contains them means the filter failed).
+n_excluded=0
+for _c in ${EXCLUDE_CONTIGS//,/ }; do
+    _n="$(bcftools view -H -t "$_c" "$OUT" 2>/dev/null | wc -l | tr -d '[:space:]')"
+    n_excluded=$((n_excluded + ${_n:-0}))
+done
+audit 01_cohort_sites excluded_contigs_remaining "$n_excluded"
+[[ "$n_excluded" -eq 0 ]] || die "the cohort union still contains $n_excluded records on the \
+out-of-scope contigs ($EXCLUDE_CONTIGS) — the exclusion did not take. Every inheritance mode \
+downstream is diploid and would treat them as autosomal; chrM in particular would flood the \
+recurrent tier of genes.ranked.tsv. Check the contig naming in your VCFs."
+log "Step 1 complete: $OUT ($n unique sites; 0 on the excluded contigs)"

@@ -198,7 +198,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 - **De novo** filtering/review — bespoke machinery (the shared `.sh` orchestration). De novo is a
   secondary cross-reference here (`inheritance.emit_denovo`), never the driver.
-- **mtDNA heteroplasmy** — a dedicated pipeline; chrM is not analyzed.
+- **mtDNA heteroplasmy** — a dedicated pipeline; chrM is not analyzed. **Enforced**, not merely
+  declared: Step 1 drops `EXCLUDE_CONTIGS` (`chrM,chrMT,M,MT`) from the cohort union and dies if
+  any survive. It has to be enforced there rather than left un-modelled, because every inheritance
+  mode is diploid and `genotype.py`'s sex predicates know only X/Y — a chrM record would route
+  through `hom_recessive`/`dominant`/`compound_het` as if autosomal, and rCRS-referenced
+  haplogroup variants (hom-alt in the whole trio, no gnomAD mito AF ⇒ rarity gate passes) would
+  flood the recurrent tier of `genes.ranked.tsv`.
 
 ## Open TODOs
 
