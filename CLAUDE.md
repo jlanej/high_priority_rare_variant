@@ -125,11 +125,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Running
 
-- **Resources first (one-time):** the image ships SOFTWARE; the reference DATA is prepared on the
-  host by `scripts/prepare_resources.sh --dir DIR fetch|verify|emit-env` (manifest-pinned in
-  `resources/manifest.env`; free resources auto-download+verify+index, license-gated ones —
-  dbNSFP/SpliceAI/CADD — validated-if-provided). Never bake resources into the image. See
-  [docs/resources.md](docs/resources.md). `emit-env` writes the `${ENV}` exports the config expects.
+- **Resources first (one-time):** the image ships SOFTWARE; the reference DATA lands on the host
+  filesystem, prepared by `prepare_resources.sh --dir DIR fetch|verify|emit-env` run INSIDE the
+  image (the script + its pinned `resources/manifest.env` are baked in at `/opt/hprv/scripts` —
+  on PATH — and `/opt/hprv/resources/manifest.env`, so no host checkout is needed;
+  `HPRV_RESOURCE_MANIFEST` re-pins without a rebuild). Free resources auto-download+verify+index;
+  license-gated ones — dbNSFP/SpliceAI/CADD — are validated-if-provided. Never bake resource DATA
+  into the image (`.dockerignore` keeps `resources/*` except the manifest out of the build context).
+  See [docs/resources.md](docs/resources.md). `emit-env` writes the `${ENV}` exports the config expects.
 - **HPC (primary):** `apptainer exec --cleanenv --bind ... hprv.sif run_pipeline.sh --config
   config/config.yaml` (add `--from N --to M` for a subset).
 - **Dev/host:** run individual step scripts; python steps need `PYTHONPATH=src` and the container

@@ -90,11 +90,18 @@ ENV VEP_PLUGINS=/plugins
 # --- pipeline code ----------------------------------------------------------
 COPY pipeline/ /opt/hprv/pipeline/
 COPY src/ /opt/hprv/src/
+# The resource-prep tooling is SOFTWARE, so it ships in the image like everything else: the
+# quickstart runs prepare_resources.sh INSIDE the container, and it must not depend on a host
+# checkout happening to be bind-mounted at $PWD. Its pinned manifest rides along (.dockerignore
+# keeps prepared resource DATA out of the context); re-pin without a rebuild via
+# HPRV_RESOURCE_MANIFEST. join_constraint.py resolves via the same $HERE.
+COPY scripts/ /opt/hprv/scripts/
+COPY resources/manifest.env /opt/hprv/resources/manifest.env
 ENV PYTHONPATH=/opt/hprv/src:$PYTHONPATH \
-    PATH=/opt/hprv/pipeline:$PATH \
+    PATH=/opt/hprv/pipeline:/opt/hprv/scripts:$PATH \
     HPRV_HOME=/opt/hprv
-RUN find /opt/hprv/pipeline -type f -name '*.sh' -exec chmod a+rx {} + ; \
-    find /opt/hprv/pipeline -type f -name '*.py' -exec chmod a+rx {} +
+RUN find /opt/hprv/pipeline /opt/hprv/scripts -type f \
+        \( -name '*.sh' -o -name '*.py' \) -exec chmod a+rx {} +
 
 # --- build-time sanity check: every core tool + python dep must resolve ------
 RUN set -eux; \
@@ -105,7 +112,10 @@ RUN set -eux; \
     somalier --help >/dev/null 2>&1 || true; \
     whatshap --version; \
     vep --help >/dev/null 2>&1 || true; \
-    python -c "import cyvcf2, pysam, pandas, numpy, scipy, yaml, click; print('python deps OK')"
+    python -c "import cyvcf2, pysam, pandas, numpy, scipy, yaml, click; print('python deps OK')"; \
+    prepare_resources.sh --dir /tmp/_resprobe emit-env >/dev/null; \
+    rm -rf /tmp/_resprobe; \
+    echo "prepare_resources.sh on PATH and resolves its pinned manifest in-image"
 
 USER vep
 WORKDIR /data

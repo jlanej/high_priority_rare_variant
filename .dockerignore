@@ -6,7 +6,11 @@ tests/data
 results
 work
 logs
-resources
+# Keep prepared resource DATA out of the context (it can be hundreds of GB), but let the pinned
+# manifest through — the image ships prepare_resources.sh, which reads it. Use resources/* (not
+# resources/) so the exception can re-include the file. Mirrors .gitignore.
+resources/*
+!resources/manifest.env
 vep_cache
 *.sif
 *.vcf

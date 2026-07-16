@@ -116,22 +116,28 @@ against faf95, and since AF is free from the cache, the gnomAD slim strictly onl
 
 ## Usage
 
-Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host installs needed):
+Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host installs needed).
+The script ships in the image at `/opt/hprv/scripts/` and is on `PATH`, so call it by name — you do
+not need a checkout of this repo on the host:
 
 ```bash
 # 1. fetch + prepare everything free; validate any gated files you've placed under --dir
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources fetch
+    prepare_resources.sh --dir /data/hprv_resources fetch
 
 # 2. check every expected file is present + indexed (gnomAD INFO tags verified against config)
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources verify
+    prepare_resources.sh --dir /data/hprv_resources verify
 
 # 3. emit the export lines your config's ${ENV} placeholders expect
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
+    prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 source /data/hprv_resources/resources.env      # then run_pipeline.sh --config ...
 ```
+
+The pinned manifest ships alongside it at `/opt/hprv/resources/manifest.env`. To re-pin a version
+(say, a newer ClinVar) without rebuilding the image, bind-mount an edited copy and point
+`HPRV_RESOURCE_MANIFEST` at it.
 
 `fetch` is idempotent (skips a target that already exists and matches its checksum) and resumable.
 Use `--only gnomad_sites,clinvar` to prepare a subset, and `--accept-license` to acknowledge the

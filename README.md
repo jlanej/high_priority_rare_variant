@@ -124,13 +124,14 @@ apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:late
 
 # 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
 #    Free resources auto-download + verify + index; license-gated ones (dbNSFP/SpliceAI/CADD)
-#    are validated if you provide them. See docs/resources.md.
+#    are validated if you provide them. prepare_resources.sh + its pinned manifest ship IN the
+#    image (on PATH) — no checkout needed on the host. See docs/resources.md.
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
+    prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources verify
+    prepare_resources.sh --dir /data/hprv_resources verify
 apptainer exec --bind /data hprv.sif \
-    scripts/prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
+    prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 
 # 3. Configure. Copy the example; point the ${ENV} placeholders at your prepared resources.
 cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
