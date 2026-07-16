@@ -124,17 +124,14 @@ jobs:
           want="${{ steps.pins.outputs.bcftools }}"
           echo "bcftools: got=$got want=$want"
           case "$got" in "$want"*) ;; *) echo "FATAL: CI bcftools $got != pinned $want" >&2; exit 1;; esac
-          # The selector Step 2 depends on must exist in this build, or the integration test is
-          # not exercising the code path production takes. Read the selector list specifically —
-          # `--help` is the trigger (no-args prints nothing useful), and grepping the whole usage
-          # would match 'mane' inside "MANE_SELECT" in the prose.
-          # `|| true`: +split-vep --help exits 255 (the usage dump is its error path), which would
-          # otherwise fail this step under the runner's `set -e`. The regex matches both the old
-          # ("TR, transcript:") and new ("TR, filter transcripts:") usage wordings.
-          keys="$( { bcftools +split-vep --help 2>&1 || true; } | sed -n 's/.*TR, \(filter \)*transcripts*:[[:space:]]*//p' | head -1)"
-          echo "split-vep selectors: ${keys:-<unparsed>}"
-          case "$keys" in *pick*) echo "OK: split-vep supports -s pick";; *)
-            echo "FATAL: this bcftools's +split-vep has no 'pick' selector — CI would not be testing what the image runs" >&2; exit 1;; esac
+          # Step 2's default selector is `-s pick`, which +split-vep gained in bcftools 1.20.
+          # Assert it here so a pin that drifts below 1.20 fails loudly rather than making the
+          # integration test skip the code path production actually takes.
+          maj="${got%%.*}"; rest="${got#*.}"; min="${rest%%.*}"
+          if [ "$maj" -lt 1 ] || { [ "$maj" -eq 1 ] && [ "$min" -lt 20 ]; }; then
+            echo "FATAL: bcftools $got predates the split-vep 'pick' selector (added in 1.20) — CI would not be testing what the image runs" >&2; exit 1
+          fi
+          echo "OK: bcftools $got >= 1.20, so split-vep supports -s pick"
       - name: Run integration test
         shell: micromamba-shell {0}
         run: bash tests/integration/run_integration.sh
