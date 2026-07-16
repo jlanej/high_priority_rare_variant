@@ -55,7 +55,7 @@ is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf
 
 # ---------------------------------------------------------------------------
 # Resource preflight — the annotation resources are an IDEMPOTENT UPSTREAM
-# REQUIREMENT: prepare them ONCE with scripts/prepare_resources.sh (see
+# REQUIREMENT: prepare them ONCE with prepare_resources.sh, which ships in the image (see
 # docs/resources.md), and every run just re-verifies them here before doing work.
 # Hard-fail on the resources without which the screen is meaningless (VEP cache +
 # the gnomAD faf95 rarity oracle); loudly flag missing OPTIONAL predictors (they
@@ -79,7 +79,7 @@ if run_step 2; then
     if [[ ${#r_missing[@]} -gt 0 ]]; then
         warn "Required annotation resources are missing — prepare them ONCE, upstream:"
         for m in "${r_missing[@]}"; do warn "  - $m"; done
-        die "run scripts/prepare_resources.sh (fetch -> verify -> emit-env), source the emitted env, then re-run. See docs/resources.md."
+        die "run prepare_resources.sh (fetch -> verify -> emit-env) inside this image, source the emitted env, then re-run. See docs/resources.md."
     fi
 fi
 
