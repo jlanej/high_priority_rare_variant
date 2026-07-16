@@ -67,15 +67,36 @@ jobs:
           fi
           echo "OK: resources/manifest.env is tracked and not ignored"
 
-      - name: prepare_resources.sh resolves its manifest from a clean clone
+      - name: prepare_resources.sh resolves its manifest from a clean clone, and needs it
         run: |
-          # emit-env, NOT verify: verify legitimately exits 1 here (a clean clone has no prepared
-          # resources). emit-env exits 0 iff the manifest was found and sourced, which is the one
-          # thing under test — and it needs no bio tools, so it runs in this host-only job.
-          out="$(bash scripts/prepare_resources.sh --dir "$(mktemp -d)" emit-env)"
+          d="$(mktemp -d)"
+          # emit-env, NOT verify: verify legitimately exits 1 here (a clean clone has nothing
+          # prepared). emit-env needs no bio tools, so it runs in this host-only job.
+          #
+          # (1) it must resolve the tracked manifest and emit the ${ENV} placeholders the config
+          #     expects. Asserting the *variable names* rather than a value: under the VEP-only
+          #     contract every emitted path is "$DIR/<fixed basename>", so no emitted value is
+          #     manifest-derived any more and there is nothing value-shaped left to match on.
+          #     (An earlier version of this guard grepped for a gnomAD path and silently became a
+          #     test of a deleted export.)
+          out="$(bash scripts/prepare_resources.sh --dir "$d" emit-env)" \
+            || { echo "FATAL: emit-env failed on a clean clone — the pinned manifest did not resolve" >&2; exit 1; }
           echo "$out"
-          echo "$out" | grep -q '^export GNOMAD_SITES=.*gnomad.joint.v4.1' \
-            || { echo "FATAL: emit-env produced no manifest-derived exports" >&2; exit 1; }
+          for v in REF_FASTA VEP_CACHE CADD_SNV CADD_INDEL; do
+            echo "$out" | grep -q "^export $v=" \
+              || { echo "FATAL: emit-env did not export $v — the config's \${$v} placeholder would never resolve" >&2; exit 1; }
+          done
+          # (2) ...and a manifest that is absent must FAIL, not be shrugged off. Step (1) is what
+          #     actually catches the historical regression (verified: delete resources/manifest.env
+          #     and (1) goes red); this adds cover for the HPRV_RESOURCE_MANIFEST override path.
+          #     Deliberately a weak-but-cheap assertion — it proves a bogus path is fatal, not that
+          #     the manifest's *contents* are consumed, so don't read more into a green here.
+          if HPRV_RESOURCE_MANIFEST=/nonexistent/manifest.env \
+               bash scripts/prepare_resources.sh --dir "$d" emit-env >/dev/null 2>&1; then
+            echo "FATAL: emit-env SUCCEEDED with a missing manifest — a clean clone (or the image) could then ship without one and fail later, elsewhere" >&2
+            exit 1
+          fi
+          echo "OK: manifest resolves from a clean clone, and its absence is fatal"
 
   integration:
     # End-to-end pipeline over generated mock data with REAL bcftools + the python
@@ -188,12 +209,15 @@ jobs:
 
       # Non-mocked smoke test: VEP must actually start (loads its Perl modules under the image's
       # env — catches the conda-Perl-shadow class of bug the mocked integration test cannot), and
-      # LOFTEE's Perl deps + all four plugin .pm must be present in VEP's Perl. Any failure here
-      # fails the job before the push below, so a broken image is never published.
+      # LOFTEE's Perl deps + the plugin .pm must be present in VEP's Perl. Any failure here fails
+      # the job before the push below, so a broken image is never published.
       # This runs as the image's unprivileged runtime user, so it also proves the baked
       # prepare_resources.sh is reachable and executable the way a user actually invokes it —
       # the Dockerfile's own probe runs as root and cannot show that.
-      - name: Smoke test — real VEP + LOFTEE Perl deps + plugin code + resource prep
+      # NB: only CADD is invoked under the VEP-only contract; LoF/dbNSFP/SpliceAI are checked
+      # because their CODE still ships (re-enabling them is config, not a rebuild) — see
+      # docs/ROADMAP.md's restoration table. Their DATA is not fetched and they are not run.
+      - name: Smoke test — real VEP + plugin code + Perl deps + resource prep
         run: |
           docker run --rm hprv:ci bash -c '
             set -eu
@@ -203,10 +227,17 @@ jobs:
               perl -M"$m" -e1 && echo "OK: perl module $m"
             done
             for p in LoF CADD dbNSFP SpliceAI; do
-              test -f "/plugins/$p.pm" && echo "OK: plugin /plugins/$p.pm"
+              test -f "/plugins/$p.pm" && echo "OK: plugin code /plugins/$p.pm"
             done
+            # split-vep must offer the `pick` selector Step 2 defaults to (bcftools >= 1.20),
+            # in the image itself — the integration job asserts this against its own bcftools,
+            # which is a different install.
+            bcftools --version | head -1
             command -v prepare_resources.sh >/dev/null && echo "OK: prepare_resources.sh on PATH"
-            prepare_resources.sh --dir /tmp/_probe emit-env | grep -q "^export GNOMAD_SITES=" \
+            # The in-image manifest must resolve. Assert on an export that still EXISTS under the
+            # VEP-only contract: this previously grepped GNOMAD_SITES and became a test of a
+            # deleted export the moment the gnomAD transfer was removed.
+            prepare_resources.sh --dir /tmp/_probe emit-env | grep -q "^export VEP_CACHE=" \
               && echo "OK: in-image pinned manifest resolves (no host checkout needed)"
           '
 
