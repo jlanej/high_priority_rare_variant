@@ -74,6 +74,7 @@ SH_MAP = {
     "HPRV_VEP_PLUGINS": "resources.vep.plugins_dir",
     "HPRV_VEP_ANNOTATED_VCF": "resources.vep.annotated_vcf",
     "HPRV_CSQ_SELECT": "resources.vep.csq_select",
+    "HPRV_VEP_SHARD_BY_CONTIG": "resources.vep.shard_by_contig",
     "HPRV_CADD_SNV": "resources.vep.cadd_snv",
     "HPRV_CADD_INDEL": "resources.vep.cadd_indel",
     "HPRV_CRAM_MAP": "resources.cram_map",

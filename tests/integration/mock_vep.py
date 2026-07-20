@@ -13,12 +13,20 @@ Emitted to match `vep --everything --flag_pick --plugin CADD` output shape:
   * frequency lives in the per-population gnomAD CSQ fields, not an external VCF.
   * CLIN_SIG is lowercase and '&'-joined, as VEP writes it (NOT ClinVar's Capitalised CLNSIG).
 
-Usage: mock_vep.py --in sites.vcf.gz --lookup annot.tsv --out vep.vcf
+Two invocation modes:
+  * mock_vep.py --in sites.vcf.gz --lookup annot.tsv --out vep.vcf   (pre-make an ingest VCF)
+  * mock_vep.py -i shard.vcf -o out.vcf.gz [ ...any vep flags... ]   (a `vep`-CLI SHIM)
+
+The second mode lets a `vep` shim on PATH stand in for the real binary, so Step 2's REAL
+(non-ingest) code path — including the by-contig sharding loop — runs and can be tested. It
+reads the lookup table from $HPRV_MOCK_VEP_LOOKUP and ignores every other vep flag.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import os
+import sys
 
 from cyvcf2 import VCF, Writer
 
@@ -43,26 +51,20 @@ VEP_HEADER = (
 )
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--lookup", required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args(argv)
-
+def annotate(inp, lookup, out) -> int:
     lut = {}
-    with open(args.lookup) as fh:
+    with open(lookup) as fh:
         for r in csv.DictReader(fh, delimiter="\t"):
             lut[(r["chrom"], int(r["pos"]), r["ref"], r["alt"])] = r
 
-    vcf = VCF(args.inp)
+    vcf = VCF(inp)
     vcf.add_info_to_header({
         "ID": "CSQ", "Number": ".", "Type": "String",
         "Description": "Consequence annotations from Ensembl VEP. Format: " + "|".join(CSQ_FIELDS),
     })
     vcf.add_to_header(VEP_HEADER)
 
-    w = Writer(args.out, vcf)
+    w = Writer(out, vcf)
     n_csq = 0
     for v in vcf:
         row = lut.get((v.CHROM, v.POS, v.REF, v.ALT[0] if v.ALT else ""))
@@ -99,8 +101,31 @@ def main(argv=None) -> int:
         w.write_record(v)
     w.close()
     vcf.close()
-    print(f"mock_vep: wrote CSQ for {n_csq} records -> {args.out}")
+    sys.stderr.write(f"mock_vep: wrote CSQ for {n_csq} records -> {out}\n")
     return 0
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `vep`-CLI shim mode: invoked with -i/-o and a pile of vep flags. Take -i/-o, read the lookup
+    # from the env, ignore everything else (--fork, --dir_cache, --plugin CADD,..., etc.).
+    if "-i" in argv or "--input_file" in argv:
+        ap = argparse.ArgumentParser(add_help=False)
+        ap.add_argument("-i", "--input_file", dest="inp", required=True)
+        ap.add_argument("-o", "--output_file", dest="out", required=True)
+        a, _ignored = ap.parse_known_args(argv)
+        lookup = os.environ.get("HPRV_MOCK_VEP_LOOKUP")
+        if not lookup:
+            sys.stderr.write("mock_vep shim: set HPRV_MOCK_VEP_LOOKUP to the annot.tsv path\n")
+            return 2
+        return annotate(a.inp, lookup, a.out)
+    # explicit mode
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--in", dest="inp", required=True)
+    ap.add_argument("--lookup", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args(argv)
+    return annotate(args.inp, args.lookup, args.out)
 
 
 if __name__ == "__main__":

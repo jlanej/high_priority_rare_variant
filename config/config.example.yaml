@@ -71,6 +71,15 @@ resources:
     csq_select: ""
     cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
     cadd_indel: ${CADD_INDEL}     # gnomad indel CADD tsv.gz (+ .tbi)
+    # Step 2 (the dominant cost) shards the VEP call BY CONTIG: each contig is an independent run
+    # with its own .done, so a job killed at the scheduler walltime RESUMES on re-submit instead
+    # of re-annotating from scratch — and the shards can be driven as a SLURM array (one contig
+    # per task) for multi-node speedup. Output is byte-identical to a single pass (only the vep
+    # call is sharded; split-vep and all guards run once on the reassembled whole). Set false only
+    # if you have a reason to run one un-resumable pass. On WGS this is what makes Step 2 finish.
+    # Tip: the CADD plugin's per-variant tabix reads into the ~81 GB file are the per-shard
+    # bottleneck; if it lives on a network/FUSE mount, stage it to node-local disk first.
+    shard_by_contig: true
   constraint:
     # One per-gene TSV with LOEUF (oe_lof_upper) / pLI / s_het / phaplo columns (any subset).
     gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF/s_het/pHaplo per gene

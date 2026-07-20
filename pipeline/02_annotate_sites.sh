@@ -122,12 +122,63 @@ else
     else warn "CADD plugin not configured — with no CADD there is NO functional evidence for any variant VEP rates below MODERATE (intronic/synonymous/UTR/regulatory); the screen degrades to an impact-only filter"; fi
 
     n_sites="$(count_variants "$SITES")"
-    # VEP runs EXACTLY ONCE here, on the deduplicated cohort union — never per trio.
-    # Per-trio steps (Step 4) transfer these annotations with `bcftools annotate`, they
-    # do not re-run VEP. This is the single most expensive operation in the pipeline.
-    log "Step 2: VEP-annotating the cohort union ONCE — $n_sites sites (VEP r${VEP_VERSION}). VEP is NOT run per trio."
+    # VEP runs over the deduplicated cohort union — once per contig, never per trio. Per-trio
+    # steps (Step 4) transfer these annotations with `bcftools annotate`; they do not re-run VEP.
+    # This is the single most expensive operation in the pipeline (WGS: ~57M sites, ~a day).
     audit 02_annotate input_sites "$n_sites"
-    hprv_run -- vep "${vep_args[@]}" -i "$SITES" -o "$vep_vcf"
+
+    # --- shard the VEP call BY CONTIG for walltime-resumability --------------------------------
+    # Rationale (real failure): one --fork run over a WGS union is single-node AND un-resumable —
+    # a job killed at the scheduler walltime re-annotates all 57M sites from scratch. Sharding by
+    # contig makes each contig an independent VEP run with its own `.done` sentinel, so a killed
+    # job RESUMES (re-submit -> finished contigs skipped), and the shards can be driven as a SLURM
+    # array (one contig per task) for real multi-node parallelism.
+    #
+    # CORRECTNESS — this must stay byte-identical to a single run, because it feeds the published
+    # call set. So ONLY the `vep` call is sharded: the raw per-contig VEP VCFs are concatenated
+    # back into $vep_vcf, and EVERYTHING downstream (split-vep, the selector/version guard, the
+    # frequency-present check, the output) runs once on the reassembled whole, exactly as before.
+    #   * VEP's --flag_pick decision is per-variant, so a region split cannot change any CSQ.
+    #   * `bcftools index -s` lists contigs-with-variants IN FILE (= reference/coordinate) order,
+    #     so concatenating the shards in that order reproduces a globally-sorted VCF with no
+    #     re-sort, and the frequency guard never sees a shard (no per-shard false-fail).
+    # A sharded==single equivalence test guards this (tests/integration).
+    case "${HPRV_VEP_SHARD_BY_CONTIG:-1}" in 1|true|yes|on) vshard=1;; *) vshard=0;; esac
+    if [[ "$vshard" -eq 1 && ( -f "$SITES.tbi" || -f "$SITES.csi" ) ]]; then
+        vsdir="$HPRV_TMPDIR/vep_shards"; mkdir -p "$vsdir"
+        shard_tags=()
+        while IFS=$'\t' read -r _c _len _n; do
+            [[ "${_n:-0}" -gt 0 ]] && shard_tags+=("$_c")
+        done < <(hprv_run -- bcftools index -s "$SITES")
+        [[ ${#shard_tags[@]} -gt 0 ]] || die "Step 2: no contigs with variants in $SITES"
+        log "Step 2: VEP-annotating the union sharded by contig — ${#shard_tags[@]} shards, \
+$n_sites sites (VEP r${VEP_VERSION}). Each shard has its own .done, so a walltime kill RESUMES."
+        n_done=0
+        concat_list="$vsdir/concat.list"; : > "$concat_list"
+        for _c in "${shard_tags[@]}"; do
+            shard_out="$vsdir/vep.${_c}.vcf.gz"
+            printf '%s\n' "$shard_out" >> "$concat_list"
+            if is_done "$shard_out"; then n_done=$((n_done + 1)); log "  [$_c] cached (resume)"; continue; fi
+            shard_in="$vsdir/sites.${_c}.vcf.gz"
+            hprv_run -- bcftools view -r "$_c" -Oz -o "$shard_in" "$SITES"
+            log "  [$_c] VEP ($(count_variants "$shard_in") sites)"
+            hprv_run -- vep "${vep_args[@]}" -i "$shard_in" -o "$shard_out"
+            require_intact_bgzip "$shard_out"
+            mark_done "$shard_out"
+            rm -f "$shard_in"
+        done
+        [[ "$n_done" -eq 0 ]] || log "Step 2: resumed — $n_done/${#shard_tags[@]} contig shards were already complete"
+        # Gather: plain concat in file (= reference) order. Shards are disjoint contigs, each
+        # internally sorted, so the result is globally sorted and needs no re-sort. The per-shard
+        # ##VEP-command-line headers differ (different -i); harmless — downstream reads only the
+        # CSQ Format line, which is data-independent and identical across shards.
+        log "Step 2: concatenating ${#shard_tags[@]} annotated contig shards -> whole-union VCF"
+        hprv_run -- bcftools concat -f "$concat_list" -Oz -o "$vep_vcf"
+    else
+        [[ "$vshard" -eq 1 ]] && warn "Step 2: $SITES is unindexed — cannot shard by contig; annotating in one un-resumable pass"
+        log "Step 2: VEP-annotating the union in ONE pass — $n_sites sites (VEP r${VEP_VERSION})."
+        hprv_run -- vep "${vep_args[@]}" -i "$SITES" -o "$vep_vcf"
+    fi
     require_intact_bgzip "$vep_vcf"
 fi
 
