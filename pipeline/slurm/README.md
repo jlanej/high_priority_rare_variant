@@ -46,6 +46,30 @@ The whole graph is idempotent through the pipeline's `.done` sentinels:
 - **Force a full re-annotation** (e.g. you changed the cache or CADD): remove the shard
   directory first — `rm -rf $HPRV_WORK/annotate_shards/` — then re-submit.
 
+## Ending the graph early (e.g. run Step 8 elsewhere)
+
+Step 8 (mini-CRAM / igv export) reads the **source CRAM store**, which at some sites is a
+FUSE/network mount visible only on login/interactive nodes — not the batch compute nodes the
+graph runs on. To stop the distributed graph at Step 7 and run Step 8 where the CRAMs live, set
+in `cluster.env`:
+
+```sh
+DOWN_TO=7
+```
+
+The `downstream` job then runs Steps 3–7, and `submit_slurm.sh` finishes with the annotated call
+set, gene ranking and xlsx in `$HPRV_WORK`. Run Step 8 afterwards on a node that can see the
+CRAMs — it only reads files already in `$HPRV_WORK`, so it is a plain one-off:
+
+```sh
+apptainer exec --cleanenv --bind "$HPRV_BINDS" "$HPRV_SIF" \
+    run_pipeline.sh --config "$HPRV_CONFIG" --from 8 --to 8
+```
+
+(`DOWN_FROM` is configurable too, for symmetry; the range must satisfy `3 <= FROM <= TO <= 8`.)
+The audit summary is re-assembled at the end of each run, so it ends up reflecting Step 8 once
+that runs.
+
 ## Sizing notes
 
 - **`SCATTER_TIME`** is per *contig*, not per genome. Size it to the largest contig
