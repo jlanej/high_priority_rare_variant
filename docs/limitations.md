@@ -159,30 +159,34 @@ read and whose pinned URL is dead anyway (the S3 bucket returns `NoSuchBucket`; 
 registration-gated downloads). Trap: Ensembl's `AlphaMissense.pm` emits `am_pathogenicity` /
 `am_class`, **not** `AlphaMissense_score`.
 
-## Scale: the per-trio steps run serially
+## Scale
 
-Not a correctness issue and not a blocker — the run completes, and it resumes (`.done` guards) if
-a walltime kill interrupts it. But it is the one place where a large **WGS** cohort costs an order
-of magnitude of wall-clock it does not need to.
+**Step 2 (VEP) is distributed.** It was the tall pole — one un-resumable single-node `--fork` run
+that a WGS union (~57M sites) could not finish inside a 24 h walltime. It now shards by contig
+(one VEP run per contig, each with its own `.done`), so it resumes across walltime kills and runs
+one-contig-per-node as a coherent SLURM job graph. See
+[pipeline/slurm/](../pipeline/slurm/README.md) for the `prep → plan → scatter[array] → gather →
+downstream` graph, and `resources.vep.shard_by_contig` for the single-job in-process version. The
+output is byte-identical to a single pass (`tests/integration/assert_shard_equivalence.sh`).
 
-Steps 0, 1 and 4 each loop over trios one at a time, and `run_pipeline.sh` is a single serial
-process. Every iteration is independent — one trio VCF in, one per-trio file out, no cross-trio
-state until Step 1's `concat` — so the work is embarrassingly parallel and simply is not
-dispatched. `runtime.threads` does not help: bcftools `--threads` only adds BGZF (de)compression
-workers, while `norm`'s reference lookups and left-alignment (the actual cost) are single-threaded.
+**Steps 0/1/4 still run per-trio serially — now the tall pole on WGS.** Not a correctness issue
+and not a blocker: the run completes and resumes (`.done` guards). But each loops over trios one at
+a time, and every iteration is independent (one trio VCF in, one per-trio file out, no cross-trio
+state until Step 1's `concat`), so the work is embarrassingly parallel and simply is not dispatched
+yet. `runtime.threads` does not help: bcftools `--threads` only adds BGZF (de)compression workers,
+while `norm`'s reference lookups and left-alignment (the actual cost) are single-threaded.
 
 Measured shape at ~200 trios:
 
 | Input | Per trio (Step 1) | Serial total (Steps 0+1+4) |
 |---|---|---|
 | **Exome** (~150k variants/trio) | ~20–40 s | **~1.5 h — nothing to fix** |
-| **WGS** (~4.5M variants/trio) | ~2.5–5 min | **~12–26 h** (≈2–3 h at 10-way) |
+| **WGS** (~4.5M variants/trio) | ~2.5–5 min | **~12–26 h** |
 
-So: on exome, ignore this. On WGS, either accept a long resumable run, or dispatch the per-trio
-loops (`xargs -P`, or a scheduler array over manifest shards). The `.done` idempotency needed to
-do it safely already exists; only the dispatch is missing.
-[docs/tooling_and_reproducibility.md](tooling_and_reproducibility.md) names this exact trigger —
-"adopt a manager when you need per-sample parallelism across many trios".
+So: on exome, ignore this. On WGS, the natural next increment is a trio-array for Steps 0/1/4,
+mirroring the Step-2 scatter — the `.done` idempotency needed to do it safely already exists; only
+the dispatch is missing. [docs/tooling_and_reproducibility.md](tooling_and_reproducibility.md)
+names this exact trigger — "adopt a manager when you need per-sample parallelism across many trios".
 
 Two findings worth recording so nobody re-derives them:
 

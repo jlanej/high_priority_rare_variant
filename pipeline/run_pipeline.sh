@@ -23,11 +23,18 @@ source "$HERE/lib/common.sh"
 export PYTHONPATH="${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 CFG="" FROM=0 TO=8
+# Distributed Step-2 pass-throughs (used by the SLURM orchestration in pipeline/slurm/). These
+# only change how Step 2 runs and are forwarded verbatim to 02_annotate_sites.sh; every other step
+# is unaffected. Typically paired with `--from 2 --to 2` so one job does one Step-2 sub-task.
+S2_PASSTHRU=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) CFG="$2"; shift 2;;
         --from)   FROM="$2"; shift 2;;
         --to)     TO="$2"; shift 2;;
+        --annotate-emit-manifest) S2_PASSTHRU+=(--emit-shard-manifest "$2"); shift 2;;
+        --annotate-shard-contig)  S2_PASSTHRU+=(--shard-contig "$2"); shift 2;;
+        --annotate-gather)        S2_PASSTHRU+=(--gather); shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
@@ -117,7 +124,12 @@ fi
 if run_step 2; then
     s2_args=(--sites "$W/cohort.sites.vcf.gz" --ref "$HPRV_REF_FASTA"
              --out "$W/cohort.sites.annotated.vcf.gz")
-    if is_set "${HPRV_VEP_ANNOTATED_VCF:-}"; then
+    if [[ ${#S2_PASSTHRU[@]} -gt 0 ]]; then
+        # A distributed Step-2 sub-task (emit-manifest / shard-contig / gather) from the SLURM
+        # orchestration. Not compatible with the ingest bypass (which produces no shards).
+        log "== Step 2: distributed sub-task (${S2_PASSTHRU[*]}) =="
+        s2_args+=("${S2_PASSTHRU[@]}")
+    elif is_set "${HPRV_VEP_ANNOTATED_VCF:-}"; then
         log "== Step 2: ingest pre-annotated VEP VCF (VEP not run) =="
         s2_args+=(--vep-vcf "$HPRV_VEP_ANNOTATED_VCF")
     else

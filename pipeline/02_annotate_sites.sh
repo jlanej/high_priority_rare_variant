@@ -32,6 +32,15 @@ source "$HERE/lib/common.sh"
 
 SITES="" REF="${HPRV_REF_FASTA:-}" OUT="" THREADS="${HPRV_THREADS:-4}"
 PRE_VEP="${HPRV_VEP_ANNOTATED_VCF:-}"
+# Distributed (SLURM) sub-modes. Default (none set) = the self-contained in-process run.
+#   --emit-shard-manifest F : write the ordered contig list one-per-line to F, then exit. A SLURM
+#                             job array indexes into it ($SLURM_ARRAY_TASK_ID -> line).
+#   --shard-contig CHR      : VEP-annotate ONLY contig CHR -> a shard VCF + .done, then exit. One
+#                             array task per contig. Skips split-vep / gather / output.
+#   --gather                : skip VEP; verify every expected shard is complete, concat them, then
+#                             run split-vep + the guards + write $OUT. The dependent gather job.
+# See docs/pipeline_design.md (Step 2, distributed) and pipeline/slurm/.
+EMIT_MANIFEST="" SHARD_CONTIG="" GATHER=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sites)   SITES="$2"; shift 2;;
@@ -40,6 +49,9 @@ while [[ $# -gt 0 ]]; do
         --vep-vcf) PRE_VEP="$2"; shift 2;;
         --threads) THREADS="$2"; shift 2;;
         --tmpdir)  HPRV_TMPDIR="$2"; shift 2;;
+        --emit-shard-manifest) EMIT_MANIFEST="$2"; shift 2;;
+        --shard-contig)        SHARD_CONTIG="$2"; shift 2;;
+        --gather)              GATHER=1; shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
@@ -49,18 +61,32 @@ done
 is_set() { [[ -n "${1:-}" && "$1" != *'${'* ]]; }
 require_path() { is_set "$1" || die "$2 is not configured"; [[ -e "$1" ]] || die "$2 not found: $1"; }
 
-# Two modes: annotate $SITES with VEP ourselves, or ingest a VEP VCF someone else made.
-# The cache/ref/sites are only needed in the former.
+# The distributed sub-modes are mutually exclusive and never combine with --vep-vcf (ingest).
+_nmode=0
+is_set "$EMIT_MANIFEST" && _nmode=$((_nmode + 1)); is_set "$SHARD_CONTIG" && _nmode=$((_nmode + 1))
+[[ "$GATHER" -eq 1 ]] && _nmode=$((_nmode + 1))
+[[ "$_nmode" -le 1 ]] || die "--emit-shard-manifest / --shard-contig / --gather are mutually exclusive"
+{ [[ "$_nmode" -eq 1 ]] && is_set "$PRE_VEP"; } && die "the distributed sub-modes run VEP; they cannot combine with --vep-vcf"
+
+# Two run styles: annotate $SITES with VEP ourselves, or ingest a VEP VCF someone else made — the
+# cache/ref are only needed in the former. --emit-shard-manifest additionally needs neither.
 if is_set "$PRE_VEP"; then
     [[ -e "$PRE_VEP" ]] || die "pre-annotated VEP VCF not found: $PRE_VEP (resources.vep.annotated_vcf)"
     [[ -n "$OUT" ]] || die "need --out"
 else
-    [[ -n "$SITES" && -n "$REF" && -n "$OUT" ]] || die "need --sites, --ref, and --out (or --vep-vcf)"
-    require_path "${HPRV_VEP_CACHE:-}" "VEP cache (resources.vep.cache_dir)"
+    [[ -n "$SITES" && -n "$OUT" ]] || die "need --sites and --out (or --vep-vcf)"
+    if ! is_set "$EMIT_MANIFEST"; then
+        [[ -n "$REF" ]] || die "need --ref"
+        require_path "${HPRV_VEP_CACHE:-}" "VEP cache (resources.vep.cache_dir)"
+    fi
 fi
 VEP_VERSION="${HPRV_VEP_VERSION:-115}"
 
-if is_done "$OUT"; then log "Step 2 already complete: $OUT (skipping)"; exit 0; fi
+# The $OUT-complete short-circuit applies only to run styles that PRODUCE $OUT (default, ingest,
+# gather). --shard-contig produces a per-contig shard and --emit-shard-manifest produces a manifest.
+if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
+    if is_done "$OUT"; then log "Step 2 already complete: $OUT (skipping)"; exit 0; fi
+fi
 
 outdir="$(abspath_dir "$OUT")"; mkdir -p "$outdir"
 # Bind every resource dir so tool calls see them inside/outside the container.
@@ -72,6 +98,56 @@ done
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
 vep_vcf="$HPRV_TMPDIR/vep.vcf.gz"; mkdir -p "$HPRV_TMPDIR"
+
+# --- shard helpers: shared by the in-process loop AND the SLURM sub-modes -------------------
+# The per-contig VEP OUTPUTS land next to $OUT — i.e. on the SHARED filesystem, visible to every
+# node — NOT under HPRV_TMPDIR (often node-local scratch). A SLURM gather job runs on a different
+# node than the scatter tasks and must read their shards, and resume across job submissions needs
+# them to persist. Only the transient region-subset is written to node-local scratch.
+shard_dir() { printf '%s/annotate_shards' "$outdir"; }
+# Contigs that carry variants, in FILE (= reference/coordinate) order, from the index — no full
+# scan. Scatter, gather and the manifest all call this, so they agree exactly on the shard set.
+enum_contigs() { hprv_run -- bcftools index -s "$SITES" | awk -F'\t' '($3+0)>0{print $1}'; }
+# Annotate exactly one contig -> shard VCF + .done. Idempotent: skips a complete shard (resume).
+annotate_one_contig() {  # $1 = contig ; requires vep_args set
+    local c="$1" sd; sd="$(shard_dir)"; mkdir -p "$sd"
+    local out="$sd/vep.${c}.vcf.gz"
+    if is_done "$out"; then log "  [$c] cached (resume)"; return 0; fi
+    local sub="${HPRV_TMPDIR:-/tmp}/sites.${c}.$$.vcf.gz"
+    hprv_run -- bcftools view -r "$c" -Oz -o "$sub" "$SITES"
+    log "  [$c] VEP ($(count_variants "$sub") sites)"
+    hprv_run -- vep "${vep_args[@]}" -i "$sub" -o "$out"
+    require_intact_bgzip "$out"; mark_done "$out"; rm -f "$sub"
+}
+# Verify EVERY expected shard is complete, then concat (file order = sorted) into $vep_vcf. The
+# verify IS the coherence guarantee: gather never builds a PARTIAL call set even if a scheduler
+# dependency misfires. Dies loudly, naming what is missing.
+gather_shards() {  # writes $vep_vcf
+    local sd; sd="$(shard_dir)"
+    local list="$sd/concat.list"; : > "$list"
+    local c so missing=0
+    while IFS= read -r c; do
+        so="$sd/vep.${c}.vcf.gz"
+        if is_done "$so"; then printf '%s\n' "$so" >> "$list"
+        else warn "gather: shard for contig '$c' is missing/incomplete: $so"; missing=$((missing + 1)); fi
+    done < <(enum_contigs)
+    [[ -s "$list" ]] || die "gather: no completed shards under $sd — run the scatter first"
+    [[ "$missing" -eq 0 ]] || die "gather: $missing contig shard(s) missing/incomplete — the call set \
+would be PARTIAL. Re-run the scatter (only contigs without a .done re-run), then gather again."
+    log "Step 2: gather — concatenating $(wc -l < "$list" | tr -d ' ') annotated contig shards"
+    hprv_run -- bcftools concat -f "$list" -Oz -o "$vep_vcf"
+    require_intact_bgzip "$vep_vcf"
+}
+
+# --emit-shard-manifest: write the ordered contig list (the array indexes into it) and exit.
+if is_set "$EMIT_MANIFEST"; then
+    [[ -f "$SITES.tbi" || -f "$SITES.csi" ]] || die "--emit-shard-manifest needs an indexed --sites"
+    enum_contigs > "$EMIT_MANIFEST"
+    _n="$(wc -l < "$EMIT_MANIFEST" | tr -d ' ')"
+    [[ "$_n" -gt 0 ]] || die "no contigs with variants in $SITES"
+    log "Step 2: wrote $_n-contig shard manifest -> $EMIT_MANIFEST"
+    exit 0
+fi
 
 if is_set "$PRE_VEP"; then
     # Ingest mode: someone else already ran VEP. Verify it is the right build rather than
@@ -94,8 +170,17 @@ if is_set "$PRE_VEP"; then
     esac
     vep_vcf="$PRE_VEP"
     audit 02_annotate input_sites "$n_sites"
+elif [[ "$GATHER" -eq 1 ]]; then
+    # --- gather-only (the SLURM dependent job): no VEP here ---
+    # Verify every contig shard the scatter was supposed to produce, concat them into the
+    # whole-union VCF, then fall through to split-vep + the guards + output exactly as a single
+    # run would. gather_shards() dies loudly if any shard is missing, so this never builds a
+    # partial call set even if the scheduler dependency misfired.
+    n_sites="$(count_variants "$SITES")"
+    audit 02_annotate input_sites "$n_sites"
+    gather_shards
 else
-    # --- assemble the VEP command ---
+    # --- assemble the VEP command (shared by --shard-contig and the in-process scatter) ---
     # The cache supplies gnomAD v4.1 per-population AFs and ClinVar CLIN_SIG; CADD is the one
     # plugin. --flag_pick (not --pick) keeps EVERY consequence block and merely marks the chosen
     # one PICK=1, which lets split-vep below choose the selection rule — and keeps this output
@@ -121,65 +206,44 @@ else
         vep_args+=(--plugin "CADD,snv=${HPRV_CADD_SNV},indels=${HPRV_CADD_INDEL}")
     else warn "CADD plugin not configured — with no CADD there is NO functional evidence for any variant VEP rates below MODERATE (intronic/synonymous/UTR/regulatory); the screen degrades to an impact-only filter"; fi
 
+    if is_set "$SHARD_CONTIG"; then
+        # --- scatter (one SLURM array task): annotate a single contig -> shard + .done, then stop.
+        # No split-vep, no gather, no $OUT — the dependent gather job assembles the whole. Idempotent
+        # via the shard .done, so requeuing the array re-runs only the contigs that did not finish.
+        log "Step 2: scatter — VEP for contig '$SHARD_CONTIG' only (VEP r${VEP_VERSION})."
+        annotate_one_contig "$SHARD_CONTIG"
+        exit 0
+    fi
+
     n_sites="$(count_variants "$SITES")"
     # VEP runs over the deduplicated cohort union — once per contig, never per trio. Per-trio
     # steps (Step 4) transfer these annotations with `bcftools annotate`; they do not re-run VEP.
     # This is the single most expensive operation in the pipeline (WGS: ~57M sites, ~a day).
     audit 02_annotate input_sites "$n_sites"
 
-    # --- shard the VEP call BY CONTIG for walltime-resumability --------------------------------
-    # Rationale (real failure): one --fork run over a WGS union is single-node AND un-resumable —
-    # a job killed at the scheduler walltime re-annotates all 57M sites from scratch. Sharding by
-    # contig makes each contig an independent VEP run with its own `.done` sentinel, so a killed
-    # job RESUMES (re-submit -> finished contigs skipped), and the shards can be driven as a SLURM
-    # array (one contig per task) for real multi-node parallelism.
-    #
-    # CORRECTNESS — this must stay byte-identical to a single run, because it feeds the published
-    # call set. So ONLY the `vep` call is sharded: the raw per-contig VEP VCFs are concatenated
-    # back into $vep_vcf, and EVERYTHING downstream (split-vep, the selector/version guard, the
-    # frequency-present check, the output) runs once on the reassembled whole, exactly as before.
-    #   * VEP's --flag_pick decision is per-variant, so a region split cannot change any CSQ.
-    #   * `bcftools index -s` lists contigs-with-variants IN FILE (= reference/coordinate) order,
-    #     so concatenating the shards in that order reproduces a globally-sorted VCF with no
-    #     re-sort, and the frequency guard never sees a shard (no per-shard false-fail).
+    # --- in-process shard the VEP call BY CONTIG for walltime-resumability ---------------------
+    # One --fork run over a WGS union is single-node AND un-resumable — a job killed at the
+    # scheduler walltime re-annotates all 57M sites from scratch. Sharding by contig makes each an
+    # independent VEP run with its own `.done`, so a killed job RESUMES (finished contigs skipped);
+    # for multi-node parallelism drive the SAME shard functions as a SLURM array (--shard-contig /
+    # --gather; see pipeline/slurm/). CORRECTNESS: this stays byte-identical to a single run —
+    # only the vep call is sharded, split-vep and the guards run once on the reassembled whole.
     # A sharded==single equivalence test guards this (tests/integration).
     case "${HPRV_VEP_SHARD_BY_CONTIG:-1}" in 1|true|yes|on) vshard=1;; *) vshard=0;; esac
     if [[ "$vshard" -eq 1 && ( -f "$SITES.tbi" || -f "$SITES.csi" ) ]]; then
-        vsdir="$HPRV_TMPDIR/vep_shards"; mkdir -p "$vsdir"
         shard_tags=()
-        while IFS=$'\t' read -r _c _len _n; do
-            [[ "${_n:-0}" -gt 0 ]] && shard_tags+=("$_c")
-        done < <(hprv_run -- bcftools index -s "$SITES")
+        while IFS= read -r _c; do shard_tags+=("$_c"); done < <(enum_contigs)
         [[ ${#shard_tags[@]} -gt 0 ]] || die "Step 2: no contigs with variants in $SITES"
-        log "Step 2: VEP-annotating the union sharded by contig — ${#shard_tags[@]} shards, \
-$n_sites sites (VEP r${VEP_VERSION}). Each shard has its own .done, so a walltime kill RESUMES."
-        n_done=0
-        concat_list="$vsdir/concat.list"; : > "$concat_list"
-        for _c in "${shard_tags[@]}"; do
-            shard_out="$vsdir/vep.${_c}.vcf.gz"
-            printf '%s\n' "$shard_out" >> "$concat_list"
-            if is_done "$shard_out"; then n_done=$((n_done + 1)); log "  [$_c] cached (resume)"; continue; fi
-            shard_in="$vsdir/sites.${_c}.vcf.gz"
-            hprv_run -- bcftools view -r "$_c" -Oz -o "$shard_in" "$SITES"
-            log "  [$_c] VEP ($(count_variants "$shard_in") sites)"
-            hprv_run -- vep "${vep_args[@]}" -i "$shard_in" -o "$shard_out"
-            require_intact_bgzip "$shard_out"
-            mark_done "$shard_out"
-            rm -f "$shard_in"
-        done
-        [[ "$n_done" -eq 0 ]] || log "Step 2: resumed — $n_done/${#shard_tags[@]} contig shards were already complete"
-        # Gather: plain concat in file (= reference) order. Shards are disjoint contigs, each
-        # internally sorted, so the result is globally sorted and needs no re-sort. The per-shard
-        # ##VEP-command-line headers differ (different -i); harmless — downstream reads only the
-        # CSQ Format line, which is data-independent and identical across shards.
-        log "Step 2: concatenating ${#shard_tags[@]} annotated contig shards -> whole-union VCF"
-        hprv_run -- bcftools concat -f "$concat_list" -Oz -o "$vep_vcf"
+        log "Step 2: VEP sharded by contig — ${#shard_tags[@]} shards, $n_sites sites (VEP \
+r${VEP_VERSION}). Each shard has its own .done, so a walltime kill RESUMES."
+        for _c in "${shard_tags[@]}"; do annotate_one_contig "$_c"; done
+        gather_shards
     else
         [[ "$vshard" -eq 1 ]] && warn "Step 2: $SITES is unindexed — cannot shard by contig; annotating in one un-resumable pass"
         log "Step 2: VEP-annotating the union in ONE pass — $n_sites sites (VEP r${VEP_VERSION})."
         hprv_run -- vep "${vep_args[@]}" -i "$SITES" -o "$vep_vcf"
+        require_intact_bgzip "$vep_vcf"
     fi
-    require_intact_bgzip "$vep_vcf"
 fi
 
 # --- split-vep: lift only the CSQ fields that are actually present to INFO ---
