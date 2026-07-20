@@ -84,8 +84,15 @@ case "$PHASE" in
         rp --from 2 --to 2 --annotate-gather
         ;;
     downstream)
-        log "Steps 3-8 (select .. igv)"
-        rp --from 3 --to 8
+        # Range is configurable (DOWN_FROM..DOWN_TO, default 3..8). Some sites must stop the
+        # distributed graph at Step 7 and run Step 8 (mini-CRAM/igv export) elsewhere — e.g. the
+        # source CRAM store is a FUSE mount visible only on login/interactive nodes, not batch
+        # compute. Set DOWN_TO=7 in cluster.env and run Step 8 separately (see slurm/README.md).
+        df="${DOWN_FROM:-3}"; dt="${DOWN_TO:-8}"
+        [[ "$df" =~ ^[0-9]+$ && "$dt" =~ ^[0-9]+$ && "$df" -ge 3 && "$dt" -le 8 && "$df" -le "$dt" ]] \
+            || { echo "phase.sbatch: DOWN_FROM..DOWN_TO must satisfy 3<=FROM<=TO<=8 (got '$df'..'$dt')" >&2; exit 2; }
+        log "Steps $df-$dt"
+        rp --from "$df" --to "$dt"
         ;;
     *)
         echo "phase.sbatch: unknown phase '$PHASE'" >&2; exit 2;;
