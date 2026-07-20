@@ -47,6 +47,10 @@ bgzip -f "$W/cohort.sites.vep.vcf"; tabix -f -p vcf "$W/cohort.sites.vep.vcf.gz"
 #     mock config), so its build checks + split-vep + selector + frequency guard all execute. ---
 bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 2 --to 8
 
+# --- Step 2 by-contig sharding must equal a single pass (feeds the published call set) ---
+# Exercises Step 2's REAL vep path (a `vep` shim) over the same multi-contig union, sharded vs not.
+bash "$HERE/assert_shard_equivalence.sh" "$WORK/cohort.sites.vcf.gz" "$W/annot.tsv" "$W/reference.fa"
+
 # --- assertions ---
 python3 "$HERE/assert_integration.py" --work "$WORK"
 echo "== integration run complete: $WORK =="
