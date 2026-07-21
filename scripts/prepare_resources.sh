@@ -106,10 +106,15 @@ get_free() {
     local id="$1" url="$2" out="$3" sha="${4:-}"
     if [[ -f "$out" ]] && sha_ok "$out" "$sha"; then log "[$id] cached"; record skip "$id"; return 0; fi
     log "[$id] downloading -> $out"
-    if ! fetch_to "$url" "$out"; then
-        case $? in 3) warn "[$id] URL not pinned in manifest.env — skipping";;
-                   4) warn "[$id] required downloader (curl/wget/gsutil/aws) missing";;
-                   *) warn "[$id] download failed";; esac
+    # Capture fetch_to's REAL exit code. Inside `if ! fetch_to ...; then`, `$?` is the status of
+    # the negated compound (always 0), so the per-code diagnostics were unreachable and every
+    # failure printed the generic "download failed". `if ...; else rc=$?` reads the true code.
+    local rc=0
+    if fetch_to "$url" "$out"; then :; else rc=$?; fi
+    if (( rc )); then
+        case $rc in 3) warn "[$id] URL not pinned in manifest.env — skipping";;
+                    4) warn "[$id] required downloader (curl/wget/gsutil/aws) missing";;
+                    *) warn "[$id] download failed";; esac
         record miss "$id"; return 1
     fi
     sha_ok "$out" "$sha" || { record miss "$id"; return 1; }
@@ -290,6 +295,26 @@ prep_cadd() {
 
 # -------- verify ------------------------------------------------------------ #
 verify_one() { [[ -e "$1" ]] && log "  ok   $2" || { warn "  MISS $2 ($1)"; MISSING+=("$2"); }; }
+# Existence is NOT enough for the big UNCHECKSUMMED downloads (CADD ~81 GB): the manifest carries
+# no usable sha for them, so get_free accepts any existing file as "cached" — an interrupted
+# download is silently reused. For CADD that is the quiet science-loss path: VEP's tabix returns
+# no score past the truncation, and CADD is the ONLY keep-path below MODERATE impact, so those
+# variants vanish from the screen with no error. So integrity-check the compressed targets — a
+# complete bgzip/gzip stream AND a tabix index — degrading to a warn if no (b)gzip is on PATH.
+_gz_intact() {  # 0 if $1 is a complete gz/bgzip stream (or no tool to check with)
+    if need bgzip; then bgzip -t "$1" 2>/dev/null && return 0 || return 1; fi
+    if need gzip;  then gzip  -t "$1" 2>/dev/null && return 0 || return 1; fi
+    warn "no bgzip/gzip to integrity-check $1 — skipping (install htslib or gzip to enable)"; return 0
+}
+verify_one_intact() {  # PATH ID — existence + (for .gz) complete stream + tabix index
+    local f="$1" id="$2"
+    if [[ ! -e "$f" ]]; then warn "  MISS $id ($f)"; MISSING+=("$id"); return; fi
+    if ! _gz_intact "$f"; then
+        warn "  BAD  $id ($f) — truncated/corrupt compressed stream; delete it and re-fetch"; MISSING+=("$id"); return; fi
+    if [[ ! -f "$f.tbi" && ! -f "$f.csi" ]]; then
+        warn "  BAD  $id ($f) — no .tbi/.csi index; VEP's per-variant tabix reads would fail. Re-fetch the index."; MISSING+=("$id"); return; fi
+    log "  ok   $id (stream + index intact)"
+}
 # Present-but-not-required: report, never fail. These back the roadmap restorations
 # (docs/ROADMAP.md "Restoring the VEP-only contract's gaps"); no step reads them today.
 verify_extra() { [[ -e "$1" ]] && log "  ok   $2 (extra; not used by the pipeline)" || log "  --   $2 not prepared (not required)"; }
@@ -298,9 +323,12 @@ do_verify() {
     # REQUIRED = exactly what the VEP-only contract consumes. Verifying gnomAD/ClinVar/LOFTEE
     # here would fail every correctly-configured user, since nothing fetches or reads them.
     verify_one "$REF_FASTA_OUT" reference
+    # Step 1's `norm -f` and VEP's --fasta both need the .fai; a run must not pass verify without it.
+    if [[ -e "$REF_FASTA_OUT" && ! -f "$REF_FASTA_OUT.fai" ]]; then
+        warn "  BAD  reference (no .fai next to $REF_FASTA_OUT — run: samtools faidx $REF_FASTA_OUT)"; MISSING+=("reference_fai"); fi
     verify_one "$VEP_CACHE_OUT/homo_sapiens" vep_cache
-    verify_one "$CADD_SNV_OUT" cadd_snv
-    verify_one "$CADD_INDEL_OUT" cadd_indel
+    verify_one_intact "$CADD_SNV_OUT" cadd_snv
+    verify_one_intact "$CADD_INDEL_OUT" cadd_indel
     verify_one "$CONSTRAINT_OUT" constraint
     verify_extra "$GNOMAD_OUT" gnomad_sites
     verify_extra "$CLINVAR_OUT" clinvar
