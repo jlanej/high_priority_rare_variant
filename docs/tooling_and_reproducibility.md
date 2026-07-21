@@ -7,8 +7,8 @@ How this pipeline packages its tools, builds and publishes a signed container in
 
 ## TL;DR
 
-- **One image**, not many: `FROM mambaorg/micromamba@sha256:...` (digest, never a tag) plus a **conda-lock** lockfile so every rebuild installs byte-identical artifacts.
-- **Pinned tool set:** bcftools / htslib / samtools **1.22** (matches the group's validated VEP-era setup; overridable), bedtools **2.31.1**, vcfanno **0.3.3**, slivar **0.3.4**, **ensembl-vep 115**, plus Python `cyvcf2` / `pysam` / `pandas` / `numpy` — all lock-pinned.
+- **One image**, not many: `FROM ensemblorg/ensembl-vep:release_115.0` (the group's validated VEP base image) with a micromamba layer (`env/environment.yml`) for the CLI/Python tools. **conda-lock** hash-pinning for byte-identical rebuilds is a **TARGET** — today `environment.yml` pins versions, not hashes (see [Base image and dependency pinning](#base-image-and-dependency-pinning)).
+- **Pinned tool set:** bcftools / htslib / samtools **1.23** (not 1.22 — slivar 0.3.4 on bioconda needs htslib ≥ 1.23.1), bedtools **2.31.1**, vcfanno **0.3.3**, slivar **0.3.4**, whatshap **2.3**, somalier **0.2.19**, plus Python `cyvcf2` / `pysam` / `pandas` / `numpy` / `scipy` — all version-pinned in `environment.yml`. **ensembl-vep 115** comes from the **base image**, not conda.
 - **VEP cache is external:** release-matched to the VEP binary, bind-mounted at runtime, **never baked into the image** (species/assembly/release-specific, multi-GB).
 - **CI:** buildx → **GHCR** on each commit, tagged by git SHA + branch, `provenance: true` + `sbom: true` and `actions/attest-build-provenance` (SLSA Build L3). **amd64-only.** Consumers pull by `@sha256:` digest, never `:latest`.
 - **Apptainer:** point `APPTAINER_TMPDIR`/`APPTAINER_CACHEDIR` at real node-local scratch; **avoid `--containall`** (tmpfs `/tmp` OOMs heavy VEP/bcftools sorts); `--cleanenv`; bind read-only refs.
@@ -29,11 +29,11 @@ The tension: **VEP is heavy** (Perl + Ensembl API + BioPerl + external caches) w
 
 | Pattern | Reproducibility | When to use |
 | --- | --- | --- |
-| **Single conda/micromamba image (recommended)** | High — one lockfile, one package manager | Monolithic driver-script pipeline (this project's default) |
-| `FROM ensemblorg/ensembl-vep` + layer tools on top | Medium — VEP exactly as upstream ships, but two package managers to lock | Only if you hit VEP-on-conda plugin/Perl-dep breakage |
+| **`FROM ensemblorg/ensembl-vep` + micromamba layer (this project's choice)** | Medium — VEP exactly as upstream ships + a version-pinned conda layer for the CLI/Python tools; two package managers to pin | **Chosen here:** VEP's Perl/plugin stack is finicky to reproduce on conda, so it is taken from the group's validated upstream image |
+| Single conda/micromamba image | High — one lockfile, one package manager | A pure-conda toolchain with no heavy Perl/plugin dependency |
 | biocontainers, one image per tool | High per-tool (each is one bioconda package, versioned + hashed) | If a **workflow manager** pulls one container per process |
 
-**Recommended: one conda-lock/micromamba image.** Build `FROM mambaorg/micromamba@sha256:...` pinned **by digest, not tag** — tags mutate, digests do not (micromamba-docker's own docs recommend `FROM ...@sha256:` for reproducible rebuilds). Install everything (including `ensembl-vep`, which has a bioconda recipe) from a **conda-lock lockfile**, not a loose `environment.yml`. A plain version string does *not* guarantee the identical package file; conda-lock pins each package with a checksum/hash, so `micromamba create --file conda-lock.yml` skips the solver and installs byte-identical artifacts on every rebuild.
+**What this project builds: `FROM ensemblorg/ensembl-vep:release_115.0` + a micromamba layer.** VEP's Perl + Ensembl API + plugin stack is finicky to reproduce on conda (bioconda's `perl` even shadows VEP's — the Dockerfile deletes it after the solve so `env perl` resolves to the base image's Perl), so VEP comes from the group's validated upstream image and the CLI/Python tools are layered on from `env/environment.yml`. Two hardening steps are **TARGET**, not yet done: pin the base image **by `@sha256:` digest** (the Dockerfile currently pins the tag `release_115.0`, and CI records the resolved digest for consumers to pull by), and generate a **conda-lock** lockfile so the micromamba layer installs byte-identical package files — a plain version string does *not* guarantee the identical artifact; conda-lock pins each package with a hash. Both are tracked in `env/environment.yml` and CLAUDE.md's Open TODOs.
 
 Adopt **biocontainers** only if you move to a workflow manager (see below), where one container per process is the natural granularity.
 
@@ -49,12 +49,12 @@ The VEP cache is species/assembly/release-specific and multi-GB. Baking it into 
 
 | Tool | Pinned version | Note |
 | --- | --- | --- |
-| bcftools / htslib / samtools | **1.22** | Matches the group's validated VEP-era setup; **overridable**. Keep all three htslib-linked tools on the same release. 1.23 is a newer line; the pin is deliberate, not stale. |
+| bcftools / htslib / samtools | **1.23** | `env/environment.yml` pins **1.23** (not 1.22): slivar 0.3.4 on bioconda is built against htslib ≥ 1.23.1, and bcftools/samtools 1.23 resolve htslib to the same 1.23.1. Keep all three htslib-linked tools on the same release. |
 | bedtools | **2.31.1** | Latest stable (Nov 2023); fixes GCC-13 builds. |
 | vcfanno | **0.3.3** | — |
 | slivar | **0.3.4** | Ships prebuilt static binaries + a bioconda recipe; pin the exact tag. |
-| ensembl-vep | **115** | Matches the group's working annotate script. Do **not** float VEP — annotation output changes between releases. (Ensembl 116 exists as of June 2026; 115 is the pinned default.) |
-| Python: `cyvcf2`, `pysam`, `pandas`, `numpy` | lock-pinned | Link `pysam`'s bundled htslib to the **same 1.22 line** as the CLI tools. |
+| ensembl-vep | **115** | From the **base image** (`ensemblorg/ensembl-vep:release_115.0`), **not** conda. Do **not** float VEP — annotation output changes between releases. (Ensembl 116 exists as of June 2026; 115 is the pinned default.) |
+| Python: `cyvcf2`, `pysam`, `pandas`, `numpy`, `scipy` | version-pinned in `environment.yml` | Link `pysam`'s bundled htslib to the **same 1.23 line** as the CLI tools. |
 
 > **Related tooling versions (pinned elsewhere in the reference):** phenotype ranking uses **Exomiser 15.1.0** (June 2026; 15.0.0 was Feb 2026), which requires **Java 21** — pin the binary together with its *matching* Exomiser data release (do not pair a 15.x binary with the older `2406` data bundle, which targets Exomiser 14). See [gene lists & phenotype](gene_lists_and_phenotype.md). VEP r113 (Oct 2024) already updated its built-in gnomAD annotations to v4.1; if you rely on VEP's bundled gnomAD, note the release alignment.
 

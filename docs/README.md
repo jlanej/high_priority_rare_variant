@@ -138,7 +138,9 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   [Frequency oracle](#frequency-oracle--implemented), **not** `faf95`), functional **het**
   transmitted from ≥ 1 parent (origin recorded) — the recurrence signal Step 6 consolidates.
 - **Recessive**: homozygous, or **compound het** = two rare hets, same gene, in **trans**
-  (parent-of-origin; WhatsHap fallback).
+  (parent-of-origin from trio genotypes; read-backed **WhatsHap** phasing is a **TARGET**, not
+  wired — a pair whose second hit is a de novo is emitted but flagged `unphased_denovo_partner`,
+  since trio genotypes cannot phase a de novo against an inherited variant).
 - **X-linked recessive**: male hemizygous + carrier mother; sex-aware ploidy, drop male non-PAR
   het calls; kid sex inferred from chrX heterozygosity when the PED is unknown.
 - **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
@@ -195,11 +197,14 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   proband is a dependency, degrade gracefully when sparse.
 
 ### Reproducibility / tooling
-- One image `FROM mambaorg/micromamba@sha256:...` + **conda-lock**. Pin bcftools/htslib/samtools
-  **1.22**, bedtools **2.31.1**, vcfanno **0.3.3**, slivar **0.3.4**, **ensembl-vep 115**, Python
-  cyvcf2/pysam/pandas/numpy. VEP cache **external, release-matched**. CI → **GHCR** per commit
-  (buildx, provenance + SBOM, tag by SHA, amd64). Apptainer: real-disk `TMPDIR`, **no
-  `--containall`**, `--cleanenv`. **No hard paths / no PHI / dbGaP-safe.**
+- One image `FROM ensemblorg/ensembl-vep:release_115.0` (VEP comes from the group's validated base
+  image, **not** conda) with a micromamba layer (`env/environment.yml`) for the CLI/Python tools:
+  bcftools/htslib/samtools **1.23** (not 1.22 — slivar 0.3.4 needs htslib ≥ 1.23.1), bedtools
+  **2.31.1**, vcfanno **0.3.3**, slivar **0.3.4**, whatshap **2.3**, somalier **0.2.19**, Python
+  cyvcf2/pysam/pandas/numpy/scipy. **conda-lock** (byte-identical, hash-pinned rebuilds) is a
+  **TARGET** — today the env pins versions, not hashes. VEP cache **external, release-matched**. CI
+  → **GHCR** per commit (buildx, provenance + SBOM, tag by SHA, amd64). Apptainer: real-disk
+  `TMPDIR`, **no `--containall`**, `--cleanenv`. **No hard paths / no PHI / dbGaP-safe.**
 
 ### Scope boundaries & known limitations
 **De novo** filtering/review and **mtDNA heteroplasmy** are handled by **separate dedicated
