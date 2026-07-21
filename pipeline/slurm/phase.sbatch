@@ -12,11 +12,19 @@
 # =============================================================================
 set -euo pipefail
 PHASE="${1:?phase.sbatch needs a phase: prep|plan|scatter|gather|downstream}"
+# $HERE is RELIABLE only when this file is run directly (a test, or a manual invocation). Under
+# sbatch it is NOT: SLURM copies the batch script into the job spool dir and runs it as
+# `slurm_script`, so ${BASH_SOURCE[0]} points at /var/spool/slurmd/job<ID>/, not this file on
+# shared storage. The `plan` phase therefore re-submits by $SLURM_DIR (below), which
+# submit_slurm.sh resolved on the login node and carried through slurm_run.env — never by $HERE.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${HPRV_WORK:?HPRV_WORK must be exported (submit_slurm.sh does this via --export)}"
 # shellcheck source=/dev/null
-source "$HPRV_WORK/slurm_run.env"   # HPRV_CONFIG, container + resource settings (written at submit)
+source "$HPRV_WORK/slurm_run.env"   # HPRV_CONFIG, container + resource settings, HPRV_SLURM_DIR
+# The real shared-storage dir of this script (see comment above). Falls back to $HERE for a direct
+# (non-sbatch) invocation, where $HERE is correct.
+SLURM_DIR="${HPRV_SLURM_DIR:-$HERE}"
 
 log() { printf '[phase:%s %s] %s\n' "$PHASE" "$(date +%H:%M:%S)" "$*" >&2; }
 
@@ -49,23 +57,29 @@ case "$PHASE" in
         rp --from 2 --to 2 --annotate-emit-manifest "$MANIFEST"
         n="$(wc -l < "$MANIFEST" | tr -d '[:space:]')"
         [[ "$n" -gt 0 ]] || { echo "plan: empty contig manifest" >&2; exit 1; }
+        # Re-submit by $SLURM_DIR, NOT $HERE — under sbatch $HERE is the job spool dir (see top).
+        # Guard it: a wrong path here surfaces as sbatch's cryptic "Unable to open file", after the
+        # whole graph is otherwise wired, so fail early and clearly instead.
+        SELF="$SLURM_DIR/phase.sbatch"
+        [[ -f "$SELF" ]] || { echo "plan: cannot re-submit — $SELF not found (HPRV_SLURM_DIR wrong? \
+is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         log "submitting scatter array of $n contigs (max ${SCATTER_CONCURRENCY} concurrent) + gather + downstream"
         arr=$(sbatch --parsable \
                 --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" ${SLURM_QOS:+--qos="$SLURM_QOS"} \
                 --cpus-per-task="$SCATTER_CPUS" --mem="$SCATTER_MEM" --time="$SCATTER_TIME" \
                 --array=0-$((n - 1))%"${SCATTER_CONCURRENCY}" \
                 --export=ALL,HPRV_WORK="$HPRV_WORK" \
-                --job-name=hprv-scatter "$HERE/phase.sbatch" scatter)
+                --job-name=hprv-scatter "$SELF" scatter)
         gath=$(sbatch --parsable --dependency=afterok:"$arr" \
                 --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" ${SLURM_QOS:+--qos="$SLURM_QOS"} \
                 --cpus-per-task="$GATHER_CPUS" --mem="$GATHER_MEM" --time="$GATHER_TIME" \
                 --export=ALL,HPRV_WORK="$HPRV_WORK" \
-                --job-name=hprv-gather "$HERE/phase.sbatch" gather)
+                --job-name=hprv-gather "$SELF" gather)
         down=$(sbatch --parsable --dependency=afterok:"$gath" \
                 --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" ${SLURM_QOS:+--qos="$SLURM_QOS"} \
                 --cpus-per-task="$DOWN_CPUS" --mem="$DOWN_MEM" --time="$DOWN_TIME" \
                 --export=ALL,HPRV_WORK="$HPRV_WORK" \
-                --job-name=hprv-down "$HERE/phase.sbatch" downstream)
+                --job-name=hprv-down "$SELF" downstream)
         log "submitted scatter=$arr gather=$gath downstream=$down"
         printf 'scatter %s\ngather %s\ndownstream %s\n' "$arr" "$gath" "$down" > "$HPRV_WORK/slurm_jobids.txt"
         ;;
