@@ -115,7 +115,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   matrix is ever built.
 - **Step 5 output**: `candidates.calls.tsv` (one row per candidate; `mode` ∈ `dominant`
   (inherited het; `flags=origin=mat|pat|both`), `hom_recessive`, `compound_het` (pairs share a
-  `pair_id`), `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). Modes are configured in
+  `pair_id`; a pair whose second hit is a de novo is unphaseable from trio genotypes and carries
+  `flags=unphased_denovo_partner`), `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). Modes are configured in
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
   `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), constraint columns; ranked

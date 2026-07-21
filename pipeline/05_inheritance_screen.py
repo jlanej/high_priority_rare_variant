@@ -226,12 +226,18 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     hets.setdefault(gene, []).append((origin, v, key))
 
     # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
+    # A mat×pat pair is trans BY DESCENT (confirmed). A pair with a DE NOVO leg is NOT phase-
+    # confirmed: trio genotypes cannot phase a de novo against an inherited variant (it is ~50/50
+    # cis/trans), and read-backed phasing (WhatsHap) is not wired here. Such a pair is still emitted
+    # — a de novo second hit is biologically valid — but flagged `unphased_denovo_partner` so it is
+    # not read as a confirmed biallelic hit. See docs/inheritance_and_genotype_qc.md §3.3.
     consumed = set()
     pair_n = 0
     for gene, cands in hets.items():
         by = {"mat": [], "pat": [], "denovo": [], "both": []}
         for origin, v, key in cands:
             by[origin].append((v, key))
+        denovo_keys = {k for _, k in by["denovo"]}
         pairs = [(a, b) for a in by["mat"] for b in by["pat"] + by["denovo"]]
         pairs += [(a, b) for a in by["pat"] for b in by["denovo"]]
         for (va, ka), (vb, kb) in pairs:
@@ -239,8 +245,12 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             pid = f"{trio_id}:CH{pair_n}"
             consumed.add(ka)
             consumed.add(kb)
+            unphased = ka in denovo_keys or kb in denovo_keys
             for v in (va, vb):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "compound_het", pid), v))
+                r = tag_strict(base_row(trio_id, v, gt, "compound_het", pid), v)
+                if unphased:
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "unphased_denovo_partner"
+                rows.append(r)
 
     # ---- dominant (inherited het): rare, functional, transmitted from >=1 parent,
     #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----
