@@ -30,6 +30,13 @@ $EDITOR cluster.env            # partition/account, container launch, per-phase 
 ./submit_slurm.sh cluster.env # run once, from a login node
 ```
 
+> **Prerequisite: `HPRV_CONFIG` must be a fully-resolved config (literal paths, not `${ENV}`
+> placeholders).** Every phase runs `apptainer exec --cleanenv`, which strips host env vars, so
+> `config.py` inside the container cannot expand `${REF_FASTA}` / `${VEP_CACHE}` / `${CADD_*}` and
+> `run_pipeline.sh` dies at preflight. Resolve the config once before submitting — e.g. source your
+> resource env (`prepare_resources.sh … emit-env`) and `envsubst < config.example.yaml > config.yaml`.
+> (An interactive `run_pipeline.sh` on a login node does *not* hit this, because it inherits your shell's env.)
+
 `submit_slurm.sh` prints the `prep` and `plan` job IDs. The scatter/gather/downstream
 IDs are chosen by `plan` at runtime — find them after `plan` runs in
 `$HPRV_WORK/slurm_jobids.txt`, or with `squeue -u $USER --name=hprv-scatter,hprv-gather,hprv-down`.
