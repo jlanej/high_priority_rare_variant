@@ -37,6 +37,11 @@ fi
 mkdir -p "$HPRV_WORK"
 # Snapshot the resolved settings where every phase job can read them (shared storage).
 cp "$ENVFILE" "$HPRV_WORK/slurm_run.env"
+# Carry THIS directory (resolved on the login node, where BASH_SOURCE is reliable) so the `plan`
+# phase can re-submit phase.sbatch by its real shared-storage path. Under sbatch, SLURM copies the
+# batch script into the job spool dir and runs it as slurm_script, so a BASH_SOURCE-derived path
+# inside a running job points at the spool — NOT here. See phase.sbatch (SLURM_DIR).
+printf 'HPRV_SLURM_DIR=%q\n' "$HERE" >> "$HPRV_WORK/slurm_run.env"
 
 sb() { sbatch --parsable \
         --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" ${SLURM_QOS:+--qos="$SLURM_QOS"} \

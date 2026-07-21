@@ -51,6 +51,12 @@ jobs:
       - name: Pure-logic tests
         run: python tests/test_pure.py
 
+      # SLURM `plan` self-resubmit path (pure bash, no scheduler needed). Guards the
+      # sbatch-spool-copy gotcha: under sbatch, BASH_SOURCE points at the job spool dir, so the
+      # graph must re-submit by the shared-storage path carried through slurm_run.env, not $HERE.
+      - name: SLURM plan-resubmit regression test
+        run: bash tests/slurm/test_plan_resubmit_path.sh
+
       # The image bakes in resources/manifest.env, and prepare_resources.sh reads it by a path
       # relative to itself. .gitignore's `resources/` rule silently swallowed the manifest for
       # most of this repo's life (fixed in e2c09f0): it existed on every dev box, so nothing
