@@ -51,6 +51,33 @@ warn()  { printf '[%s] WARN: %s\n' "$(_hprv_ts)" "$*" >&2; }
 die()   { printf '[%s] ERROR: %s\n' "$(_hprv_ts)" "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------- #
+# Directory must exist AND be writable. `mkdir -p` is NOT sufficient: on an
+# ALREADY-EXISTING directory it returns success even when the filesystem is
+# read-only, so a bad tmpdir/output dir sails through startup and only explodes
+# later, deep inside a step, as a cryptic tool error — e.g. Step 4's
+# `bcftools sort -T` failing with "mkdtemp(<tmpdir>/tmpXXXXXX) failed: Read-only
+# file system". Probe with a real write so it fails at second 1 instead.
+# --------------------------------------------------------------------------- #
+require_writable_dir() {  # $1 = dir, $2 = label for the error
+    local d="$1" label="$2" probe
+    mkdir -p "$d" 2>/dev/null || die "$label: cannot create '$d' — the parent is not writable \
+(read-only filesystem, or a path not bind-mounted into the container)"
+    [[ -d "$d" ]] || die "$label: '$d' exists but is not a directory"
+    probe="$d/.hprv_write_probe.$$"
+    # Subshell: a failed REDIRECTION is reported by the shell itself, so `2>/dev/null` on the
+    # command would not suppress it — only wrapping the redirection does. Keeps the operator's
+    # output to the one actionable message below.
+    if ! ( : > "$probe" ) 2>/dev/null; then
+        die "$label: '$d' is NOT WRITABLE. Inside a container this almost always means the path \
+is not bind-mounted (so it resolves to the image's read-only filesystem) — add it to your \
+apptainer --bind list, or point the config at a bound, writable path. Other causes: \
+--containall (do not use it; see CLAUDE.md), a filesystem remounted read-only after an error, \
+or an exhausted quota. Probe it yourself with: touch '$d/probe'"
+    fi
+    rm -f "$probe"
+}
+
+# --------------------------------------------------------------------------- #
 # Runtime detection
 # --------------------------------------------------------------------------- #
 hprv_detect_runtime() {
