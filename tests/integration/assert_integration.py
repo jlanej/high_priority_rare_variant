@@ -119,6 +119,19 @@ def main(argv=None) -> int:
     check(genec and all(r["mode"] != "compound_het" for r in genec),
           "cis (same-parent) GENEC pair NOT called compound_het")
     check(any(r["mode"] == "dominant" for r in genec), "cis GENEC variants emitted as dominant instead")
+    # --- A HOM-ALT transmitting parent makes parent-of-origin DETERMINISTIC (a 1/1 parent transmits
+    # the alt obligately, so a HET child took the alt from it and the ref from the other) — it is NOT
+    # the genuine 50/50 "both" case. Collapsing it to "both" barred the pair from trans-pairing, and
+    # since both legs sit at 3e-3 (inside the recessive band, above the 1e-4 dominant gate) neither
+    # could fall through to a dominant call either — a phase-CONFIRMED biallelic hit vanished under
+    # NO mode at all. This is the regression test for that. ---
+    homalt = [r for r in calls if r["trio_id"] == "CH_A" and r["symbol"] == "GENEHOMALT"]
+    check(len([r for r in homalt if r["mode"] == "compound_het"]) == 2,
+          "HOM-ALT-parent comp-het: obligate maternal transmission yields a trans PAIR in GENEHOMALT")
+    check(len({r["pair_id"] for r in homalt if r["mode"] == "compound_het"}) == 1,
+          "both GENEHOMALT legs share one pair_id (one genuine trans pair)")
+    check(all("origin_unverified" not in (r.get("flags") or "") for r in homalt),
+          "GENEHOMALT pair is phase-CONFIRMED (both parents observed) — no origin_unverified flag")
     check(has("CH_B", "denovo", "chr1", 5100, "GENE1"), "CH_B de novo GENE1 (secondary)")
     check(has("CH_B", "x_linked_recessive", "chrX", 2781600, "GENEX"), "CH_B X-linked recessive GENEX")
     # X-linked recessive must fire even with an AFFECTED (hom-alt) father (father's chrX not

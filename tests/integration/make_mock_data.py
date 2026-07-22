@@ -177,6 +177,21 @@ add(file="A", chrom="chr2", pos=16100, gene="GENEC", csq="missense_variant", imp
     af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 
+# --- comp-het with a HOM-ALT transmitting parent. A 1/1 parent transmits the alt OBLIGATELY, so
+#     for a HET child the parent of origin is DETERMINISTIC (the alt came from the 1/1 parent, the
+#     ref from the other) — it is NOT the 50/50 "both" case. Collapsing it to "both" barred the
+#     pair from trans-pairing, and because both alleles sit in the recessive band (3e-3 > the 1e-4
+#     dominant gate) neither leg could fall through to a dominant call either: a phase-CONFIRMED
+#     biallelic hit vanished from candidates.calls.tsv under NO mode at all. Expect a TRANS pair.
+#     (Highest-yield real instance is chrX, where a diploid caller renders a hemizygous carrier
+#     father as 1/1 — the autosomal form is modelled here.) ---
+add(file="A", chrom="chr2", pos=12000, gene="GENEHOMALT", csq="missense_variant", impact="MODERATE",
+    af=3e-3,   # mother 1/1 -> obligate maternal transmission -> origin must resolve to "mat"
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("1/1", 99, 40)})
+add(file="A", chrom="chr2", pos=12500, gene="GENEHOMALT", csq="missense_variant", impact="MODERATE",
+    af=3e-3,   # ordinary paternal het -> origin "pat"; pairs in trans with the maternal leg above
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
 # --- CADD-only keep: a deep-intronic MODIFIER with no impact-based evidence. CADD is the ONLY
 #     functional predictor left, so this is the sole path by which any non-coding variant can
 #     survive Step 3. If the CADD branch ever breaks, the screen silently goes coding-only and

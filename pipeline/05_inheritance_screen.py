@@ -130,6 +130,17 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
 
         # male non-PAR chrX/chrY = hemizygous; a het call there is a QC red flag
         male_x = G.is_sex_nonpar(v) and gt.child_male
+        # X-SPECIFIC. The hemizygous models below are keyed on the MOTHER's genotype, which is
+        # valid ONLY on chrX. On chrY the father is the sole transmitter and the mother has no Y
+        # at all, so routing chrY through them (a) reports father-to-son Y transmission as a de
+        # novo, since the father is never consulted, and (b) can attribute a Y allele to maternal
+        # transmission via x_linked_recessive — and with no gnomAD chrY AF in the VEP cache the
+        # rarity gate passes unconditionally, so recurrent Yq/X-transposed mismapping artifacts
+        # would land in Step 6's X-linked tier at the floored q. That is a bounded version of the
+        # chrM flood 01_make_cohort_sites.sh exists to prevent.
+        # `male_x` still guards the het-suppression rule below (hemizygous is true of BOTH
+        # chromosomes); `male_x_chrx` guards anything the mother's genotype drives.
+        male_x_chrx = G.is_x_nonpar(v) and gt.child_male
 
         # ---- de novo (SECONDARY / cross-reference only; review handled elsewhere) ----
         denovo_hit = False
@@ -137,7 +148,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             denovo_hit = True
         # male-X de novo: the son's single X comes from the MOTHER; the father transmits Y, so his
         # chrX is irrelevant — require only mother hom-ref, not the father.
-        elif emit_denovo and male_x and gc == G.HOM_ALT and gmm == G.HOM_REF:
+        elif emit_denovo and male_x_chrx and gc == G.HOM_ALT and gmm == G.HOM_REF:
             denovo_hit = True
         if denovo_hit:
             child_kind = "denovo_child" if not male_x else "hom_alt"
@@ -180,7 +191,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         # ---- X-linked recessive, affected male: hemizygous son + carrier mother. The father
         #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and is not
         #      required — an affected/carrier father or a father chrX no-call must not drop the call. ----
-        if male_x and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
+        if male_x_chrx and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
             if G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm) and rare(v, rec_max):
                 r = base_row(trio_id, v, gt, "x_linked_recessive")
                 if gd in (G.HET, G.HOM_ALT):
@@ -207,6 +218,17 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                           or (gmm == G.HOM_ALT and G.sample_qc(v, m, thr, "hom_alt")))
                 dad_ok = ((gd == G.HET and G.sample_qc(v, d, thr, "het"))
                           or (gd == G.HOM_ALT and G.sample_qc(v, d, thr, "hom_alt")))
+                # Trans-by-descent needs the NON-transmitting parent to be an affirmative,
+                # QC-confident hom-ref — the documented rule is "mat 0/1 + pat 0/0". A no-call or
+                # an unqualified 0/0 (allele dropout) there is NOT evidence of non-transmission:
+                # if that parent silently carries the allele too, a "mat x pat" pair can be CIS.
+                # We still emit (never-drop) but mark origin unverified, so an inferred pair is
+                # distinguishable from a phase-confirmed one. NB gt_types cannot be trusted to
+                # surface this on its own: with cyvcf2's default strict_gt=False a half-called
+                # `0/.` parent is reported as HOM_REF, not UNKNOWN — hence strict_gt=True below.
+                mom_clear = gmm == G.HOM_REF and G.sample_qc(v, m, thr, "hom_ref")
+                dad_clear = gd == G.HOM_REF and G.sample_qc(v, d, thr, "hom_ref")
+                unverified = False
                 if gmm == G.HOM_REF and gd == G.HOM_REF:
                     # only a genuinely de novo het may pair in trans; require BOTH parents to
                     # pass cleanliness QC, else a dropped-out parental het masquerades as de novo
@@ -214,16 +236,30 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     origin = ("denovo" if (G.sample_qc(v, m, thr, "clean_parent")
                                            and G.sample_qc(v, d, thr, "clean_parent")) else None)
                 elif mom_carries and dad_carries:
-                    origin = "both" if (mom_ok and dad_ok) else None
+                    # A HOM_ALT parent transmits the alt OBLIGATELY, so origin is deterministic:
+                    # a HET child of a 1/1 parent took the alt from that parent and the ref from
+                    # the other. Only HET x HET is a genuine 50/50 ("both", never paired below).
+                    # Collapsing these to "both" lost phase-CONFIRMED compound hets — most often
+                    # on chrX, where a diploid caller renders a hemizygous carrier father as 1/1.
+                    if gmm == G.HOM_ALT and gd == G.HET:
+                        origin = "mat" if (mom_ok and dad_ok) else None
+                    elif gd == G.HOM_ALT and gmm == G.HET:
+                        origin = "pat" if (mom_ok and dad_ok) else None
+                    elif gmm == G.HOM_ALT and gd == G.HOM_ALT:
+                        origin = None            # 1/1 x 1/1 -> a HET child is a Mendelian error
+                    else:
+                        origin = "both" if (mom_ok and dad_ok) else None
                 elif mom_carries:
                     origin = "mat" if mom_ok else None
+                    unverified = not dad_clear
                 elif dad_carries:
                     origin = "pat" if dad_ok else None
+                    unverified = not mom_clear
                 else:
                     origin = None                # a parent no-call — inheritance unestablished
                 if origin:
                     key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
-                    hets.setdefault(gene, []).append((origin, v, key))
+                    hets.setdefault(gene, []).append((origin, v, key, unverified))
 
     # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
     # A mat×pat pair is trans BY DESCENT (confirmed). A pair with a DE NOVO leg is NOT phase-
@@ -235,31 +271,43 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     pair_n = 0
     for gene, cands in hets.items():
         by = {"mat": [], "pat": [], "denovo": [], "both": []}
-        for origin, v, key in cands:
-            by[origin].append((v, key))
-        denovo_keys = {k for _, k in by["denovo"]}
+        for origin, v, key, unver in cands:
+            by[origin].append((v, key, unver))
+        denovo_keys = {k for _, k, _ in by["denovo"]}
         pairs = [(a, b) for a in by["mat"] for b in by["pat"] + by["denovo"]]
         pairs += [(a, b) for a in by["pat"] for b in by["denovo"]]
-        for (va, ka), (vb, kb) in pairs:
+        for (va, ka, ua), (vb, kb, ub) in pairs:
             pair_n += 1
             pid = f"{trio_id}:CH{pair_n}"
-            consumed.add(ka)
-            consumed.add(kb)
             unphased = ka in denovo_keys or kb in denovo_keys
+            # ONLY a phase-confirmed pair may veto the dominant model. An unphased de-novo-partner
+            # pair is explicitly "a candidate to confirm, not a confirmed biallelic hit", so
+            # letting it consume its legs silently deleted genuine dominant calls from the
+            # recurrence tally that Step 6 headlines.
+            if not unphased:
+                consumed.add(ka)
+                consumed.add(kb)
+            pair_flags = []
+            if unphased:
+                pair_flags.append("unphased_denovo_partner")
+            if ua or ub:
+                pair_flags.append("origin_unverified")
             for v in (va, vb):
                 r = tag_strict(base_row(trio_id, v, gt, "compound_het", pid), v)
-                if unphased:
-                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "unphased_denovo_partner"
+                for fl in pair_flags:
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + fl
                 rows.append(r)
 
     # ---- dominant (inherited het): rare, functional, transmitted from >=1 parent,
     #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----
     if emit_dominant:
         for gene, cands in hets.items():
-            for origin, v, key in cands:
+            for origin, v, key, unver in cands:
                 if origin in ("mat", "pat", "both") and key not in consumed and rare(v, dom_max):
                     r = base_row(trio_id, v, gt, "dominant")
                     r["flags"] = f"origin={origin}"
+                    if unver:
+                        r["flags"] += ";origin_unverified"
                     rows.append(r)
     return rows
 
@@ -305,7 +353,13 @@ def main(argv=None) -> int:
             else:
                 sys.stderr.write(f"WARN: {trio_id}: child sex unresolved (no Step-0 inference); "
                                  f"X/Y-linked modes skipped for this trio (autosomal modes still run)\n")
-        vcf = VCF(vcf_path)
+        # strict_gt=True is LOAD-BEARING for every "is this parent a no-call?" test below. With
+        # cyvcf2's default (strict_gt=False) a HALF-called genotype like `0/.` is reported as
+        # HOM_REF, not UNKNOWN — see cyvcf2 helpers.c as_gts(): "if a single allele is missing
+        # e.g 0/. it's still encoded as hom ref because it has no alts". That silently defeats the
+        # de novo requirement that both parents be CONFIDENTLY hom-ref, and makes a half-called
+        # parent look like an affirmative non-carrier when establishing compound-het trans.
+        vcf = VCF(vcf_path, strict_gt=True)
         try:
             gt = Trio(vcf, ped, thr)
         except KeyError as e:
