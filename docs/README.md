@@ -141,8 +141,13 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   (parent-of-origin from trio genotypes; read-backed **WhatsHap** phasing is a **TARGET**, not
   wired — a pair whose second hit is a de novo is emitted but flagged `unphased_denovo_partner`,
   since trio genotypes cannot phase a de novo against an inherited variant).
-- **X-linked recessive**: male hemizygous + carrier mother; sex-aware ploidy, drop male non-PAR
-  het calls; kid sex inferred from chrX heterozygosity when the PED is unknown.
+- **X-linked recessive**: affected male = hemizygous + carrier mother (the **father's chrX is not
+  required** — he transmits Y to a son; flagged `father_carries_x_allele` if he carries); affected
+  female = `1/1` + carrier mother + hemizygous-affected father. Sex-aware ploidy, drop male non-PAR
+  het calls; kid sex inferred from chrX heterozygosity when the PED is unknown. **X-dominant is not
+  a separate mode** (a female's X het is emitted as `dominant`, a male hemizygote as
+  `x_linked_recessive`); **chrY yields no inherited call** — the hemizygous models are keyed on the
+  mother, which is meaningless on Y.
 - **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
   machinery): `hiConfDeNovo` (child-membership checked) → re-verify DP/AB + parental cleanliness.
 - **Sample QC (Step 0)**: trio kid/dad/mom roles come from upstream **peddy**; Step 0 guards the

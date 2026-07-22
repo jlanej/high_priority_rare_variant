@@ -100,6 +100,17 @@ These gates apply to every inheritance mode. AB (allele balance) is computed fro
 | Hom-alt allele balance | **AB ≥ 0.90** | |
 | Hom-ref allele balance | **AB ≤ 0.10** | |
 
+> **Missing-genotype semantics — `strict_gt=True` is load-bearing.** Every "is this parent a
+> no-call?" test in Step 5 assumes a no-call is distinguishable from a confident `0/0`. cyvcf2's
+> **default does not give you that**: with `strict_gt=False` a *half*-called genotype such as `0/.`
+> is reported as **hom-ref**, not unknown (its `as_gts` helper: "if a single allele is missing e.g
+> `0/.` it's still encoded as hom ref because it has no alts"). That would silently satisfy the de
+> novo requirement that both parents be confidently hom-ref, and would make a half-called parent
+> look like an affirmative non-carrier when establishing compound-het trans. `05_inheritance_screen.py`
+> therefore opens every trio VCF with `strict_gt=True`, so any `.` in a genotype reads as a no-call.
+> (Step 0's QC pass does not set it: for Mendelian-error counting, treating `0/.` as hom-ref is the
+> conservative direction.)
+
 **Sample / pedigree QC:**
 
 - **Peddy** confirms reported vs. genotype-inferred sex (chrX heterozygosity) and pedigree relatedness via IBS0 / Rel; parent–child pairs should show **IBS0 ≈ 0** and **relatedness ≈ 0.5**. Elevated IBS0 signals a sample swap or mislabeled trio → block downstream inheritance logic. Kids First runs Peddy explicitly.
@@ -118,38 +129,49 @@ The four first-class inheritance modes are **dominant (inherited het)**, **autos
 
 ### 3.1 Dominant — rare inherited heterozygous
 
-- **Genotypes:** child `0/1`, with the alt allele **transmitted from ≥ 1 parent** — mother `0/1` (maternal), father `0/1` (paternal), or both parents `0/1` (recorded as parent-of-origin: maternal / paternal / both). A child het with both parents `0/0` is de novo, not this mode (see [§3.5](#35-de-novo-secondary-cross-reference)).
-- **Requirement:** the variant must be **functional** and **not** part of a compound-het pair in the same gene ([§3.3](#33-compound-heterozygous-two-hets-in-trans)) — a single inherited het, not one half of a biallelic hit.
-- **QC:** child confident het (GQ ≥ 20, DP ≥ 10, AB 0.25–0.75) *and* the transmitting parent(s) confident het on the same criteria.
+- **Genotypes:** child `0/1`, with the alt allele **transmitted from ≥ 1 parent**. A transmitting parent may be `0/1` **or `1/1`** — a hom-alt parent still carries a transmissible alt (consanguinity, a common-ish recessive allele, an affected parent, or — on chrX — a hemizygous father rendered `1/1` by a diploid caller). Parent-of-origin is recorded as `flags=origin=mat|pat|both`:
+  - exactly one parent carrying ⇒ `mat` / `pat`;
+  - one parent `1/1` and the other `0/1` ⇒ **deterministic**, because a `1/1` parent transmits the alt obligately, so a het child took the alt from it and the ref from the other (`mom 1/1 × dad 0/1` ⇒ `mat`; `mom 0/1 × dad 1/1` ⇒ `pat`);
+  - both parents `0/1` ⇒ a genuine 50/50 ⇒ `both` (and, being unphaseable, never used for compound-het pairing, [§3.3](#33-compound-heterozygous-two-hets-in-trans));
+  - both parents `1/1` with a het child is a Mendelian error ⇒ no call.
+  A child het with both parents `0/0` is de novo, not this mode (see [§3.5](#35-de-novo-secondary-cross-reference)).
+- **Requirement:** the variant must be **functional** and **not** part of a *phase-confirmed* compound-het pair in the same gene ([§3.3](#33-compound-heterozygous-two-hets-in-trans)) — a single inherited het, not one half of a biallelic hit. A pair that is only *inferred* (a de-novo partner) does **not** suppress the dominant call.
+- **QC:** child confident het (GQ ≥ 20, DP ≥ 10, AB 0.25–0.75) *and* each carrying parent confident **on its own zygosity band** — the het band for `0/1`, the hom-alt band (AB ≥ 0.90) for `1/1`.
+- **`origin_unverified` flag:** when only one parent carries and the *other* parent is not an affirmative, QC-passing `0/0` (a no-call, or a `0/0` failing GQ/DP/AB), the call is still emitted but flagged — that parent might silently carry the allele too, so the recorded origin is inferred rather than established.
 - **Rarity:** external gnomAD grpmax **proxy AF < 1e-4** (dominant rarity gate; same as de novo). Target field is `faf95`; see the banner.
 - **Why it matters:** heterozygous inherited variants are individually low-specificity, but become compelling when they **recur across multiple distinct individuals in the same gene**. Gene consolidation ([§5](#5-inheritance-engines--tooling), [gene_burden.md](gene_burden.md)) tallies dominant-het carriers per gene and ranks recurrent genes first, **weighted by gene constraint** (a recurrent het in a haploinsufficient gene is the most compelling). Do **not** reject solely because an unaffected parent carries it — reduced/age-dependent penetrance is expected ([§6](#6-co-segregation--penetrance-modifiers-never-hard-filters)).
 
 ### 3.2 Autosomal recessive — homozygous
 
-- **Genotypes:** child `1/1`, mother `0/1`, father `0/1`.
-- **QC:** both parents confident hets (GQ ≥ 20, AB 0.25–0.75), child confident hom-alt (AB ≥ 0.90, DP ≥ 10).
+- **Genotypes:** child `1/1`; **both** parents carrying — each `0/1` **or `1/1`** (a hom-alt parent is accepted for consanguinity, a common-ish recessive allele, or an affected parent). A parent no-call means inheritance is unestablished and the call is not made.
+- **QC:** child confident hom-alt (AB ≥ 0.90, DP ≥ 10); each carrying parent confident **on its own zygosity band** — het band for `0/1`, hom-alt band for `1/1` (GQ ≥ 20, DP ≥ 10).
 - A `1/1` child with a `0/0` parent is a Mendelian error → suspect a hemizygous "false hom" (deletion on the other allele) or **UPD** (see [§4](#4-upd-imprinting--mosaicism-flags-not-primary-calls)).
 - **Rarity:** per-allele grpmax **proxy AF < 1e-2** (permissive discovery default; target field is `faf95`), with a stricter **1e-3** high-confidence tier. Applied per variant, not per gene. **Do not** down-weight biallelic candidates using pLoF constraint ([gene_constraint.md](gene_constraint.md)).
 
 ### 3.3 Compound heterozygous (two hets in trans)
 
 - **Requirement:** two rare het variants in the same gene on **opposite** haplotypes (trans). Cis pairs are non-causal.
-- **Trio phasing (the ONLY method wired):** variant A from mother (mat `0/1`, pat `0/0`) and variant B from father (pat `0/1`, mat `0/0`) ⇒ trans by descent. Both variants tracing to the same parent ⇒ cis ⇒ reject. A **de novo second hit** is a legitimate partner biologically, but note it is **unphaseable** from trio genotypes (it may sit cis or trans with the inherited hit at ~50/50), so `05_inheritance_screen.py` emits that pair with a `unphased_denovo_partner` flag — it is a candidate to confirm, not a confirmed biallelic hit.
+- **Trio phasing (the ONLY method wired):** variant A from mother (mat `0/1`, pat `0/0`) and variant B from father (pat `0/1`, mat `0/0`) ⇒ trans by descent. Both variants tracing to the same parent ⇒ cis ⇒ reject. Only `mat` and `pat` legs pair; a `both`-origin leg (both parents `0/1`) is unphaseable and is never paired.
+- **The non-transmitting parent must be *affirmatively* hom-ref.** Trans-by-descent rests on that parent *not* carrying the allele, so a no-call or an unqualified `0/0` (allele dropout) there is not evidence of anything — if that parent silently carries it too, the "trans" pair may be **cis**. Such a pair is still emitted (never-drop) but flagged **`origin_unverified`**. Note this needs `strict_gt=True` on the VCF reader: with cyvcf2's default a half-called `0/.` is reported as hom-ref rather than as a no-call ([§2](#2-cross-cutting-genotype--sample-qc-apply-before-mode-logic)).
+- **A `1/1` transmitting parent is deterministic, not ambiguous.** `mom 1/1 × dad 0/1` with a het child is unambiguously maternal (see [§3.1](#31-dominant--rare-inherited-heterozygous)), so it **does** pair in trans with a paternal leg. This matters most on chrX, where a diploid caller renders every hemizygous carrier father as `1/1`.
+- **De novo second hit:** a legitimate partner biologically, but **unphaseable** from trio genotypes (it may sit cis or trans with the inherited hit at ~50/50), so that pair is emitted with a `unphased_denovo_partner` flag — a candidate to confirm, not a confirmed biallelic hit. Because it is unconfirmed it does **not** suppress the dominant call on the inherited leg.
 - **Read-backed phasing (WhatsHap) — TARGET, not implemented.** `whatshap` is pinned in the image but **no step invokes it**; there is no read-backed phasing today. When wired it would resolve phase directly where both variants lie within one read/fragment (and uniquely combine read-based *and* pedigree phasing), which is exactly what would settle the de-novo-partner case above. Caveat for that future work: WhatsHap drops variants with missing or Mendelian-inconsistent parental genotypes, lowering the phasing rate when parental data is incomplete.
 - **QC:** both variants must independently pass het QC (GQ ≥ 20, DP ≥ 10, AB 0.25–0.75) in the child *and* the transmitting parent.
 - **Rarity:** per-allele grpmax **proxy AF < 1e-2** (1e-3 high-confidence; target field is `faf95`).
 
 ### 3.4 X-linked / hemizygous
 
-- **X-recessive (affected male):** child hemizygous alt (`1/1` from a diploid caller, or `1` if ploidy-aware), mother `0/1` carrier, father `0/0` (in region). Affected female = `1/1` with both parents carriers.
-- **X-dominant:** child het/hemi affected (de novo or transmitted); watch for male-lethal patterns.
-- **Hemizygous chrX / chrY (male, outside PAR):** males are haploid, so a diploid caller emits `0/0` or `1/1` — **a het call in a male non-PAR region is a QC red flag** (mapping artifact, PAR misplacement, or XXY). Enforce **sex-aware ploidy** and **drop** male non-PAR chrX/chrY het calls. Distinguish PAR1/PAR2 (diploid) from non-PAR. QC the hemizygous alt call at DP ≥ 10, GQ ≥ 20, AB ≥ 0.90. Peddy sex-check must pass first.
+- **X-recessive (affected male):** child hemizygous alt (`1/1` from a diploid caller, or `1` if ploidy-aware — cyvcf2 maps both to hom-alt), mother `0/1` **or `1/1`** carrier. **The father's chrX is NOT required and is not examined**: he transmits his Y to a son, so his chrX is never transmitted. An affected or carrier father, or a paternal chrX no-call, must not drop the call — if he does carry, it is recorded as `flags=father_carries_x_allele`, never as a filter.
+- **X-recessive (affected female):** child `1/1`, mother `0/1`/`1/1` carrier, **father `1/1`** — he *does* transmit his single X to every daughter, so a homozygous daughter requires a hemizygous-affected father. All three are QC'd on their own zygosity band.
+- **X-dominant is not a separate emitted mode.** It is genotypically indistinguishable from the modes above and is covered by them: a **female** proband's non-PAR chrX het flows through the ordinary het collector and is emitted as `dominant` (with parent-of-origin), while a **male** hemizygote is emitted as `x_linked_recessive`. Filter on `chrom` to separate X calls from autosomal ones; the mode label does not encode it. Watch for male-lethal patterns when interpreting.
+- **Hemizygous chrX / chrY (male, outside PAR):** males are haploid, so a diploid caller emits `0/0` or `1/1` — **a het call in a male non-PAR region is a QC red flag** (mapping artifact, PAR misplacement, or XXY) and is **dropped** from the het collector on both chrX and chrY. PAR1/PAR2 are diploid in both sexes and are correctly routed through the autosomal models. QC the hemizygous alt call at DP ≥ 10, GQ ≥ 20, AB ≥ 0.90. Peddy/Step-0 sex inference gates this: a trio whose child sex is unresolved has its sex chromosomes skipped entirely rather than assumed female.
+- **chrY yields no inherited call.** The hemizygous models above are keyed on the **mother's** genotype, which is meaningful only on chrX — on chrY the father is the sole transmitter and the mother has no Y at all. chrY is therefore excluded from both the hemizygous de novo path and `x_linked_recessive` (`male_x_chrx` in `05_inheritance_screen.py`), so male non-PAR chrY records produce no rows. Routing them through the X logic would have reported father-to-son transmission as *de novo* and let recurrent Yq / X-transposed mismapping artifacts — which carry no gnomAD chrY AF, so the rarity gate passes unconditionally — accumulate in Step 6's X-linked tier. **There is no Y-linked inheritance model**; the clinical cost is negligible (Y-linked Mendelian SNV disease is essentially confined to spermatogenic failure, and the lesions there are CNVs, already a documented blind spot).
 
 ### 3.5 De novo (secondary cross-reference)
 
 De novo is **not** the driver of this pipeline: dedicated bespoke machinery handles de novo filtering **and** review. Here it is retained only as a lightweight secondary cross-reference against the inherited-variation signal, and counted **separately** from the inherited modes in gene consolidation ([§5](#5-inheritance-engines--tooling)).
 
-- **Genotypes:** child `0/1`, mother `0/0`, father `0/0` (autosomal); hemizygous de novo on male chrX is `0 → 1` (see [X-linked](#34-x-linked--hemizygous)).
+- **Genotypes:** child `0/1`, mother `0/0`, father `0/0` (autosomal); hemizygous de novo on male **chrX** is `0 → 1`, requiring only the transmitting **mother** to be hom-ref (see [X-linked](#34-x-linked--hemizygous)). **chrY is excluded from this path** — the mother-keyed rule is inverted there, so a father-transmitted Y allele would otherwise be reported as de novo. Both parents must be *confidently* hom-ref: a no-call does not qualify, and `strict_gt=True` is what makes a half-called `0/.` register as a no-call rather than as hom-ref ([§2](#2-cross-cutting-genotype--sample-qc-apply-before-mode-logic)).
 - **Detection:** GATK `hiConfDeNovo` present (all three trio-member GQ ≥ 20), with **child membership** verified via `annotations.is_hiconf_denovo_for` (confirming the tag applies to *this* child). Use `loConfDeNovo` (child GQ ≥ 10) only as a lower-sensitivity tier.
 - **Re-verify (the tool does not):** child **DP ≥ 20**, het **AB 0.25–0.75**, all three GQ ≥ 20, and **parental cleanliness** — each parent alt AD ≤ 1 with DP ≥ 10 (a parental alt fraction of a few percent suggests inherited or parental mosaicism, not de novo).
 - **Rarity:** external gnomAD grpmax **proxy AF < 1e-4** (target: `faf95`). The `nhomalt` condition is **RETIRED, not enforced** — no `nhomalt` field exists in the VEP cache, and the retired `filters.denovo.require_gnomad_absent_or_singleton` key only ever implemented `nhomalt > 1`, a homozygote-count test rather than the allele-count test its name promised ([limitations.md](limitations.md) §3). *(An AC-based **absent-or-singleton** test remains a target refinement — de novo is secondary here.)*
@@ -240,8 +262,8 @@ Do **not** reject an inherited candidate solely because an unaffected parent car
 | Dominant (inherited het) | rare functional **het** transmitted from ≥ 1 parent; parent-of-origin recorded (mat / pat / both); **not** a comp-het partner | grpmax **proxy AF < 1e-4** (not `faf95`); recurrence-consolidated |
 | Recessive / comp-het rarity | grpmax **proxy AF < 1e-2** per allele (not `faf95`) | **1e-3** high-confidence tier |
 | Recessive hom | child `1/1` + both parents `0/1`, all GQ ≥ 20, DP ≥ 10 | 1/1 vs 0/0 parent → suspect deletion/UPD |
-| Compound het | two rare hets, same gene, **trans** (parent-of-origin from trio GTs; WhatsHap is a TARGET, not wired) | de novo second hit is valid but **unphaseable** from trio GTs → flagged `unphased_denovo_partner` |
-| X-linked recessive | male hemizygous + carrier mother; sex-aware ploidy; **drop** male non-PAR chrX/chrY het calls; separate PAR/non-PAR | |
+| Compound het | two rare hets, same gene, **trans** (parent-of-origin from trio GTs; WhatsHap is a TARGET, not wired); the non-transmitting parent must be an affirmative QC-passing `0/0`; a `1/1` transmitting parent is deterministic and **does** pair | de novo second hit is valid but **unphaseable** → `unphased_denovo_partner` (and does not suppress the dominant call); unobserved other-parent → `origin_unverified` |
+| X-linked recessive | affected male = hemizygous + carrier mother (**father's chrX not required**, flagged if he carries); affected female = `1/1` + carrier mother + `1/1` father; sex-aware ploidy; **drop** male non-PAR chrX/chrY het calls; separate PAR/non-PAR | X-dominant is not a separate mode (female X het → `dominant`, male hemizygote → `x_linked_recessive`); **chrY yields no inherited call** |
 | De novo (secondary) | GATK **`hiConfDeNovo`** (child-membership via `is_hiconf_denovo_for`); re-verify child DP ≥ 20, AB 0.25–0.75, each parent alt AD ≤ 1 / DP ≥ 10; grpmax **proxy AF < 1e-4** (not `faf95`; the gnomAD absent/singleton + `nhomalt` condition is **retired** — no `nhomalt` field) | cross-reference only; filtering/review in separate machinery. Optional: Poisson enrichment vs Samocha (P < 2.5e-6, BH q < 0.05) when a mutation-rate table is supplied |
 | Gene consolidation | recurrent at ≥ **min_carriers** (default **2**) distinct individuals; rank recurrent-first, weighted by constraint (LOEUF / pLI / s_het) | dominant / biallelic / X-linked; de novo counted separately |
 | mtDNA heteroplasmy | out of scope — handled by a separate dedicated pipeline | chrM not an active mode here |

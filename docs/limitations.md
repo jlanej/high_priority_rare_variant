@@ -211,6 +211,41 @@ These predate the contract and are tracked in [ROADMAP.md](ROADMAP.md):
 - **No real-data validation** — GIAB/CMRG truth sets and a positive-control panel are still TODO,
   so sensitivity/precision are currently unmeasured rather than measured-and-acceptable.
 
+### Inheritance-model residuals (Step 5)
+
+Known, bounded gaps left open after the Step-5 model review. Each is a *recall* or *visibility*
+limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md) §3.
+
+- **Compound-het pairing keys on the single VEP-PICK'd gene.** Each variant is indexed under one
+  gene (the `--flag_pick` block `split-vep -s` selected), so two hits that are both damaging in the
+  *same* gene fail to pair when the picked block names a different overlapping gene for one of them.
+  This bites only where a variant is damaging at **equal** consequence rank in two overlapping MANE
+  genes (shared exon, readthrough/bicistronic loci). Because hets are gathered at the permissive
+  1e-2 gate but the dominant fall-through needs 1e-4, an unpaired second hit between those bounds is
+  emitted under **no mode at all**. Fix: lift `Gene` with `-s all` for the pairing key only, and
+  index each variant under every gene it hits. (slivar's `comphet` evaluates all transcripts for
+  exactly this reason.)
+- **A male non-PAR chrX hemizygote is dropped by every mode when the mother's genotype is
+  uninformative.** For a male child on chrX the only reachable branches split the maternal genotype
+  into `{HOM_REF}` (de novo) and `{HET, HOM_ALT}` (X-linked recessive); a maternal **no-call** falls
+  through both with no row and **no audit counter**. A hemizygous LoF in an affected boy is causally
+  self-sufficient — the maternal genotype separates inherited from de novo/germline-mosaic, it does
+  not establish causality — so the exclusion is most costly exactly here. Rate-limited (the mother is
+  diploid on X at ~2× the son's coverage). Fix: emit with `flags=maternal_gt_uninformative`, or at
+  minimum add a dropped-count audit metric so a negative is distinguishable from "not looked for".
+- **A permissive comp-het partner can still suppress a dominant call.** Hets are pooled for pairing
+  at `recessive_max` (1e-2) but the dominant gate is `dominant_max` (1e-4). A *phase-confirmed*
+  `mat × pat` pair consumes both legs, so a genuinely dominant-grade variant is re-labelled
+  `compound_het` whenever the child happens to carry any other sub-1e-2 functional het in the same
+  gene — near-certain in long genes (TTN, NEB, RYR1, DMD). The variant is **not** lost (Step 6 unions
+  the per-model trio sets, so `n_carriers`/`recurrent` are unaffected), but it leaves `n_dominant`
+  and therefore the headline `p_recurrence`. The *unconfirmed* (de-novo-partner) half of this was
+  fixed — such pairs no longer consume. Fix for the rest: require the partner to be biallelic-credible
+  before consuming, or emit the dominant row too with an `also_comphet_partner` flag.
+- **No Y-linked inheritance model.** chrY is deliberately routed away from the mother-keyed
+  hemizygous models, so male non-PAR chrY produces no rows at all. Clinically near-empty (Y-linked
+  Mendelian SNV disease is essentially confined to spermatogenic failure, whose lesions are CNVs).
+
 ## Reading a negative result
 
 Given the above, "no candidate found" for a trio means: no **coding** variant (or CADD-high
