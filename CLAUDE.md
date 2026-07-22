@@ -116,7 +116,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **Step 5 output**: `candidates.calls.tsv` (one row per candidate; `mode` ∈ `dominant`
   (inherited het; `flags=origin=mat|pat|both`), `hom_recessive`, `compound_het` (pairs share a
   `pair_id`; a pair whose second hit is a de novo is unphaseable from trio genotypes and carries
-  `flags=unphased_denovo_partner`), `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). Modes are configured in
+  `flags=unphased_denovo_partner`, and does NOT suppress the dominant call; a pair whose
+  non-transmitting parent was never affirmatively observed hom-ref carries `origin_unverified`),
+  `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). A `1/1` parent transmits obligately,
+  so parent-of-origin there is deterministic (`both` is reserved for HET×HET). chrY is routed away
+  from the mother-keyed hemizygous models (`male_x_chrx`) and yields no inherited call. Step 5 opens
+  VCFs with `strict_gt=True` — cyvcf2's default reports a half-called `0/.` as hom-ref, which would
+  defeat every "parent is a confident no-call" test. Modes are configured in
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
   `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), constraint columns; ranked
