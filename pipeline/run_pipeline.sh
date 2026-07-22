@@ -90,9 +90,16 @@ if run_step 2; then
     fi
 fi
 
-W="$HPRV_OUTPUT_DIR"; mkdir -p "$W"
-export HPRV_TMPDIR="${HPRV_TMPDIR:-$W/tmp}"; mkdir -p "$HPRV_TMPDIR"
-export HPRV_AUDIT_DIR="$W/audit"; mkdir -p "$HPRV_AUDIT_DIR"
+W="$HPRV_OUTPUT_DIR"
+export HPRV_TMPDIR="${HPRV_TMPDIR:-$W/tmp}"
+export HPRV_AUDIT_DIR="$W/audit"
+# Fail at second 1, not mid-run: every step writes scratch to the tmpdir and outputs to the work
+# dir, and a read-only/unbound path otherwise surfaces hours later as a cryptic tool error (e.g.
+# Step 4's `bcftools sort -T` -> "mkdtemp(...) failed: Read-only file system"). A plain
+# `mkdir -p` cannot catch it — it succeeds on an existing dir even when the FS is read-only.
+require_writable_dir "$W" "project.output_dir"
+require_writable_dir "$HPRV_TMPDIR" "runtime.tmpdir (scratch for norm/sort/VEP)"
+require_writable_dir "$HPRV_AUDIT_DIR" "audit dir"
 RESOLVED="$W/trios.resolved.tsv"
 
 # ---------------------------------------------------------------------------
