@@ -149,18 +149,28 @@ for row in "${rows[@]}"; do
         # (over the tiny candidate set, negligible) restores header/coordinate order so the
         # output is byte-identical to the whole-genome path, which relies on `norm` output
         # already being coordinate-sorted for its index step to succeed.
+        #
+        # `sort -T` is a PREFIX, NOT a directory — bcftools appends XXXXXX and mkdtemp()s that.
+        # So `-T "$HPRV_TMPDIR"` would create the scratch dir as a SIBLING of the tmpdir, i.e. in
+        # its PARENT (the work dir), which is how this failed in the field:
+        #   mkdtemp(<work>/tmpSNIkLK) failed: Read-only file system
+        # even though everything else written INTO $HPRV_TMPDIR (the region BED, the .norm.vcf.gz)
+        # worked fine. Keep the prefix INSIDE the tmpdir — "$HPRV_TMPDIR/<trio>.sort" makes
+        # bcftools create "$HPRV_TMPDIR/<trio>.sortXXXXXX" — which also keeps the scratch
+        # per-trio, so this stays safe if the loop is ever parallelized. (Step 1 already does
+        # this via "$HPRV_TMPDIR/sort", which is why it never hit the bug.)
         if [[ -n "$samples" ]]; then
             bcftools view -s "$samples" -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
                 | bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou - \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
                 | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Ou - \
-                | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
+                | bcftools sort -T "$HPRV_TMPDIR/${trio}.sort" -Oz -o "$norm" -
         else
             bcftools view -R "$region_bed" --threads "$THREADS" -Ou "$vcf" \
                 | bcftools norm "${nargs[@]}" --threads "$THREADS" -Ou - \
                 | bcftools view --min-ac 1 --threads "$THREADS" -Ou - \
                 | bcftools annotate "${xargs_info[@]}" --threads "$THREADS" -Ou - \
-                | bcftools sort -T "$HPRV_TMPDIR" -Oz -o "$norm" -
+                | bcftools sort -T "$HPRV_TMPDIR/${trio}.sort" -Oz -o "$norm" -
         fi
     else
         log "  [$trio] subset-to-trio + norm + intersect + annotate"

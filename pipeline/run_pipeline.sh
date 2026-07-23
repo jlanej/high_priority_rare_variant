@@ -118,8 +118,20 @@ n_trios=$(($(grep -cve '^[[:space:]]*$' "$RESOLVED") - 1))
 log "Pipeline: $n_trios resolved trios, steps $FROM..$TO, work=$W"
 
 if run_step 0; then
-    log "== Step 0: per-trio QC =="
-    python3 "$HERE/00_qc.py" --manifest "$RESOLVED" --config "$CFG" --out "$W/qc_report.tsv"
+    # Idempotent like every other step. Step 0 rescans every trio's genotypes (Mendelian errors,
+    # chrX sex inference, contamination) — an HOUR on a real cohort — and it was the one step
+    # with no .done guard, so it re-ran on every invocation. That is pure waste under the resume
+    # workflow: a walltime kill and re-submit, or any SLURM `prep` re-run (--from 0 --to 1),
+    # repeated the whole scan even though qc_report.tsv was already complete.
+    # Re-run it by removing the sentinel: rm "$W/qc_report.tsv.done"  (do that after changing the
+    # trio set or any filters.genotype_qc / qc.* threshold, which this cache cannot detect).
+    if is_done "$W/qc_report.tsv"; then
+        log "== Step 0: per-trio QC — cached, skipping (rm $W/qc_report.tsv.done to force) =="
+    else
+        log "== Step 0: per-trio QC =="
+        python3 "$HERE/00_qc.py" --manifest "$RESOLVED" --config "$CFG" --out "$W/qc_report.tsv"
+        mark_done "$W/qc_report.tsv"
+    fi
 fi
 
 if run_step 1; then
