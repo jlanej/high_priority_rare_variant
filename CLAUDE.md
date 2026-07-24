@@ -188,6 +188,16 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `kraken2 --version` smoke check enforces it). **nonhuman-screen is pip-pinned to a COMMIT**, not
   PyPI's latest — bumping either ref is a contract change: re-verify the CLI flags, the
   `variant_nhf.tsv` column order, and the 0-based key before merging.
+- **SpliceAI live backfill (Step 2b) runs in an ISOLATED conda env.** `spliceai` needs TensorFlow,
+  whose numpy/protobuf pins conflict with the main hprv env (cyvcf2 needs numpy≥2). So the Dockerfile
+  builds a separate `/opt/conda/envs/spliceai` and `02b_spliceai_backfill.sh` invokes it via
+  `micromamba run -n spliceai spliceai …` — never mix it into the main env. The model weights + GENCODE
+  annotation are BUNDLED in the package (no data download; the build smoke-test hard-fails if the model
+  won't load). Step 2b is optional (`resources.vep.spliceai_backfill.enabled`, off by default), runs
+  after Step 2 and before Step 3 (so a backfilled score is a keep-path), scores only variants with no
+  precomputed value (default indels), and folds them into the same `vep_SpliceAI_pred_DS_*` fields
+  (`bcftools annotate`). Idempotent via a `.spliceai_backfill.done` marker that must be NEWER than the
+  union; a scoring failure warns + degrades to precomputed-only rather than aborting the run.
 - **Apptainer:** point `APPTAINER_TMPDIR`/`CACHEDIR` at real disk and **do not use
   `--containall`** — a tmpfs `/tmp` OOMs heavy VEP/sort (documented failure in the group's
   original annotate script; `common.sh` already sets a disk-backed workdir).
