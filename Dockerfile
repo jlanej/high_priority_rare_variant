@@ -140,9 +140,12 @@ RUN set -eux; \
 # Keras-2 `.h5` weights, but the bioconda recipe pins only `keras >=2.0.5` / `tensorflow >=1.13.0`
 # (both unbounded), so a fresh solve installs Keras 3 + TF >=2.16 — and Keras 3 CANNOT deserialize
 # those `.h5` models. `keras <3` is belt-and-suspenders should the solver ever decouple them.
+# `setuptools <81` is ALSO required: spliceai's __init__ does `from pkg_resources import
+# get_distribution`, but setuptools >=81 (2025) removed the vendored `pkg_resources`, so a fresh
+# solve makes `import spliceai` crash with ModuleNotFoundError before any model even loads.
 RUN set -eux; \
     micromamba create -y -p /opt/conda/envs/spliceai -c conda-forge -c bioconda \
-        python=3.10 'spliceai' 'tensorflow>=2.13,<2.16' 'keras<3'; \
+        python=3.10 'spliceai' 'tensorflow>=2.13,<2.16' 'keras<3' 'setuptools<81'; \
     micromamba clean -a -y
 # Build HARD-FAILS if the bundled model cannot actually LOAD under the installed TF/keras — a backfill
 # env that imports but can't load the model would fail every run, silently, at runtime. Replicates the
