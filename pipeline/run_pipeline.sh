@@ -207,6 +207,22 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     ig=(--work "$W" --ref "$cref" --padding "$pad" --genome "$gen" --jobs "$jobs")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
+    # Step 8b (non-human-fraction). Default ON, but activates only when a kraken2 DB is provided;
+    # otherwise warn here and leave 8b off (its columns stay blank). run_pipeline is the single
+    # enable gate — 08 never reads $HPRV_KRAKEN2_DB on its own.
+    if [[ "$(cfg_get outputs.igv.nonhuman_screen.enabled true)" != "false" ]]; then
+        kdb="${HPRV_KRAKEN2_DB:-}"
+        if is_set "$kdb" && [[ -d "$kdb" ]]; then
+            ig+=(--kraken2-db "$kdb"
+                 --nhf-members    "$(cfg_get outputs.igv.nonhuman_screen.members carriers)"
+                 --nhf-confidence "$(cfg_get outputs.igv.nonhuman_screen.confidence 0.05)"
+                 --nhf-min-reads  "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)")
+            [[ "$(cfg_get outputs.igv.nonhuman_screen.memory_mapping true)" != "false" ]] \
+                && ig+=(--nhf-memory-mapping)
+        else
+            warn "outputs.igv.nonhuman_screen.enabled but resources.kraken2_db is unset/not a dir ('$kdb') — skipping NHF annotation (variants.tsv NHF columns will be blank)"
+        fi
+    fi
     bash "$HERE/08_igv_export.sh" "${ig[@]}"
 fi
 

@@ -87,6 +87,46 @@ RUN set -eux; \
 # so `resources.vep.plugins_dir` resolves without the user setting anything.
 ENV VEP_PLUGINS=/plugins
 
+# --- kraken2 + nonhuman-screen (Step 8b: ALT-read non-human-fraction screening) --------------
+# SOFTWARE only. The kraken2 DATABASE is host-fetched + bind-mounted (never baked), exactly like
+# the VEP cache and CADD files (.dockerignore keeps resource DATA out of the build context).
+#
+# kraken2 is built FROM SOURCE at the EXACT version nonhuman-screen is validated against (its own
+# Dockerfile pins the identical KRAKEN2_VERSION), so the classifier stays version-locked to the
+# package that shells out to it — rather than a conda pin that could drift from that validated
+# build. install_kraken2.sh drops the compiled `classify` + the `kraken2`/`kraken2-build` Perl
+# wrappers into /usr/local/bin (on PATH, not shadowed by the conda env, which has no kraken2).
+#
+# nonhuman-screen is pip-installed INTO the conda env at a PINNED COMMIT — the exact ref this
+# pipeline's join logic was verified against (0-based `variant_key`, the variant_nhf.tsv column
+# order, the `classify` CLI flags). PyPI's latest is ahead of this; do NOT float to it. Bumping
+# either ref is a CONTRACT change: re-verify src/hprv/igv.py (_load_nhf + the pos-1 join) and
+# pipeline/08_igv_export.sh (Step 8b) against the new CLI/TSV before merging. [bam] pulls pysam,
+# already provided by the conda env (satisfied, not reinstalled).
+#
+# Perl note: the conda env is kept perl-free (above), so kraken2's Perl wrappers run under VEP's
+# system Perl (core modules only). The build-time `kraken2 --version` smoke check hard-fails if
+# that ever breaks.
+ARG KRAKEN2_VERSION=v2.17.1
+ARG NONHUMAN_SCREEN_REF=9e9eb6ceb1f0848ad30a51ed24d5aed791aaab7a
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends build-essential git wget zlib1g-dev ca-certificates; \
+    git clone --depth 1 --branch "${KRAKEN2_VERSION}" \
+        https://github.com/DerrickWood/kraken2.git /tmp/kraken2; \
+    /tmp/kraken2/install_kraken2.sh /usr/local/bin; \
+    rm -rf /tmp/kraken2; \
+    "${HPRV_ENV}/bin/pip" install --no-cache-dir \
+        "nonhuman-screen[bam] @ git+https://github.com/jlanej/nonhuman-screen.git@${NONHUMAN_SCREEN_REF}"; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    # Fail the build loudly if either did not land, or if the kraken2 Perl wrapper cannot run
+    # under VEP's Perl (the conda-Perl un-shadow must hold for kraken2 exactly as it does for VEP).
+    # NB no pipe: this RUN executes under /bin/sh (dash, no pipefail), so `kraken2 --version | head`
+    # would mask a failing kraken2 behind head's exit 0 — defeating the very smoke check. Keep it
+    # unpiped so a broken binary/Perl-wrapper hard-fails the build.
+    kraken2 --version >/dev/null; \
+    nonhuman-screen --version >/dev/null
+
 # --- pipeline code ----------------------------------------------------------
 COPY pipeline/ /opt/hprv/pipeline/
 COPY src/ /opt/hprv/src/

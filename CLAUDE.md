@@ -135,6 +135,16 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
   map (`resources.cram_map`; `samtools view -C -T ref --regions-file bed`, ± `outputs.igv.padding`),
   per-trio VCF tracks `vcfs/<trio>.vcf.gz`, `trios.tsv`, `sample_qc.tsv`, empty `curation.json`.
+- **Step 8b (optional, default ON)**: non-human-fraction (NHF) annotation. If a kraken2 DB is
+  provided (`resources.kraken2_db`, bind-mounted DATA — never baked), `nonhuman-screen classify`
+  runs over each screened member's **mini-CRAM** (no new source-CRAM I/O) against the per-trio VCF
+  → `igv/nhf/<trio>/<sample>.variant_nhf.tsv`, folded into `variants.tsv` as `child_/mother_/father_nhf`
+  (+ `_reads` denominator) and a derived `nhf_flag`. Configured under `outputs.igv.nonhuman_screen`
+  (`members: carriers|child_only|all`, `confidence`, `min_reads`, `memory_mapping`). Gated: activates
+  only with a DB + mini-CRAMs + the `nonhuman-screen` binary (image-only) — else warns and leaves the
+  NHF columns blank. **The join is on the 0-based key (`pos-1`)** — nonhuman-screen keys variants
+  0-based (`{chrom}:{pos0}:{ref}:{alt}`) while `variants.tsv` `pos` is 1-based; `igv._load_nhf_tsv` +
+  the `pos-1` join in `build_variants_tsv` is the single load-bearing off-by-one.
 
 ## Gotchas that WILL bite you
 
@@ -165,6 +175,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   candidates (`review_prior_crosscheck`) — for top hits, cross-check the pre-refinement `PL`/`GT`.
 - **VEP cache release must match** the VEP binary (115) and be bind-mounted (never baked into the
   image).
+- **Step 8b's NHF join is 0-based; the DB has two moving parts.** nonhuman-screen keys variants
+  0-based (`{chrom}:{pos0}:{ref}:{alt}`), so `igv.build_variants_tsv` joins on **`pos-1`** — off by
+  one and every NHF lands on the neighbouring row (`test_igv_nhf_join_is_pos_minus_one` guards it
+  with a decoy key). The **kraken2 binary is source-built** in the Dockerfile at a pinned version
+  whose Perl wrappers must run under VEP's Perl (the conda env is kept perl-free; the build's
+  `kraken2 --version` smoke check enforces it). **nonhuman-screen is pip-pinned to a COMMIT**, not
+  PyPI's latest — bumping either ref is a contract change: re-verify the CLI flags, the
+  `variant_nhf.tsv` column order, and the 0-based key before merging.
 - **Apptainer:** point `APPTAINER_TMPDIR`/`CACHEDIR` at real disk and **do not use
   `--containall`** — a tmpfs `/tmp` OOMs heavy VEP/sort (documented failure in the group's
   original annotate script; `common.sh` already sets a disk-backed workdir).
@@ -182,6 +200,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   the config expects. Never bake resource DATA into the image (`.dockerignore` keeps `resources/*`
   except the manifest out of the build context). See [docs/resources.md](docs/resources.md).
   Already have a VEP VCF? Skip all of it: set `resources.vep.annotated_vcf` and Step 2 ingests it.
+  **Optional (Step 8b only):** a **kraken2 database** (`resources.kraken2_db`, e.g. PrackenDB
+  `k2_NCBI_reference`, ~tens of GB, must ship `taxonomy/nodes.dmp`+`names.dmp`) enables NHF
+  screening. Same rule — bind-mounted DATA, never baked; put it on **local NVMe** so the
+  `--memory-mapping` page cache stays warm across the serial per-trio invocations. See
+  [docs/resources.md](docs/resources.md#kraken2-database-optional-step-8b-nhf).
 - **HPC (primary):** `apptainer exec --cleanenv --bind ... hprv.sif run_pipeline.sh --config
   config/config.yaml` (add `--from N --to M` for a subset).
 - **Dev/host:** run individual step scripts; python steps need `PYTHONPATH=src` and the container

@@ -134,6 +134,38 @@ Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../
 > `TMPDIR`/`APPTAINER_TMPDIR` at real disk with headroom. If you bring your own VEP VCF (above),
 > the budget is **zero**.
 
+## kraken2 database (optional, Step-8b NHF)
+
+**Outside** the VEP-only annotation contract — this is a review-layer aid, not an annotation
+source, and it is entirely optional. If you want the **non-human-fraction (NHF)** columns in the
+igv.js review export (Step 8b: what fraction of a candidate's ALT-supporting reads classify as
+non-human — a contamination / mis-mapping down-rank signal), point `resources.kraken2_db`
+(`${KRAKEN2_DB}`) at a kraken2 database **directory**. Leave it unset and Step 8b simply warns and
+skips, leaving the NHF columns blank (`outputs.igv.nonhuman_screen.enabled` defaults to `true`, but
+"enabled" only means "screen *if* a DB is present").
+
+| Resource | Role | Config key | Size / notes |
+|---|---|---|---|
+| kraken2 DB | taxonomic classifier index for ALT-read NHF | `resources.kraken2_db` (`KRAKEN2_DB`) | **bind-mounted DATA, never baked**; ~tens of GB |
+
+- **Recommended DB: PrackenDB `k2_NCBI_reference`** (one NCBI reference assembly per species + human
+  + RefSeq viral + UniVec-Core, built at kraken2's default k=35). nonhuman-screen ships a fetch
+  helper (`scripts/download_kraken2_db.sh --db DIR`) that downloads, extracts, and validates it.
+- **The dir MUST contain** the index files `hash.k2d`, `opts.k2d`, `taxo.k2d` **AND** the taxonomy
+  dumps `taxonomy/nodes.dmp` + `taxonomy/names.dmp` (either under `taxonomy/` or at the DB root).
+  Without the dumps kraken2 falls back to exact-taxid matching and the NHF signal is **unreliable in
+  both directions** — Step 8b preflights for them and warns loudly, but there is no per-variant flag
+  for it, so use a DB that ships them.
+- **Software is in the image, DATA is not.** The `kraken2` binary (source-built at a pinned version)
+  and `nonhuman-screen` (pip-pinned to a commit) are baked in; the DB is host-fetched and
+  bind-mounted, exactly like the VEP cache and CADD. `.dockerignore` keeps resource DATA out of the
+  build context.
+- **Put the DB on local NVMe/tmpfs, not a FUSE mount.** kraken2's cost is the per-process DB load;
+  Step 8b runs invocations **serially** with `--memory-mapping` (`nonhuman_screen.memory_mapping:
+  true`) so the OS page cache stays warm across trios and the DB is paged in ~once per node instead
+  of once per invocation. On a slow/network mount that win evaporates. At cohort scale, scatter like
+  Step 2 (one kraken2 DB-load per array task).
+
 ## Can the VEP cache replace these? (Deliberately, yes — with a documented price)
 
 An earlier version of this page argued "no, never skip the downloads." **The pipeline now does
