@@ -144,7 +144,7 @@ flowchart TD
 | Step | Produces | Authoritative for |
 |------|----------|-------------------|
 | resolve | `trios.resolved.tsv` (trio_id, vcf, ped, samples) + `trio_resolution.tsv` + PEDs | which VCF each trio maps to, generated from a `kid/dad/mom` file by exact sample-ID match |
-| 0 | QC report per trio; pass/flag list | which trios enter analysis |
+| 0 | QC report per trio; **advisory** pass/flag list (surfaced in the xlsx QC sheet + IGV `sample_qc.tsv`) | flags suspect trios for human review — flagged trios are **NOT** auto-excluded; they still contribute calls + recurrence pending review |
 | 1 | `cohort.sites.vcf.gz` (site-only, normalized, de-duplicated union) | the set of loci seen anywhere in the cohort — **not** a frequency |
 | 2 | `cohort.sites.annotated.vcf.gz` | every annotation the pipeline reads, computed once: VEP CSQ lifted to `INFO/vep_*` — consequence/IMPACT/SYMBOL/MANE, gnomAD v4.1 per-population AFs, ClinVar `CLIN_SIG`, CADD. Constraint is **not** here; it joins by gene symbol at Step 6 |
 | 3 | `plausible.sites.vcf.gz` | the target list of loci worth genotyping per trio |
@@ -199,8 +199,9 @@ synthesized genotype matrix.
 - **…or zero times.** Step 2 has an **ingest mode**: `--vep-vcf` (config `resources.vep.annotated_vcf`)
   skips the VEP call entirely and `split-vep`s a VCF someone else produced — useful when the group
   already annotates centrally, or on a node with no cache. It is verified, not trusted: no `##VEP=`
-  header line is fatal; a non-GRCh38 assembly or a non-115 release warns; and the frequency
-  assertion below applies identically.
+  header line is fatal; an **explicitly-declared non-GRCh38 assembly is fatal** too (absence of the
+  `assembly=` token still warns, since a legitimate GRCh38 VEP VCF may omit it); a non-115 release
+  warns; and the frequency assertion below applies identically.
 - **`--flag_pick`, not `--pick`.** VEP keeps **every** consequence block and merely marks the chosen
   one `PICK=1`, so the *selection rule* lives in one place — `split-vep -s` — and an
   externally-produced `--flag_pick` VCF takes the identical code path. Selection is `pick` when the

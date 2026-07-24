@@ -10,7 +10,10 @@ are no spreadsheet formulas to recalculate.
 from __future__ import annotations
 
 import csv
+import gzip
+import math
 import os
+import subprocess
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -26,6 +29,51 @@ H2_FONT = Font(name=FONT, bold=True, size=11)
 BASE_FONT = Font(name=FONT)
 
 
+def _coerce(tok):
+    """Coerce a TSV token to int/float so numeric columns SORT numerically under the sheet's
+    auto-filter. openpyxl stores a Python str as a TEXT cell, which Excel sorts lexicographically
+    ('0.0013' before '2.5e-06', '1.2e-08' after '0.05') — so the rarest / most-significant rows do
+    NOT sort to the top on a user re-sort, and every numeric cell shows the "number stored as text"
+    warning. Non-numeric tokens (gene / chrom / GT like '0/1' / IDs / flags / '' / '.') fail int()+
+    float() and pass through unchanged; non-finite floats (nan/inf) stay text defensively."""
+    if not tok:
+        return tok
+    try:
+        return int(tok)
+    except (ValueError, TypeError):
+        pass
+    try:
+        f = float(tok)
+    except (ValueError, TypeError):
+        return tok
+    return f if math.isfinite(f) else tok
+
+
+def _vep_header_line(vcf_path):
+    """Return the first ``##VEP=`` header line of a (bgzipped) annotated VCF, or ''."""
+    if not vcf_path or not os.path.exists(vcf_path):
+        return ""
+    try:
+        with gzip.open(vcf_path, "rt") as fh:
+            for ln in fh:
+                if not ln.startswith("#"):
+                    break
+                if ln.startswith("##VEP="):
+                    return ln.rstrip("\n")
+    except OSError:
+        return ""
+    return ""
+
+
+def _gnomad_label(vep_line, default="gnomAD v4.1"):
+    """Derive a 'gnomAD vX' label from the ``##VEP=`` line rather than hardcoding it. The VEP cache
+    version (r113+) determines the gnomAD release, so under the enforced self-run path the default is
+    correct-by-construction; this only avoids over-claiming on a non-v4.1 ingest VCF."""
+    import re
+    m = re.search(r'gnomAD[eg]?[=_ ]v?([0-9]+\.[0-9]+)', vep_line or "")
+    return f"gnomAD v{m.group(1)}" if m else default
+
+
 def _read_tsv(path):
     if not path or not os.path.exists(path):
         return None, []
@@ -39,7 +87,7 @@ def _read_tsv(path):
 def _style_data_sheet(ws, header, rows, freeze=True):
     ws.append(header)
     for r in rows:
-        ws.append(r)
+        ws.append([_coerce(x) for x in r])   # typed numeric cells so the auto-filter sorts correctly
     for c in range(1, len(header) + 1):
         cell = ws.cell(row=1, column=c)
         cell.fill = HEADER_FILL
@@ -80,6 +128,13 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     res_h, res = _read_tsv(p("trio_resolution.tsv"))
     qc_h, qc = _read_tsv(p("qc_report.tsv"))
     audit_h, audit = _read_tsv(p("audit", "counts.tsv"))
+
+    # Per-run annotation provenance (P9): derive from artifacts/config rather than hardcoding, so the
+    # frequency oracle (golden rule 2) is RECORDED, not asserted. The ##VEP= line lands at the same
+    # path on both the self-run and ingest paths; the gnomAD label is derived from it (correct-by-
+    # construction on the self-run cache; no over-claim on a non-v4.1 ingest VCF).
+    vep_line = _vep_header_line(p("cohort.sites.annotated.vcf.gz"))
+    gnomad_label = _gnomad_label(vep_line)
 
     wb = Workbook()
 
@@ -134,15 +189,19 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     line("Calls by mode", ", ".join(f"{k}={v}" for k, v in sorted(modes.items())) or "(none)")
     line("Genes nominated", str(len(genes)))
     line("Recurrent genes", f"{n_recurrent} (>= {get(cfg, 'burden.min_carriers', 2)} distinct individuals)")
-    n_recsig = sum(1 for r in genes if genes_h and "recurrence_exome_wide_sig" in genes_h
-                   and r[genes_h.index("recurrence_exome_wide_sig")] == "1") if genes_h else 0
+    # significant in ANY inherited family (dominant / biallelic / X-linked), matching genes.ranked.tsv
+    _sig_cols = [c for c in ("recurrence_exome_wide_sig", "recurrence_biallelic_exome_wide_sig",
+                             "recurrence_xlinked_exome_wide_sig") if genes_h and c in genes_h]
+    n_recsig = sum(1 for r in genes
+                   if any(r[genes_h.index(c)] == "1" for c in _sig_cols)) if genes_h else 0
     line("Recurrence-significant genes",
-         f"{n_recsig} (exome-wide p < {get(cfg, 'burden.exome_wide_p', 2.5e-6):g} on the calibrated dominant-recurrence null)")
+         f"{n_recsig} (exome-wide p < {get(cfg, 'burden.exome_wide_p', 2.5e-6):g} on the calibrated "
+         "recurrence null; any inherited model — dominant / biallelic / X-linked)")
     line("", "")
 
     # key thresholds
     line("Key thresholds (configurable defaults)", "", h2=True)
-    line("Rarity field", "gnomAD v4.1 grpmax-proxy AF = max AF over the grpmax-eligible ancestry "
+    line("Rarity field", f"{gnomad_label} grpmax-proxy AF = max AF over the grpmax-eligible ancestry "
                          "groups (AFR/AMR/EAS/NFE/SAS), from the VEP cache. A POINT ESTIMATE: "
                          "faf95 (the 95% CI lower bound) needs AC/AN, which the cache does not "
                          "carry, so these gates run slightly stringent on low-count alleles.")
@@ -157,6 +216,29 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     line("", "")
     line("Notes", "Thresholds are configurable; a gene-specific ClinGen VCEP value overrides a "
                   "generic cutoff. See the repo docs/ for calibrated methods and citations.")
+    line("", "")
+
+    # ---- provenance (P9): make the run bindable from the workbook itself ----
+    line("Provenance", "", h2=True)
+    line("Frequency oracle", gnomad_label + " (from the VEP cache; the sole population-frequency source)")
+    line("VEP", f"release {get(cfg, 'resources.vep.version', '115')}; cache "
+                f"{os.path.basename(str(get(cfg, 'resources.vep.cache_dir', '')).rstrip('/')) or '(unset)'}")
+    cadd_snv = os.path.basename(str(get(cfg, 'resources.vep.cadd_snv', '')))
+    cadd_indel = os.path.basename(str(get(cfg, 'resources.vep.cadd_indel', '')))
+    line("CADD files", ", ".join(x for x in (cadd_snv, cadd_indel) if x) or "(not used)")
+    git_sha = ""
+    try:
+        git_sha = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                                  "rev-parse", "--short", "HEAD"],
+                                 capture_output=True, text=True, check=False, timeout=5).stdout.strip()
+    except (OSError, ValueError):
+        git_sha = ""
+    line("Pipeline commit", git_sha or "(unavailable — not a git checkout / baked image)")
+    if run_label:
+        line("Run label", run_label)
+    if vep_line:
+        # the verbatim VEP header line — the definitive, self-describing provenance record
+        line("VEP header", vep_line[:400])
     ws.sheet_view.showGridLines = False
 
     # ---- data sheets ----

@@ -119,18 +119,21 @@ for row in "${rows[@]}"; do
     # Subset to the trio's 3 members (dropping any extra members in a multi-sample VCF),
     # split multiallelics, then keep only alleles the trio actually carries (--min-ac 1
     # applied AFTER the split, so AC=0 alt alleles do not leak into the union). Then drop
-    # genotypes and strip per-trio INFO. `norm -c w` warns (never silently rewrites) on a
-    # REF mismatch — a build/contig problem should be visible, not masked.
+    # genotypes and strip per-trio INFO. `norm -c e` (bcftools' default check-ref mode) ABORTS on a
+    # REF mismatch — fail fast, attributed to THIS trio via the "[trio]" log line above, BEFORE any
+    # union work. The earlier `-c w` (warn+keep) merely deferred the same crash to the union `norm`
+    # (which also defaults to `-c e`), where the error names the locus but not the offending trio/file.
+    # A build/contig mismatch must halt the run loudly, not be masked or deferred.
     log "  [$trio] subsetting to trio + normalizing + dropping genotypes"
     if [[ -n "$samples" ]]; then
         bcftools view -s "$samples" -f "$FILTER" -t "^$EXCLUDE_CONTIGS" --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c w -Ou - \
+            | bcftools norm -m- -f "$REF" -c e -Ou - \
             | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     else
         bcftools view -f "$FILTER" -t "^$EXCLUDE_CONTIGS" --threads "$THREADS" -Ou "$vcf" \
-            | bcftools norm -m- -f "$REF" -c w -Ou - \
+            | bcftools norm -m- -f "$REF" -c e -Ou - \
             | bcftools view --min-ac 1 -Ou - \
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
@@ -169,7 +172,7 @@ scheduler's file-descriptor setting) or split the cohort into sub-unions. Procee
 fi
 bcftools concat -a -D -f "$filelist" --threads "$THREADS" -Ou \
     | bcftools sort -T "$tmp_sort" -Ou - \
-    | bcftools norm -d exact -f "$REF" --threads "$THREADS" -Oz -o "$OUT" -
+    | bcftools norm -d exact -f "$REF" -c e --threads "$THREADS" -Oz -o "$OUT" -   # -c e explicit (= default); matches the per-trio check
 index_vcf "$OUT"
 require_intact_bgzip "$OUT"
 mark_done "$OUT"

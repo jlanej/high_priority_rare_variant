@@ -61,7 +61,7 @@ Otherwise the "same" variant carries multiple representations and dedup/annotati
 
 1. **Split multiallelics to biallelic**: `bcftools norm -m-` (default splits all types).
 2. **Left-align and normalize indels against the reference**: requires `-f <GRCh38.fa>`; left-alignment/normalization only fires when `--fasta-ref` is supplied. Use the **exact GRCh38 build the trios were called against** — matching contig naming (e.g. `chr1`) and including the alt/decoy contigs per Kids First.
-3. **Check REF against the reference** for mismatches. The pipeline uses `-c w` (**warn**, never silently rewrite) so a build/contig mismatch stays visible rather than being masked by an automatic `-c s` rewrite.
+3. **Check REF against the reference** for mismatches. The pipeline uses `-c e` (bcftools' default: **abort** on a REF/ALT mismatch) so a build/contig mismatch halts the run fast, attributed to the specific trio in flight — rather than being masked by an automatic `-c s` rewrite, or (as `-c w` did) deferred to a trio-unattributable crash in the union `norm`.
 4. **Drop genotypes** to make the file sites-only: `bcftools view -G`.
 5. **Sort, bgzip, index** each file (`bcftools sort`; `bcftools index -t`).
 6. **Union with dedup**: `bcftools concat -a -D` on the normalized sites files removes duplicate identical records; follow with `sort` + `norm -d exact` to collapse residual duplicates that differ only in representation.
@@ -84,7 +84,7 @@ Per-trio genotype/QC gates (GQ, DP, allele balance, FILTER=PASS, refined-PP hand
 Per-trio prep (run on each trio file):
 
 ```bash
-bcftools norm -m- -f "${REF_FASTA}" -c w "${TRIO_VCF}" -Ou \
+bcftools norm -m- -f "${REF_FASTA}" -c e "${TRIO_VCF}" -Ou \
   | bcftools view -G -Oz -o "${TRIO_SITES}" \
   && bcftools index -t "${TRIO_SITES}"
 ```
@@ -134,7 +134,7 @@ The population-rarity decision lives entirely with the external oracle: **gnomAD
 | `--missing-to-ref` | **Never** | Guarantees AN inflation, hides missingness |
 | Multiallelic handling | `bcftools norm -m-` | Split to biallelic before union |
 | Left-align / normalize | `norm -f <GRCh38.fa>` on the exact build the trios used | Contig-name matched; alt/decoy per Kids First |
-| REF check | `norm -c w` (warn on REF/ALT mismatch; never rewrite) | Surface build/contig problems, don't mask them |
+| REF check | `norm -c e` (abort on REF/ALT mismatch; bcftools default) | Fail fast, attributed to the trio; surface build/contig problems, don't mask them |
 | Drop genotypes | `bcftools view -G` | Makes the file sites-only |
 | Union + dedup | `concat -a -D` → `sort` → `norm -d exact` | Collapse residual representation duplicates |
 | Per-trio INFO | Strip (`annotate -x INFO`) | Incomparable across independent calls (FILTER kept — already PASS-filtered upstream) |
