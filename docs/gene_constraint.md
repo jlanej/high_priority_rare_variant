@@ -5,6 +5,12 @@ How this pipeline uses gene- and region-level constraint metrics as graded prior
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
+> **What is actually wired (Step 6):** only **LOEUF_v2 (`oe_lof_upper`) < 0.35**, **pLI ≥ 0.90**,
+> **s_het ≥ 0.10**, and **pHaplo ≥ 0.86**, read from the constraint TSV and collapsed into a single
+> boolean `constrained` flag that up-weights a gene's rank (`06_gene_burden.py`). Everything else
+> below — **MPC**, **missense-Z**, **pTriplo**, **ClinGen HI/dosage**, **DOMINO**, and the Tier 1/2/3
+> scheme — is **TARGET / reference science, not yet wired**; no code reads those columns or tiers.
+
 ## TL;DR
 
 - Constraint quantifies depletion of variation versus a mutation-rate-calibrated neutral expectation; it is a gene/region **prior on dominant (haploinsufficiency) relevance** and is largely uninformative for recessive genes.
@@ -141,7 +147,10 @@ Downstream weighting (tier assignment) is done in the scoring layer, not by filt
 | Recessive candidates | **no pLoF-constraint down-weighting** | Biallelic loss is population-tolerated |
 | Role of constraint | **ranking weight only** | Never a standalone exclusion filter |
 
-All values are configurable defaults in `config/config.example.yaml`; a gene-specific ClinGen VCEP threshold overrides any generic cutoff where available.
+The **wired** constraint cutoffs (LOEUF_v2, pLI, s_het, pHaplo) are configurable defaults under
+`filters.constraint_weighting` in `config/config.example.yaml`; the other metrics in this table
+(MPC, missense-Z, pTriplo, ClinGen HI, DOMINO) are TARGET and have no config key today. A
+gene-specific ClinGen VCEP threshold overrides any generic cutoff where available.
 
 ## Sources
 

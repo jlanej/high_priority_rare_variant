@@ -170,12 +170,12 @@ Reproducibility of a *decision* is only as good as the pipeline's coverage. Stat
 
 | Item | Canonical default |
 | --- | --- |
-| Base image | `FROM mambaorg/micromamba@sha256:...` (digest-pinned) + **conda-lock** lockfile |
-| bcftools / htslib / samtools | **1.22** (overridable) |
+| Base image | `FROM ensemblorg/ensembl-vep:release_115.0` (tag-pinned) + a **micromamba** layer for the pinned analysis env. `@sha256` digest-pin + **conda-lock** lockfile = TARGET (the base is tag-pinned today; CI records the resolved digest) |
+| bcftools / htslib / samtools | **1.23** (overridable) — 1.23 not 1.22, because slivar 0.3.4 on bioconda needs htslib ≥ 1.23.1 |
 | bedtools | **2.31.1** |
 | vcfanno / slivar | **0.3.3** / **0.3.4** |
-| ensembl-vep | **115** (matches working annotate script) |
-| Python | `cyvcf2` / `pysam` (htslib 1.22) / `pandas` / `numpy`, all lock-pinned |
+| ensembl-vep | **115** (from the base image; matches the working annotate script) |
+| Python | `cyvcf2` / `pysam` (htslib 1.23) / `pandas` / `numpy`, version-pinned (`conda-lock` = TARGET) |
 | VEP cache | **external, bind-mounted, release-matched** to the VEP binary; annotate against **GRCh38** |
 | Frequency oracle | **gnomAD v4.1** (external only), read from the **VEP cache**; filter field is the grpmax **proxy** (point estimate). `faf95` = TARGET — the cache carries no AC/AN ([limitations.md §2](limitations.md)) |
 | CI / publish | buildx → **GHCR** per commit; tag by git SHA + branch; `provenance: true` + `sbom: true` + `attest-build-provenance`; **amd64-only**; consume by `@sha256:` digest |

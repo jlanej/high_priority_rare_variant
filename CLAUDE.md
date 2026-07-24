@@ -88,7 +88,7 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **PED sex**: the generated PED leaves kid sex unknown (`0`); Step 5 reads Step 0's inferred sex
   (`qc_report.tsv`) so X-linked/hemizygous logic fires correctly.
 - **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
-  (step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
+  (timestamp, step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
   `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.
 - **VEP runs ONCE** on the cohort union (Step 2). Step 4 transfers annotations with
   `bcftools annotate` — it never re-runs VEP. Keep it that way. Already have a VEP VCF? Set
