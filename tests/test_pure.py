@@ -221,6 +221,23 @@ def test_annotations_spliceai_ds():
     assert A.spliceai_ds(FakeVar({"vep_SpliceAI_pred_DS_AL": "."})) is None
 
 
+def test_spliceai_backfill_parsing():
+    from hprv import spliceai_backfill as SB
+    # per-event max over a single gene entry
+    b = SB._max_ds("A|GENE1|0.03|0.91|0.10|0.00|-5|10|3|-2")
+    assert b["DS_AL"] == 0.91 and b["DS_AG"] == 0.03 and b["DS_DL"] == 0.0
+    # per-event MAX across multiple gene entries
+    b = SB._max_ds("A|G1|0.10|0.20|0.30|0.40|1|2|3|4,A|G2|0.50|0.05|0.00|0.90|1|2|3|4")
+    assert (b["DS_AG"], b["DS_AL"], b["DS_DG"], b["DS_DL"]) == (0.5, 0.2, 0.3, 0.9)
+    assert SB._max_ds("") is None and SB._max_ds(None) is None and SB._max_ds("garbage") is None
+
+    class _V:
+        def __init__(s, ref, alt): s.REF = ref; s.ALT = [alt]
+    assert SB._is_indel(_V("A", "ACGT")) and SB._is_indel(_V("AT", "A"))   # ins / del
+    assert not SB._is_indel(_V("A", "G"))                                   # SNV (precomputed-complete)
+    assert not SB._is_indel(_V("AT", "GC")) and not SB._is_indel(_V("A", "*"))  # MNV / spanning-del
+
+
 def test_contamination():
     import tempfile
     from hprv import contamination as C

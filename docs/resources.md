@@ -295,6 +295,11 @@ Fetch/verify with `prepare_resources.sh --only spliceai`.
   files (not the ~100 GB whole dataset), verifies + indexes them, checks contig naming, and emits
   the `export SPLICEAI_SNV/INDEL` lines. This is a **host/HPC** helper (uses your authenticated `bs`),
   separate from the in-image `prepare_resources.sh`.
+- **Live backfill (Step 2b) needs NO extra download.** The optional `resources.vep.spliceai_backfill`
+  path scores the small set of variants lacking a precomputed value (novel indels) with the stock
+  Illumina model. That model + its GENCODE annotation are **bundled in the image's isolated
+  `spliceai` conda env** — the only data it needs is the reference FASTA you already provide. So the
+  precomputed files above are the only SpliceAI *download*; the backfill is compute, not data.
 - **Threshold.** The default `spliceai_ds_min: 0.2` is the ClinGen SVI PP3-supporting cutoff.
   Walker-2023 calibrated on **raw** (not masked) scores, so a raw-calibrated 0.2 is correct for the
   raw files here. Lower it toward 0.1/0.05 for higher deep-intronic recall (the raw score rides

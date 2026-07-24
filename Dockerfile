@@ -127,6 +127,35 @@ RUN set -eux; \
     kraken2 --version >/dev/null; \
     nonhuman-screen --version >/dev/null
 
+# --- SpliceAI live-backfill env (Step 2b, optional) — ISOLATED from the main hprv env --------
+# The stock Illumina `spliceai` needs TensorFlow, whose numpy/protobuf pins conflict with the main
+# env (cyvcf2 needs numpy>=2). So it lives in its OWN conda env at /opt/conda/envs/spliceai; Step 2b
+# invokes it via `micromamba run -n spliceai spliceai ...`. The trained model weights + the GENCODE
+# grch37/grch38 gene annotation are BUNDLED in the package, so Step 2b needs NO data download beyond
+# the reference FASTA (already required). CPU TensorFlow (GPU would need host CUDA + the
+# nvidia-container-toolkit; the backfill set — novel indels — is small, so CPU is fine).
+RUN set -eux; \
+    micromamba create -y -p /opt/conda/envs/spliceai -c conda-forge -c bioconda python=3.10 spliceai; \
+    micromamba clean -a -y
+# Build HARD-FAILS if TF + the bundled model cannot actually LOAD under the installed TF/keras — a
+# backfill env that imports but can't load the model would fail every run, silently, at runtime.
+# Tries tf.keras and standalone keras (bioconda may install either) and passes if EITHER loads.
+RUN micromamba run -n spliceai python <<'PY'
+import spliceai, os, glob, importlib
+d = os.path.dirname(spliceai.__file__)
+models = sorted(glob.glob(os.path.join(d, "models", "*.h5")))
+assert models, "no bundled SpliceAI model weights"
+assert os.path.exists(os.path.join(d, "annotations", "grch38.txt")), "no bundled grch38 annotation"
+ok, last = False, None
+for mod in ("tensorflow.keras.models", "keras.models"):
+    try:
+        importlib.import_module(mod).load_model(models[0]); ok = True; break
+    except Exception as e:  # noqa: BLE001 — any load failure is a build failure
+        last = e
+assert ok, f"FATAL: the SpliceAI model will not load under the installed TF/keras: {last!r}"
+print(f"spliceai env OK: {len(models)} bundled model(s) load")
+PY
+
 # --- pipeline code ----------------------------------------------------------
 COPY pipeline/ /opt/hprv/pipeline/
 COPY src/ /opt/hprv/src/
