@@ -79,7 +79,12 @@ log "Step 2b: $n_unscored variant(s) lack a precomputed SpliceAI score — scori
 # 2) score them live in the isolated env (bundled Illumina model + GENCODE grch38 annotation).
 # A backfill failure is NON-fatal: it is an optional enhancement, so warn loudly and leave the union
 # on its precomputed scores rather than aborting a long pipeline run.
-if ! hprv_run -- micromamba run -n spliceai spliceai -I "$sub" -O "$scored" -R "$REF" -A grch38 -D "$DISTANCE"; then
+# `-p "$SPLICEAI_ENV"` (prefix), NOT `-n spliceai` (name): both availability gates resolve the env
+# through $SPLICEAI_ENV and tell the operator to point HPRV_SPLICEAI_ENV at it, but `-n` resolves by
+# name under $MAMBA_ROOT_PREFIX/envs and would ignore that — so a custom prefix would pass preflight,
+# burn the whole VEP step, then fail here and be MISCLASSIFIED as a transient failure. Identical
+# behavior in the shipped image ($SPLICEAI_ENV defaults to exactly what `-n spliceai` resolved to).
+if ! hprv_run -- micromamba run -p "$SPLICEAI_ENV" spliceai -I "$sub" -O "$scored" -R "$REF" -A grch38 -D "$DISTANCE"; then
     warn "Step 2b: spliceai scoring FAILED — the annotated union keeps its PRECOMPUTED scores only (backfill NOT applied). \
 Check the reference matches the cohort build/contigs and the spliceai env, then remove $DONE and re-run Step 2 to retry."
     audit 02b_spliceai_backfill scoring_failed 1

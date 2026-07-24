@@ -59,8 +59,19 @@ eval "$_cfg_sh"
 # Re-derive it here, only when no explicit choice was made, so precedence stays
 # HPRV_RUNTIME env > runtime.engine > auto-detect.
 if [[ "${HPRV_RUNTIME:-auto}" == "auto" && -n "${HPRV_ENGINE:-}" ]]; then
-    HPRV_RUNTIME="$HPRV_ENGINE"; export HPRV_RUNTIME
+    HPRV_RUNTIME="$HPRV_ENGINE"
 fi
+# Export UNCONDITIONALLY: when the branch above does not fire, HPRV_RUNTIME may be a
+# NON-exported shell variable that common.sh's `:=` created from an env HPRV_ENGINE (a documented
+# alias) — and the config eval has since overwritten HPRV_ENGINE with runtime.engine, so parent and
+# child shells would silently disagree. Safe: HPRV_RUNTIME can only still be "auto" here when
+# HPRV_ENGINE is empty, so this never shadows a config runtime.engine.
+export HPRV_RUNTIME
+# The same eval emits `export VAR=''` for every UNRESOLVED ${ENV} key (config.py deliberately does
+# this so shell-level defaults win) — which also nulls common.sh's `:=` defaults for HPRV_IMAGE and
+# HPRV_TMPDIR in THIS shell. Step scripts recover (fresh shell, re-source), but any hprv_run call
+# HERE would otherwise run `apptainer exec --workdir '' ''`. Restore them before the first one.
+: "${HPRV_IMAGE:=ghcr.io/jlanej/high_priority_rare_variant:latest}"; export HPRV_IMAGE
 
 is_set "${HPRV_OUTPUT_DIR:-}"  || die "project.output_dir is unresolved — set the env var it references"
 is_set "${HPRV_REF_FASTA:-}"   || die "reference.fasta is unresolved — set the env var it references"
@@ -111,14 +122,6 @@ if run_step 2; then
         for m in "${r_missing[@]}"; do warn "  - $m"; done
         die "point resources.vep.cache_dir at a VEP ${HPRV_VEP_VERSION:-115} GRCh38 cache (or set resources.vep.annotated_vcf to a VEP VCF you already have), and resolve each item above, then re-run. See docs/resources.md."
     fi
-    # Step 2b availability gate. The backfill is ON by default, so an ABSENT env halts the run HERE
-    # — at second 1, before the hours of VEP — rather than after. Checked regardless of how the union
-    # is produced (the backfill runs on it either way, including the annotated_vcf ingest path).
-    # NB availability != failure: a transient failure mid-scoring still degrades (see the 2b call).
-    if [[ "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
-        _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
-        hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI backfill (Step 2b) is ENABLED but its isolated env is not available at '$_sai_env' (no executable bin/spliceai). That env ships only in the container image — run inside it (apptainer exec hprv.sif ...), point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill. See docs/resources.md#spliceai."
-    fi
 fi
 
 W="$HPRV_OUTPUT_DIR"
@@ -131,6 +134,18 @@ export HPRV_AUDIT_DIR="$W/audit"
 require_writable_dir "$W" "project.output_dir"
 require_writable_dir "$HPRV_TMPDIR" "runtime.tmpdir (scratch for norm/sort/VEP)"
 require_writable_dir "$HPRV_AUDIT_DIR" "audit dir"
+
+# Step 2b availability gate. The backfill is ON by default, so an ABSENT env halts the run HERE —
+# at second 1, before the hours of VEP — rather than after. Checked regardless of how the union is
+# produced (the backfill runs on it either way, including the annotated_vcf ingest path).
+# Placed AFTER the tmpdir is defaulted + write-probed above: this is the first hprv_run in the
+# orchestrator's own shell, and hprv_run does `mkdir -p "$HPRV_TMPDIR"` and passes --workdir to
+# apptainer/docker, so running it any earlier would probe with an empty tmpdir and image.
+# NB availability != failure: a transient failure mid-scoring still degrades (see the 2b call).
+if run_step 2 && [[ "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
+    _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
+    hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI backfill (Step 2b) is ENABLED but its isolated env is not available at '$_sai_env' (no executable bin/spliceai). That env ships only in the container image — run inside it (apptainer exec hprv.sif ...), point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill. See docs/resources.md#spliceai."
+fi
 RESOLVED="$W/trios.resolved.tsv"
 
 # ---------------------------------------------------------------------------

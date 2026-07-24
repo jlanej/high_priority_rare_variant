@@ -66,7 +66,12 @@ done
 mkdir -p "$HPRV_TMPDIR"; binds+=" $HPRV_TMPDIR"   # norm/cand + shared region BED + sort scratch live here; wrapped tools must see it
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
-# ensure plausible sites indexed
+# Step 3 writes plausible.sites.vcf.gz IN PLACE and indexes it only after the writer closes, and it
+# is the one pipeline product with neither an integrity check nor a .done marker. A walltime/OOM kill
+# mid-write leaves a TRUNCATED .gz beside a prior run's still-valid-looking .tbi — and index_vcf() is
+# a no-op when any index exists, so a `--from 4` resume would read truncated data through a stale
+# index and stamp every trio complete. Verify before trusting it (same guard as PLAUSIBLE_TX below).
+require_intact_bgzip "$PLAUSIBLE"
 index_vcf "$PLAUSIBLE"
 
 # Build the annotation SOURCE = plausible sites with the GATK de novo tags stripped, ONCE
@@ -107,7 +112,23 @@ bcftools query -f '%CHROM\t%POS\t%REF\n' "$PLAUSIBLE" \
     | awk 'BEGIN{OFS="\t"}{if($1==c&&$2<=e){if($3>e)e=$3}else{if(c!="")print c,s,e;c=$1;s=$2;e=$3}}END{if(c!="")print c,s,e}' \
     > "$region_bed"
 REGION_OK=0
-if [[ -s "$region_bed" ]]; then REGION_OK=1; else warn "no plausible loci in $PLAUSIBLE; region-restrict disabled"; fi
+# An EMPTY region BED can only mean Step 3 kept 0 sites (set -euo pipefail aborts on a tool failure).
+# Continuing would force every trio down the whole-genome branch — a full `bcftools norm -f REF` —
+# only to isec against a zero-record file, then exit 0 with an empty candidates.calls.tsv,
+# genes.ranked.tsv and xlsx, every trio .done-stamped. Die instead (same silent-catastrophe class
+# Step 2's frequency guard already dies on).
+if [[ -s "$region_bed" ]]; then
+    REGION_OK=1
+else
+    die "no plausible loci in $PLAUSIBLE — Step 3 kept 0 sites, so every downstream artifact would be empty while the run exits 0. Check filters.rarity.* and filters.functional.{keep_impacts,cadd_phred_supporting,spliceai_ds_min}, and that the annotated union carries non-empty vep_IMPACT / vep_CADD_PHRED."
+fi
+
+# CONTENT key of the plausible set, for the per-trio cache below. Content, not mtime: Step 3 has no
+# .done guard and REWRITES plausible.sites.vcf.gz every run, so its mtime always changes even when
+# selection is identical — an mtime test would invalidate every trio on every resume and defeat the
+# cache entirely. Keyed so that a genuinely CHANGED selection (new thresholds, or Step 2b having
+# backfilled SpliceAI scores into the union) correctly invalidates the per-trio candidate VCFs.
+_plaus_key="$(cksum < "$PLAUSIBLE" | awk '{print $1"-"$2}')"
 
 printf 'trio_id\tcandidates_vcf\tped\n' > "$out_manifest"
 log "Step 4: extracting candidate genotypes for ${#rows[@]} trios"
@@ -118,15 +139,29 @@ for row in "${rows[@]}"; do
     trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
     ped=""; [[ $pedcol -gt 0 ]] && ped="${f[$((pedcol-1))]}"
     samples=""; [[ $scol -gt 0 ]] && samples="${f[$((scol-1))]}"
-    [[ -n "$trio" && -f "$vcf" ]] || { warn "skipping $trio (missing VCF)"; continue; }
+    [[ -n "$trio" && -n "$vcf" ]] || { warn "skipping malformed manifest row: $row"; continue; }
 
     out="$trio_dir/${trio}.candidates.annotated.vcf.gz"
-    if is_done "$out"; then
+    # Keyed on the plausible set this candidate VCF was DERIVED from, not mere existence. A bare
+    # is_done would report "cached" after Step 3 legitimately re-selected (changed thresholds, or
+    # Step 2b backfilling SpliceAI scores into the union) — so the new calls would never reach
+    # candidates.calls.tsv / genes.ranked.tsv / the xlsx / igv, silently, with no warning.
+    if is_done "$out" && [[ "$(cat "$out.done" 2>/dev/null)" == "$_plaus_key" ]]; then
         log "  [$trio] cached"
         printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
         audit 04_subset candidate_genotypes "$(count_variants "$out")" "$trio"
         continue
     fi
+    # Regenerating: drop the previous output AND its index. index_vcf() is a no-op when any index
+    # exists, so a surviving .tbi would be reused against the rewritten data.
+    rm -f "$out" "$out".tbi "$out".csi "$out".done
+    # We actually have to BUILD this trio, so the source VCF must be there. die, don't skip: Step 1
+    # dies on this same condition, and Step 6's --n-trios comes from trios.resolved.tsv, never from
+    # trios.candidates.tsv — so silently dropping a trio here would leave the binomial denominator
+    # overstating the screened cohort and make every recurrence p-value anti-conservative.
+    # Checked AFTER the cache hit above, so a resume whose candidates are already built (and whose
+    # source VCF may no longer be mounted) still succeeds.
+    [[ -f "$vcf" ]] || die "trio VCF not found for $trio: $vcf — Step 1 dies on this too. Dropping the trio here would leave Step 6's --n-trios (taken from trios.resolved.tsv) overstating the screened cohort. Fix the bind mount / manifest, or remove the trio from the trios file and re-resolve."
 
     norm="$HPRV_TMPDIR/${trio}.norm.vcf.gz"
     cand="$HPRV_TMPDIR/${trio}.cand.vcf.gz"
@@ -223,7 +258,9 @@ for row in "${rows[@]}"; do
     # own hiConfDeNovo/loConfDeNovo (see the PLAUSIBLE_TX note). Allele-exact: keyed CHROM+POS+REF+ALT.
     bcftools annotate -a "$PLAUSIBLE_TX" -c INFO --threads "$THREADS" -Oz -o "$out" "$cand"
     index_vcf "$out"
-    require_intact_bgzip "$out"; mark_done "$out"
+    # Stamp the marker with the plausible-set key (not an empty mark_done), so the cache check above
+    # can tell "already built from THIS selection" from "built from a previous one".
+    require_intact_bgzip "$out"; printf '%s\n' "$_plaus_key" > "$out.done"
     rm -f "$norm" "$norm".{tbi,csi} "$cand" "$cand".{tbi,csi} 2>/dev/null || true
 
     printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"

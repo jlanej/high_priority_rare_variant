@@ -44,7 +44,15 @@ done
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
 [[ -f "$REF" ]] || die "reference FASTA not found: $REF"
 
-if is_done "$OUT"; then log "Step 1 already complete: $OUT (skipping)"; exit 0; fi
+# Key the resume marker to the TRIO SET this union was built from. A bare is_done only checks that
+# the file exists and is an intact bgzip, and run_pipeline re-resolves trios on every default run —
+# so adding a trio would leave the stale union in place (Step 2 skips too), Step 3 would select from
+# it, and Step 4 would still loop over the full manifest while Step 6's --n-trios denominator counted
+# the new trio. The new trio's private variants would be silently invisible, with nothing warning.
+_mkey="$(cksum < "$MANIFEST" | awk '{print $1"-"$2}')"
+if is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_mkey" ]]; then
+    log "Step 1 already complete: $OUT (skipping)"; exit 0
+fi
 
 workdir="$(abspath_dir "$OUT")/sites_work"
 mkdir -p "$workdir"
@@ -173,9 +181,12 @@ fi
 bcftools concat -a -D -f "$filelist" --threads "$THREADS" -Ou \
     | bcftools sort -T "$tmp_sort" -Ou - \
     | bcftools norm -d exact -f "$REF" -c e --threads "$THREADS" -Oz -o "$OUT" -   # -c e explicit (= default); matches the per-trio check
+# index_vcf() is a no-op when ANY index exists, so a re-union (new trio set) would otherwise inherit
+# the PREVIOUS union's index and read offsets that no longer match the data. Force a fresh one.
+rm -f "$OUT".tbi "$OUT".csi
 index_vcf "$OUT"
 require_intact_bgzip "$OUT"
-mark_done "$OUT"
+printf '%s\n' "$_mkey" > "$OUT.done"   # keyed marker (see the resume guard at the top)
 
 n="$(count_variants "$OUT")"
 audit 01_cohort_sites trios "${#site_files[@]}"

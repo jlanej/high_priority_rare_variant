@@ -134,15 +134,24 @@ def _max_float(variant, *keys) -> Optional[float]:
         v = _raw(variant, key)
         if v is None:
             continue
-        for tok in str(v).replace("&", ",").split(","):
-            tok = tok.strip()
-            if tok in ("", "."):
-                continue
-            try:
-                f = float(tok)
-            except ValueError:
-                continue
-            best = f if best is None else max(best, f)
+        # cyvcf2 returns a TUPLE (not a comma-joined string) for a numeric INFO field carrying more
+        # than one value, and str(tuple) is "(0.001, 0.004)" — whose tokens '(0.001' / '0.004)'
+        # BOTH fail float(), so the old single-str() loop returned None. `bcftools +split-vep` types
+        # every vep_gnomAD{e,g}_<POP>_AF column Number=.,Type=Float, so any selector that emits more
+        # than one CSQ block (-s all, -s mane at a two-gene locus, -s pick on a multiallelic site)
+        # hit this — and a None frequency reads as "absent from gnomAD => rarest", RETAINING common
+        # polymorphisms with no way to notice. Golden rule 2: this is the rarity oracle.
+        # Iterate the container first, then split each element.
+        for item in v if isinstance(v, (tuple, list)) else (v,):
+            for tok in str(item).replace("&", ",").split(","):
+                tok = tok.strip()
+                if tok in ("", "."):
+                    continue
+                try:
+                    f = float(tok)
+                except ValueError:
+                    continue
+                best = f if best is None else max(best, f)
     return best
 
 

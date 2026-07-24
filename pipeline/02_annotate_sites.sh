@@ -85,7 +85,19 @@ VEP_VERSION="${HPRV_VEP_VERSION:-115}"
 # The $OUT-complete short-circuit applies only to run styles that PRODUCE $OUT (default, ingest,
 # gather). --shard-contig produces a per-contig shard and --emit-shard-manifest produces a manifest.
 if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
-    if is_done "$OUT"; then log "Step 2 already complete: $OUT (skipping)"; exit 0; fi
+    # Keyed to the INPUT that produced $OUT, so a re-unioned cohort (Step 1 rebuilt because the trio
+    # set changed) correctly invalidates the annotated union instead of being masked by a bare
+    # existence marker. Without this, Step 1's keyed invalidation would not propagate: Step 2 would
+    # skip and Step 3 would select from stale annotations.
+    # The key source differs by run style: the sites union normally, the ingested VEP VCF under
+    # --vep-vcf (where --sites is not required at all, so $SITES may be empty).
+    _kin="$SITES"; is_set "$PRE_VEP" && _kin="$PRE_VEP"
+    _skey=""; [[ -f "$_kin" ]] && _skey="$(cksum < "$_kin" | awk '{print $1"-"$2}')"
+    # An unreadable input leaves the key empty -> never skip; recomputing is the safe direction
+    # (the missing input then fails loudly below rather than silently reusing a stale annotation).
+    if [[ -n "$_skey" ]] && is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_skey" ]]; then
+        log "Step 2 already complete: $OUT (skipping)"; exit 0
+    fi
 fi
 
 outdir="$(abspath_dir "$OUT")"; mkdir -p "$outdir"
@@ -387,6 +399,12 @@ split_vcf="$HPRV_TMPDIR/split.vcf.gz"
 # option `--threads'"); passing it aborts the step. $THREADS applies to vep --fork above.
 hprv_run -- bcftools +split-vep -c "$have_fields" -s "$sel" -p vep_ \
     -Oz -o "$split_vcf" "$vep_vcf"
+# $HPRV_TMPDIR defaults to the PERSISTENT $W/tmp and is never cleaned, while split.vcf.gz is
+# REWRITTEN every run. index_vcf() is a no-op when any index exists, so a stale index left by a run
+# that died after this point (e.g. at the frequency guard below) would be reused here and then
+# installed as the authoritative index of $OUT by the `mv` at the end — with the record count and
+# offsets of the PREVIOUS run. Force a fresh index to match the fresh data.
+rm -f "$split_vcf".tbi "$split_vcf".csi
 index_vcf "$split_vcf"
 
 # --- no external transfers: gnomAD/ClinVar came from the cache with the CSQ above ---
@@ -426,6 +444,9 @@ mv "$cur" "$OUT"
 if   [[ -f "$cur.tbi" ]]; then mv "$cur.tbi" "$OUT.tbi"
 elif [[ -f "$cur.csi" ]]; then mv "$cur.csi" "$OUT.csi"
 else index_vcf "$OUT"; fi
-require_intact_bgzip "$OUT"; mark_done "$OUT"
+# Keyed marker (see the resume guard at the top): records WHICH input this annotation came from, so
+# a re-unioned cohort invalidates it. Falls back to a bare marker if the key could not be computed.
+require_intact_bgzip "$OUT"
+if [[ -n "${_skey:-}" ]]; then printf '%s\n' "$_skey" > "$OUT.done"; else mark_done "$OUT"; fi
 audit 02_annotate annotated_sites "$(count_variants "$OUT")"
 log "Step 2 complete: $OUT"
