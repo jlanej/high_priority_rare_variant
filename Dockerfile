@@ -134,26 +134,38 @@ RUN set -eux; \
 # grch37/grch38 gene annotation are BUNDLED in the package, so Step 2b needs NO data download beyond
 # the reference FASTA (already required). CPU TensorFlow (GPU would need host CUDA + the
 # nvidia-container-toolkit; the backfill set — novel indels — is small, so CPU is fine).
+#
+# PIN to the Keras-2 era (`tensorflow <2.16` pulls `keras 2.15`). REQUIRED, not cosmetic: SpliceAI
+# loads its models via the STANDALONE keras (`from keras.models import load_model`) and ships legacy
+# Keras-2 `.h5` weights, but the bioconda recipe pins only `keras >=2.0.5` / `tensorflow >=1.13.0`
+# (both unbounded), so a fresh solve installs Keras 3 + TF >=2.16 — and Keras 3 CANNOT deserialize
+# those `.h5` models. `keras <3` is belt-and-suspenders should the solver ever decouple them.
 RUN set -eux; \
-    micromamba create -y -p /opt/conda/envs/spliceai -c conda-forge -c bioconda python=3.10 spliceai; \
+    micromamba create -y -p /opt/conda/envs/spliceai -c conda-forge -c bioconda \
+        python=3.10 'spliceai' 'tensorflow>=2.13,<2.16' 'keras<3'; \
     micromamba clean -a -y
-# Build HARD-FAILS if TF + the bundled model cannot actually LOAD under the installed TF/keras — a
-# backfill env that imports but can't load the model would fail every run, silently, at runtime.
-# Tries tf.keras and standalone keras (bioconda may install either) and passes if EITHER loads.
+# Build HARD-FAILS if the bundled model cannot actually LOAD under the installed TF/keras — a backfill
+# env that imports but can't load the model would fail every run, silently, at runtime. Replicates the
+# CLI's exact load path (standalone `keras.models.load_model`) first, then tf.keras; asserts Keras 2 up
+# front and prints versions + the FULL traceback on failure so any re-fail is self-diagnosing.
 RUN micromamba run -n spliceai python <<'PY'
-import spliceai, os, glob, importlib
+import os, glob, importlib, traceback
+import spliceai, tensorflow as tf, keras
 d = os.path.dirname(spliceai.__file__)
 models = sorted(glob.glob(os.path.join(d, "models", "*.h5")))
 assert models, "no bundled SpliceAI model weights"
 assert os.path.exists(os.path.join(d, "annotations", "grch38.txt")), "no bundled grch38 annotation"
+print(f"tensorflow={tf.__version__} keras={keras.__version__}")
+assert keras.__version__.split(".")[0] == "2", \
+    f"need Keras 2 — SpliceAI ships legacy .h5 models Keras 3 cannot load; got keras {keras.__version__}"
 ok, last = False, None
-for mod in ("tensorflow.keras.models", "keras.models"):
+for mod in ("keras.models", "tensorflow.keras.models"):  # CLI uses standalone keras — test it first
     try:
         importlib.import_module(mod).load_model(models[0]); ok = True; break
-    except Exception as e:  # noqa: BLE001 — any load failure is a build failure
-        last = e
-assert ok, f"FATAL: the SpliceAI model will not load under the installed TF/keras: {last!r}"
-print(f"spliceai env OK: {len(models)} bundled model(s) load")
+    except Exception:  # noqa: BLE001 — any load failure is a build failure
+        last = traceback.format_exc()
+assert ok, f"FATAL: SpliceAI model will not load under tf={tf.__version__}/keras={keras.__version__}:\n{last}"
+print(f"spliceai env OK: {len(models)} bundled model(s) load under keras {keras.__version__}")
 PY
 
 # --- pipeline code ----------------------------------------------------------
