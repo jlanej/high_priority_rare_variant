@@ -114,7 +114,13 @@ annotate_one_contig() {  # $1 = contig ; requires vep_args set
     local out="$sd/vep.${c}.vcf.gz"
     if is_done "$out"; then log "  [$c] cached (resume)"; return 0; fi
     local sub="${HPRV_TMPDIR:-/tmp}/sites.${c}.$$.vcf.gz"
-    hprv_run -- bcftools view -r "$c" -Oz -o "$sub" "$SITES"
+    # Brace-quote the contig as a whole region: htslib's region parser splits an unquoted
+    # `contig:pos` on ':', so a GRCh38 ALT_HLA contig (e.g. `HLA-A*01:01:01:01`, present in the
+    # standard Broad reference and carried untouched through Step 1) fails region-init with
+    # "Could not parse the region(s)" and aborts the whole (multi-hour) annotation. `{$c}` forces
+    # the entire string to be read as a contig name — verified safe + index-scoped for plain
+    # contigs (chr1) too. (`-t "$c"` does NOT help — it colon-splits identically.)
+    hprv_run -- bcftools view -r "{$c}" -Oz -o "$sub" "$SITES"
     log "  [$c] VEP ($(count_variants "$sub") sites)"
     hprv_run -- vep "${vep_args[@]}" -i "$sub" -o "$out"
     require_intact_bgzip "$out"; mark_done "$out"; rm -f "$sub"
@@ -353,7 +359,18 @@ index_vcf "$split_vcf"
 # are all un-accessioned, yields a fully-populated header over entirely empty values — and every
 # rarity gate then reads None ("rarest") and keeps everything. So assert on the VALUES.
 cur="$split_vcf"
-freq_expr='INFO/vep_gnomADe_AF!="." || INFO/vep_gnomADg_AF!="." || INFO/vep_MAX_AF!="."'
+# Build the presence expression over ONLY the frequency tags VEP actually emitted. bcftools
+# validates EVERY referenced INFO tag at filter-init, regardless of `||` short-circuit — so naming
+# a tag the header lacks aborts the query even when a present tag carries a real value. The self-run
+# path always emits all three global/max fields, but a `--vep-vcf` ingest made with, say,
+# `--af_gnomadg` but no `--max_af` carries valid frequencies yet lacks vep_MAX_AF; hardcoding all
+# three would refuse it with a misleading "broken cache" die. The grpmax-eligible fields are
+# guaranteed present by the header guard above (_n_grpmax>0), so freq_expr is never empty.
+freq_expr=""
+for _f in gnomADe_AF gnomADg_AF MAX_AF $GRPMAX_AF_FIELDS; do
+    _have "$_f" && freq_expr+="${freq_expr:+ || }INFO/vep_${_f}!=\".\""
+done
+[[ -n "$freq_expr" ]] || die "no gnomAD frequency fields present to value-check (unreachable after the grpmax header guard)"
 # `query -f '\n'`, not `view -H | wc -l`: we want a COUNT, and view -H reconstructs every matching
 # record — all 25 vep_* INFO fields of it — just to throw it away at wc. query emits one byte per
 # match. Measured on the integration data: 15,521 bytes vs 22 for the identical count of 22; that

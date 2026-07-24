@@ -198,7 +198,14 @@ count_variants() {
 is_done() {
     local out="$1"
     [[ -f "${out}.done" && -s "$out" ]] || return 1
-    if [[ "$out" == *.gz ]]; then require_intact_bgzip "$out" 2>/dev/null || return 1; fi
+    # Probe integrity NON-fatally: a corrupt/truncated .gz beside a stale .done must read as
+    # "not done" so the caller REGENERATES it — that is the whole point of the integrity check in
+    # a resumable pipeline on flaky FUSE/SBFS storage. Do NOT call require_intact_bgzip here: it
+    # ends in die() (exit 1), and being invoked in the main shell it would ABORT the entire run
+    # instead of returning non-zero (the `|| return 1` was dead code). Inline a returning probe.
+    if [[ "$out" == *.gz ]]; then
+        hprv_run -- bgzip -t "$out" >/dev/null 2>&1 || gzip -t "$out" >/dev/null 2>&1 || return 1
+    fi
     return 0
 }
 mark_done() { touch "${1}.done"; }
