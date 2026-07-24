@@ -150,6 +150,23 @@ log "Step 1: unioning ${#site_files[@]} per-trio site files"
 tmp_sort="$HPRV_TMPDIR/sort"; mkdir -p "$tmp_sort"
 filelist="$workdir/union_filelist.txt"
 printf '%s\n' "${site_files[@]}" > "$filelist"
+# `concat -a` (allow-overlaps: each per-trio site file re-emits chr1..chrY, so plain concat would
+# reject them as unsorted) opens a synced reader for EVERY input at once — ~1 FD/file. A large
+# cohort exceeds the default soft open-file limit (1024) and aborts deep in concat with a cryptic
+# "[E::hts_idx_load3] Too many open files". Raise the soft limit toward the hard limit to cover
+# this run; if even the hard limit is too low, warn LOUDLY with an actionable message up front
+# rather than failing obscurely mid-union. (ulimit here propagates to the bcftools child, native
+# or under apptainer/docker exec.)
+_fds_need=$(( ${#site_files[@]} + 64 ))          # inputs + headroom for stdio/pipes/index handles
+_fds_hard="$(ulimit -Hn 2>/dev/null || echo unlimited)"
+if [[ "$_fds_hard" == unlimited || "$_fds_need" -le "$_fds_hard" ]]; then
+    ulimit -Sn "$_fds_need" 2>/dev/null || true
+else
+    ulimit -Sn "$_fds_hard" 2>/dev/null || true
+    warn "Step 1: ${#site_files[@]} trios need ~$_fds_need open files but the hard limit is $_fds_hard — \
+'bcftools concat -a' may abort with 'Too many open files'. Raise the limit (ulimit -Hn, or your \
+scheduler's file-descriptor setting) or split the cohort into sub-unions. Proceeding anyway."
+fi
 bcftools concat -a -D -f "$filelist" --threads "$THREADS" -Ou \
     | bcftools sort -T "$tmp_sort" -Ou - \
     | bcftools norm -d exact -f "$REF" --threads "$THREADS" -Oz -o "$OUT" -
