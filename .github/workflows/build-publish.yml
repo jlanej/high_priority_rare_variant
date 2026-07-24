@@ -163,6 +163,14 @@ jobs:
         shell: micromamba-shell {0}
         run: bash tests/integration/run_integration.sh
 
+      # Step-8b `members: carriers` regression: runs the REAL 08_igv_export.sh with a stubbed
+      # nonhuman-screen over BASE-FORM genotypes (as Step 5 emits), asserting a carrier parent is
+      # NHF-screened and a non-carrier is not. Guards the awk that once tested base GTs for a digit
+      # that cannot appear (silently degrading `carriers` to `child_only`). Needs the bio stack.
+      - name: Step-8b carrier-policy regression test
+        shell: micromamba-shell {0}
+        run: bash tests/test_nhf_carriers.sh
+
   build-publish:
     runs-on: ubuntu-latest
     # Gate publishing on the checks: a test-failing (but image-valid) regression must NOT ship to

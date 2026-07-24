@@ -48,3 +48,9 @@ dependencies:
   - pyyaml=6.*              # config parsing
   - click=8.*               # CLI ergonomics for the python steps
   - openpyxl=3.*            # consolidated xlsx supplemental-table summary
+  # pip itself, so the Dockerfile can pip-install the two NON-conda Step-8b tools INTO this env:
+  #   * kraken2  — built FROM SOURCE in the Dockerfile (its pinned version predates bioconda), and
+  #   * nonhuman-screen[bam] — pip-installed at a pinned commit; [bam] pulls pysam (already above).
+  # Both are SOFTWARE baked into the image; the kraken2 DATABASE stays host-fetched + bind-mounted
+  # (never baked), like the VEP cache. See the Dockerfile's "kraken2 + nonhuman-screen" layer.
+  - pip

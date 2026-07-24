@@ -79,6 +79,8 @@ SH_MAP = {
     "HPRV_CADD_INDEL": "resources.vep.cadd_indel",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
+    # kraken2 DB for Step-8b non-human-fraction screening (bind-mounted DATA, never baked).
+    "HPRV_KRAKEN2_DB": "resources.kraken2_db",
 }
 
 

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from hprv import annotations as A  # noqa: E402
 from hprv import audit  # noqa: E402
 from hprv import genotype as G  # noqa: E402
+from hprv import igv  # noqa: E402
 from hprv.config import get  # noqa: E402
 from hprv.ped import parse_ped, read_trios_file, write_ped  # noqa: E402
 from hprv.selection import build_classifier  # noqa: E402
@@ -279,6 +280,104 @@ def test_burden_helpers():
     # monotone non-decreasing in p-value order
     ordered = [q[i] for i in sorted([0, 1, 2, 4], key=lambda i: [0.01, 0.02, 0.03, None, 0.5][i])]
     assert ordered == sorted(ordered)
+
+
+def _write_tsv(path, header, rows):
+    with open(path, "w") as fh:
+        fh.write("\t".join(header) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(r.get(h, "")) for h in header) + "\n")
+
+
+def _nhf_tsv(path, entries):
+    """entries: list of (variant_key, supporting_reads, nonhuman_fraction)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cols = ("variant_key", "supporting_reads", "nonhuman_fraction")
+    with open(path, "w") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for k, reads, frac in entries:
+            fh.write(f"{k}\t{reads}\t{frac}\n")
+
+
+def test_igv_nhf_join_is_pos_minus_one():
+    """Step-8b NHF folds into variants.tsv on the 0-based key (pos-1), with the read
+    denominator beside each fraction, and nhf_flag over the min_reads floor. A decoy key at
+    the WRONG offset must not match — the off-by-one is the one load-bearing join bug."""
+    d = tempfile.mkdtemp(prefix="_hprv_nhf_")
+    data = os.path.join(d, "igv")
+    os.makedirs(data, exist_ok=True)
+    manifest = os.path.join(d, "trios.resolved.tsv")
+    _write_tsv(manifest, ["trio_id", "vcf", "ped", "samples"],
+               [{"trio_id": "T1", "vcf": "x.vcf.gz", "ped": "x.ped", "samples": "KID,DAD,MOM"}])
+
+    calls = os.path.join(d, "candidates.calls.tsv")
+    _write_tsv(
+        calls, ["chrom", "pos", "ref", "alt", "trio_id", "mode",
+                "child_gt", "mother_gt", "father_gt"],
+        [
+            {"chrom": "chr1", "pos": "100", "ref": "A", "alt": "T", "trio_id": "T1", "mode": "dominant"},
+            {"chrom": "chr2", "pos": "200", "ref": "C", "alt": "CAT", "trio_id": "T1", "mode": "dominant"},
+            {"chrom": "chr3", "pos": "300", "ref": "G", "alt": "*", "trio_id": "T1", "mode": "compound_het"},
+            {"chrom": "chr4", "pos": "400", "ref": "A", "alt": "T", "trio_id": "T1", "mode": "dominant"},
+        ],
+    )
+
+    # CHILD table (KID): key is 0-based, so pos-100 call -> chr1:99. A decoy chr1:100 (= 1-based
+    # 101, a DIFFERENT variant) must NOT bleed onto the pos-100 row.
+    _nhf_tsv(os.path.join(data, "nhf", "T1", "KID.variant_nhf.tsv"), [
+        ("chr1:99:A:T", 10, "0.90"),      # <- correct match for the chr1:100 call
+        ("chr1:100:A:T", 99, "0.10"),     # <- decoy at the wrong offset
+        ("chr2:199:C:CAT", 8, "0.75"),    # indel, pos-200 -> 199
+        ("chr4:399:A:T", 3, "0.80"),      # low read count (< min_reads) -> must not flag
+    ])
+    # MOTHER table (MOM): clean at the chr1 locus.
+    _nhf_tsv(os.path.join(data, "nhf", "T1", "MOM.variant_nhf.tsv"), [
+        ("chr1:99:A:T", 8, "0.00"),
+    ])
+    # FATHER (DAD): no table at all -> father columns blank.
+
+    out = os.path.join(data, "variants.tsv")
+    igv.build_variants_tsv(calls, manifest, data, out, nhf_dir=os.path.join(data, "nhf"),
+                           nhf_min_reads=5)
+    import csv as _csv
+    with open(out) as fh:
+        rows = {(r["chrom"], r["pos"]): r for r in _csv.DictReader(fh, delimiter="\t")}
+
+    r1 = rows[("chr1", "100")]
+    assert r1["child_nhf"] == "0.90", f"pos-1 join wrong: {r1['child_nhf']} (decoy leaked?)"
+    assert r1["child_nhf_reads"] == "10", r1["child_nhf_reads"]
+    assert r1["mother_nhf"] == "0.00" and r1["mother_nhf_reads"] == "8", r1
+    assert r1["father_nhf"] == "" and r1["father_nhf_reads"] == "", "unscreened father must be blank"
+    assert r1["nhf_flag"] == "1", f"0.90 over 10 reads should flag: {r1['nhf_flag']}"
+
+    r2 = rows[("chr2", "200")]
+    assert r2["child_nhf"] == "0.75" and r2["child_nhf_reads"] == "8", r2  # indel join
+
+    r3 = rows[("chr3", "300")]  # symbolic '*' — nonhuman-screen skips it -> blank, but row emitted
+    assert r3["child_nhf"] == "" and r3["nhf_flag"] == "", "symbolic ALT must be blank NHF"
+
+    r4 = rows[("chr4", "400")]  # screened but only 3 reads (< min_reads 5)
+    assert r4["child_nhf"] == "0.80", r4
+    assert r4["nhf_flag"] == "0", f"below-floor read count must not flag (got {r4['nhf_flag']})"
+
+
+def test_igv_nhf_disabled_is_blank():
+    """No nhf_dir -> every NHF column blank and nhf_flag empty (legacy behavior preserved)."""
+    d = tempfile.mkdtemp(prefix="_hprv_nhf0_")
+    data = os.path.join(d, "igv"); os.makedirs(data, exist_ok=True)
+    manifest = os.path.join(d, "m.tsv")
+    _write_tsv(manifest, ["trio_id", "samples"], [{"trio_id": "T1", "samples": "KID,DAD,MOM"}])
+    calls = os.path.join(d, "c.tsv")
+    _write_tsv(calls, ["chrom", "pos", "ref", "alt", "trio_id"],
+               [{"chrom": "chr1", "pos": "100", "ref": "A", "alt": "T", "trio_id": "T1"}])
+    out = os.path.join(data, "variants.tsv")
+    n = igv.build_variants_tsv(calls, manifest, data, out)   # nhf_dir defaults to None
+    assert n == 1
+    import csv as _csv
+    with open(out) as fh:
+        row = next(_csv.DictReader(fh, delimiter="\t"))
+    for col in ("child_nhf", "child_nhf_reads", "mother_nhf", "father_nhf", "nhf_flag"):
+        assert row[col] == "", f"{col} should be blank when NHF disabled, got {row[col]!r}"
 
 
 def _run_all():

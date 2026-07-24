@@ -201,6 +201,18 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   list priors. Phenotype: **Exomiser** + LIRICAL as ranking priors (not hard gates); HPO per
   proband is a dependency, degrade gracefully when sparse.
 
+### Review export (Step 8) & non-human-fraction (Step 8b)
+- **Step 8** (igv.js review export): `outputs.igv.padding` **1000** bp mini-CRAM flank;
+  `extract_jobs` = `runtime.threads` (samtools `-@` per slice; slices run **serially**).
+- **Step 8b** (non-human-fraction — *optional review aid, outside the VEP-only annotation contract;
+  never a selection filter*): `outputs.igv.nonhuman_screen.enabled` **true** — but activates only
+  when `resources.kraken2_db` is set (else warns + skips, NHF columns blank). `members` **carriers**
+  (child always + a parent where it carries the ALT; alternatives `child_only`, `all`); kraken2
+  `confidence` **0.05** (off kraken2's 0.0 default, so a lone k-mer can't call a read non-human);
+  `min_reads` **5** (denominator floor for the derived `nhf_flag`; the raw `*_nhf_reads` count is
+  always emitted); `memory_mapping` **true** (warm page cache across the serial invocations).
+  `nhf_flag` fires at NHF ≥ **0.5** over ≥ `min_reads` reads in any screened member.
+
 ### Reproducibility / tooling
 - One image `FROM ensemblorg/ensembl-vep:release_115.0` (VEP comes from the group's validated base
   image, **not** conda) with a micromamba layer (`env/environment.yml`) for the CLI/Python tools:

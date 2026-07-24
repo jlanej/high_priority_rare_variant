@@ -107,6 +107,14 @@ resources:
   # Optional directory of verifyBamID *.selfSM files (Step 0 contamination gate). If set,
   # per-sample FREEMIX is ingested; otherwise Step 0 falls back to a VCF-only CHARR estimate.
   selfsm_dir: ${SELFSM_DIR}
+  # kraken2 database DIRECTORY for Step-8b non-human-fraction (NHF) screening of ALT-supporting
+  # reads (see outputs.igv.nonhuman_screen). DATA — bind-mounted, NEVER baked into the image (like
+  # the VEP cache / CADD). Recommended: PrackenDB k2_NCBI_reference (k=35; ships the taxonomy dumps).
+  # The dir MUST hold hash.k2d/opts.k2d/taxo.k2d AND taxonomy/nodes.dmp+names.dmp — without the
+  # dumps kraken2 falls back to exact-taxid matching and the NHF signal is unreliable in BOTH
+  # directions (Step 8b preflights the dumps and warns). Leave unset to disable NHF screening even
+  # when nonhuman_screen.enabled is true (Step 8b warns and skips). See docs/resources.md.
+  kraken2_db: ${KRAKEN2_DB}
 
 inputs:
   # Trio pedigree (git-ignored, user-supplied): tab-separated with a HEADER naming the
@@ -261,6 +269,33 @@ outputs:
                                   #   a time — which is the gentlest access pattern for a flaky
                                   #   FUSE/SBFS mount; this only sets the per-slice compression threads.
                                   #   Run Step 8 in one interactive job where the CRAM mount is available.
+    # --- Step 8b: non-human-fraction (NHF) annotation of candidate calls ---------------------
+    # For each candidate, classify the ALT-supporting reads (in the already-sliced mini-CRAMs) with
+    # kraken2 and record the fraction that are NON-human — a contamination / mis-mapping signal a
+    # curator uses to DOWN-RANK a call (e.g. a "variant" whose ALT reads are bacterial). Rides
+    # entirely on Step 8's existing mini-CRAMs + per-trio VCFs; adds no new CRAM I/O.
+    nonhuman_screen:
+      enabled: true               # ON by default. ACTIVATES only when resources.kraken2_db is set
+                                  #   AND mini-CRAMs exist (needs resources.cram_map); otherwise Step
+                                  #   8b warns and skips, leaving the NHF columns blank. So "on" is
+                                  #   safe to leave even on runs with no kraken2 DB.
+      members: carriers           # which trio members to screen per candidate:
+                                  #   carriers (default) = the child always + a parent only where it
+                                  #     carries the ALT (distinguishes sample-specific contamination
+                                  #     from a locus that mis-maps in everyone); child_only = just the
+                                  #     proband (cheapest — the candidate is defined by the child);
+                                  #     all = every member with a mini-CRAM.
+      confidence: 0.05            # kraken2 LCA confidence (raised off kraken2's 0.0 default so a
+                                  #   single stray k-mer cannot call a read non-human — critical when
+                                  #   an inherited het may have only a handful of ALT reads).
+      min_reads: 5                # denominator floor for the derived nhf_flag: an NHF over fewer than
+                                  #   this many ALT reads is too noisy to flag (the raw *_nhf_reads
+                                  #   count is ALWAYS emitted beside each *_nhf so the reviewer sees it).
+      memory_mapping: true        # mmap the kraken2 DB instead of loading it into private RAM. Keeps
+                                  #   RAM low AND — because invocations run sequentially on a node —
+                                  #   lets the OS page cache stay warm across trios, collapsing the
+                                  #   per-invocation DB-load cost. Put the DB on LOCAL disk/NVMe, not
+                                  #   a FUSE mount, for this to pay off. See docs/resources.md.
 
 # --- Honest scope limitations (documented, enforced as warnings) ---
 scope:

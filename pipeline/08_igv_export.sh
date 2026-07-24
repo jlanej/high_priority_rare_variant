@@ -17,8 +17,15 @@
 #   node server.js --variants WORK/igv/variants.tsv --data-dir WORK/igv --genome hg38
 #   (container: ghcr.io/jlanej/igv-variant-review)
 #
+# Step 8b (optional): if --kraken2-db is given, classify each candidate's ALT-supporting reads
+# in the mini-CRAMs with kraken2 (via nonhuman-screen) and fold the non-human fraction into
+# variants.tsv (child_/mother_/father_nhf + nhf_flag). A contamination / mis-mapping down-rank
+# signal; rides on the mini-CRAMs already sliced above.
+#
 # Usage:
 #   08_igv_export.sh --work WORKDIR --ref GRCh38.fa [--cram-map map.tsv] [--padding 1000]
+#       [--kraken2-db DB [--nhf-members carriers|child_only|all] [--nhf-confidence 0.05]
+#        [--nhf-min-reads 5] [--nhf-memory-mapping]]
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +39,10 @@ export PYTHONPATH="${PYTHONPATH:-}:${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src"
 # CRAM slices run concurrently: mini-slices are small index-based reads, but on a flaky
 # FUSE/SBFS mount unbounded concurrency destabilizes it, so this is capped deliberately.
 WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}" PAD=1000 GENOME=hg38 JOBS=1
+# Step 8b (non-human-fraction) options; empty KRAKEN2_DB => 8b disabled. Supplied ONLY via
+# --kraken2-db (run_pipeline.sh passes it only when outputs.igv.nonhuman_screen.enabled AND a DB is
+# set) — deliberately NOT defaulted from $HPRV_KRAKEN2_DB, so the enable gate lives in one place.
+KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --work) WORK="$2"; shift 2;;
@@ -40,11 +51,17 @@ while [[ $# -gt 0 ]]; do
         --padding) PAD="$2"; shift 2;;
         --genome) GENOME="$2"; shift 2;;
         --jobs) JOBS="$2"; shift 2;;
+        --kraken2-db) KRAKEN2_DB="$2"; shift 2;;
+        --nhf-members) NHF_MEMBERS="$2"; shift 2;;
+        --nhf-confidence) NHF_CONF="$2"; shift 2;;
+        --nhf-min-reads) NHF_MIN_READS="$2"; shift 2;;
+        --nhf-memory-mapping) NHF_MMAP="--memory-mapping"; shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
 done
 [[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" -ge 1 ]] || die "--jobs must be a positive integer"
+[[ "$NHF_MIN_READS" =~ ^[0-9]+$ ]] || die "--nhf-min-reads must be a non-negative integer"
 [[ -n "$WORK" ]] || die "need --work"
 calls="$WORK/candidates.calls.tsv"; resolved="$WORK/trios.resolved.tsv"
 cand="$WORK/trios.candidates.tsv"
@@ -164,12 +181,111 @@ if [[ "$n_tasks" -gt 0 ]]; then
     done < "$tasks"
 fi
 
+# --- Step 8b: non-human-fraction (NHF) annotation of ALT-supporting reads --------------------
+# For each screened (trio, member): classify the mini-CRAM's ALT reads with kraken2 (via
+# nonhuman-screen) against the per-trio candidate VCF -> nhf/<trio>/<sample>.variant_nhf.tsv,
+# which build_variants_tsv folds into variants.tsv on the 0-based key (pos-1). Rides entirely on
+# the mini-CRAMs + per-trio VCFs produced above — no new source-CRAM I/O.
+#
+# Gated OFF unless a kraken2 DB is given AND mini-CRAMs exist AND nonhuman-screen resolves in the
+# runtime (it lives only in the image, so a bare host / CI warns and skips). All failures degrade
+# to "leave the NHF columns blank", never abort the export.
+#
+# Perf: invocations run SERIALLY so that with --memory-mapping the OS page cache stays warm across
+# trios and the (dominant) kraken2 DB-load is paid ~once per node, not once per invocation. Put the
+# DB on local disk/NVMe. See docs/resources.md.
+nhf_dir="$DATA/nhf"
+if is_set "$KRAKEN2_DB"; then
+    if [[ ! -d "$KRAKEN2_DB" ]]; then
+        warn "Step 8b: kraken2 DB '$KRAKEN2_DB' is not a directory — skipping NHF screening"
+    elif [[ "$HAVE_MAP" -ne 1 ]]; then
+        warn "Step 8b: no mini-CRAMs (no --cram-map) — skipping NHF screening"
+    elif ! ( is_set "$REF" && [[ -f "$REF" ]] ); then
+        warn "Step 8b: CRAM reference '$REF' missing — skipping NHF screening"
+    elif ! hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen --version >/dev/null 2>&1; then
+        warn "Step 8b: 'nonhuman-screen' not available in the runtime (it ships only in the image) — skipping NHF screening"
+    else
+        db_ok=1
+        for f in hash.k2d opts.k2d taxo.k2d; do
+            [[ -f "$KRAKEN2_DB/$f" ]] || { warn "Step 8b: kraken2 DB missing $f — skipping NHF screening"; db_ok=0; break; }
+        done
+        # Taxonomy dumps are not strictly required by kraken2, but WITHOUT them classification
+        # degrades to exact-taxid matching and the NHF signal is unreliable in both directions.
+        # Warn loudly (do not silently trust); there is no per-variant flag for this in the output.
+        if [[ "$db_ok" -eq 1 ]] \
+           && ! { [[ -f "$KRAKEN2_DB/taxonomy/nodes.dmp" || -f "$KRAKEN2_DB/nodes.dmp" ]] \
+                  && [[ -f "$KRAKEN2_DB/taxonomy/names.dmp" || -f "$KRAKEN2_DB/names.dmp" ]]; }; then
+            warn "Step 8b: kraken2 DB lacks taxonomy nodes.dmp/names.dmp — NHF degrades to exact-taxid matching and is UNRELIABLE. Use a DB that ships the dumps (e.g. PrackenDB)."
+        fi
+        if [[ "$db_ok" -eq 1 ]]; then
+            mkdir -p "$nhf_dir"
+            # members=carriers: a parent is screened only where it carries the ALT in >= 1 of the
+            # trio's calls (a hom-ref member has ~no ALT reads, so screening it just wastes a DB
+            # load). The child is ALWAYS screened — it defines the candidate. NOTE: Step 5 writes
+            # child_gt/mother_gt/father_gt from cyvcf2 `gt_bases`, so these columns are BASE-form
+            # ('A/G', 'AT/A', './.'), NOT allele-index ('0/1') — a parent "carries the ALT" when a
+            # GT token equals the row's `alt` base (rows are biallelic post `norm -m-`, so `alt` is
+            # a single allele string). Testing for a digit here would NEVER match and silently
+            # degrade `carriers` to `child_only` (regression guarded by tests/test_nhf_carriers.sh).
+            carriers_list="$HPRV_TMPDIR/nhf_carriers.tsv"
+            awk -F'\t' '
+                NR==1{for(i=1;i<=NF;i++)h[$i]=i; next}
+                h["alt"]{
+                  t=$(h["trio_id"]); a=$(h["alt"]);
+                  if (h["mother_gt"]) { n=split($(h["mother_gt"]),g,/[\/|]/); for(i=1;i<=n;i++) if(g[i]==a){print t"\tmother"; break} }
+                  if (h["father_gt"]) { n=split($(h["father_gt"]),g,/[\/|]/); for(i=1;i<=n;i++) if(g[i]==a){print t"\tfather"; break} } }' \
+                "$calls" | sort -u > "$carriers_list"
+            is_carrier() { awk -F'\t' -v t="$1" -v r="$2" '$1==t&&$2==r{f=1} END{exit f?0:1}' "$carriers_list"; }
+
+            n_nhf=0
+            while IFS=$'\t' read -r trio _ _ samples; do   # cols: trio_id vcf ped samples
+                [[ "$trio" == "trio_id" || -z "$trio" ]] && continue
+                IFS=',' read -r kid dad mom <<< "$samples"
+                tvcf="$DATA/vcfs/${trio}.vcf.gz"
+                [[ -f "$tvcf" ]] || continue
+                for pair in "child:$kid" "mother:$mom" "father:$dad"; do
+                    role="${pair%%:*}"; sample="${pair#*:}"
+                    [[ -n "$sample" ]] || continue
+                    cram="$DATA/crams/$trio/${sample}.cram"
+                    [[ -f "$cram" ]] || continue
+                    case "$NHF_MEMBERS" in
+                        child_only) [[ "$role" == "child" ]] || continue ;;
+                        all)        : ;;
+                        *)          [[ "$role" == "child" ]] || is_carrier "$trio" "$role" || continue ;;
+                    esac
+                    outp="$nhf_dir/$trio/${sample}"; out_tsv="${outp}.variant_nhf.tsv"
+                    if [[ -f "$out_tsv" && -f "${out_tsv}.done" ]]; then n_nhf=$((n_nhf+1)); continue; fi
+                    mkdir -p "$nhf_dir/$trio"
+                    errf="$HPRV_TMPDIR/nhf.${trio}.${sample}.err"
+                    # shellcheck disable=SC2086  # $NHF_MMAP is an intentional word (empty or --memory-mapping)
+                    if hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen classify \
+                            --bam "$cram" --variants "$tvcf" --ref-fasta "$REF" \
+                            --kraken2-db "$KRAKEN2_DB" --confidence "$NHF_CONF" \
+                            --threads "$JOBS" $NHF_MMAP --out-prefix "$outp" 2>"$errf" \
+                       && [[ -f "$out_tsv" ]]; then
+                        touch "${out_tsv}.done"; n_nhf=$((n_nhf+1))
+                    else
+                        warn "  [$trio] NHF screen failed for $role $sample (kraken2 missing, or a read/DB error): $(tail -n1 "$errf" 2>/dev/null); leaving its NHF blank"
+                        rm -f "$out_tsv" "${outp}.summary.json"
+                    fi
+                    rm -f "$errf"
+                done
+            done < <(tail -n +2 "$resolved")
+            log "Step 8b: NHF-screened $n_nhf (trio,member) mini-CRAM(s) (members=$NHF_MEMBERS, confidence=$NHF_CONF, memmap=${NHF_MMAP:-off})"
+            audit 08_igv nhf_screened "$n_nhf"
+        fi
+    fi
+fi
+
 # --- assemble variants.tsv + sample_qc.tsv + trios.tsv + curation.json ---
-python3 - "$calls" "$resolved" "$DATA" "$WORK/qc_report.tsv" <<'PY'
+# NHF columns fold in from nhf/<trio>/<sample>.variant_nhf.tsv when Step 8b produced them (the
+# join is on the 0-based key, pos-1); absent files => blank NHF columns (legacy behavior).
+python3 - "$calls" "$resolved" "$DATA" "$WORK/qc_report.tsv" "$NHF_MIN_READS" <<'PY'
 import sys
 from hprv import igv
-calls, manifest, data, qc = sys.argv[1:5]
-n = igv.build_variants_tsv(calls, manifest, data, f"{data}/variants.tsv")
+calls, manifest, data, qc, nhf_min = sys.argv[1:6]
+n = igv.build_variants_tsv(calls, manifest, data, f"{data}/variants.tsv",
+                           nhf_dir=f"{data}/nhf", nhf_min_reads=int(nhf_min))
 m = igv.write_sample_qc(qc, manifest, f"{data}/sample_qc.tsv")
 sys.stderr.write(f"  variants.tsv rows: {n}; sample_qc rows: {m}\n")
 PY
