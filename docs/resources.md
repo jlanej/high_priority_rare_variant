@@ -289,6 +289,12 @@ Fetch/verify with `prepare_resources.sh --only spliceai`.
   no-login Ensembl mirror is **MANE-select SNV only** (no non-MANE transcripts, no indel file) — a
   genuine subset; the full genome-wide raw SNV **+** indel VCFs are on Illumina BaseSpace (login),
   a one-time manual download. Both must be **bgzipped + `tabix -p vcf`**-indexed.
+- **Automated fetch (BaseSpace).** Once you have `bs` installed + `bs auth`-ed and have accepted
+  the shared dataset (open <https://basespace.illumina.com/s/otSPW8hnhaZR> in a browser), run
+  `scripts/download_spliceai.sh --dir DIR [--ref GRCh38.fa]` — it pulls **only** the 4 raw-hg38
+  files (not the ~100 GB whole dataset), verifies + indexes them, checks contig naming, and emits
+  the `export SPLICEAI_SNV/INDEL` lines. This is a **host/HPC** helper (uses your authenticated `bs`),
+  separate from the in-image `prepare_resources.sh`.
 - **Threshold.** The default `spliceai_ds_min: 0.2` is the ClinGen SVI PP3-supporting cutoff.
   Walker-2023 calibrated on **raw** (not masked) scores, so a raw-calibrated 0.2 is correct for the
   raw files here. Lower it toward 0.1/0.05 for higher deep-intronic recall (the raw score rides
