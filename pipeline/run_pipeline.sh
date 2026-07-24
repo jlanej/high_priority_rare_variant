@@ -51,6 +51,17 @@ run_step() { local n="$1"; [[ "$FROM" -le "$n" && "$n" -le "$TO" ]]; }
 _cfg_sh="$(python3 -m hprv.config sh --config "$CFG")" || die "failed to resolve config: $CFG"
 eval "$_cfg_sh"
 
+# common.sh is sourced ABOVE (it must be, to provide die/warn), and its
+# `: "${HPRV_RUNTIME:=${HPRV_ENGINE:-auto}}"` froze HPRV_RUNTIME to "auto" before the config was
+# read — so `runtime.engine` was silently ignored in THIS shell, and any hprv_run call here would
+# auto-detect (e.g. wrap in docker on a dev box that has it) instead of honoring the config. The
+# step scripts never saw this: they source common.sh in a fresh shell AFTER HPRV_ENGINE is exported.
+# Re-derive it here, only when no explicit choice was made, so precedence stays
+# HPRV_RUNTIME env > runtime.engine > auto-detect.
+if [[ "${HPRV_RUNTIME:-auto}" == "auto" && -n "${HPRV_ENGINE:-}" ]]; then
+    HPRV_RUNTIME="$HPRV_ENGINE"; export HPRV_RUNTIME
+fi
+
 is_set "${HPRV_OUTPUT_DIR:-}"  || die "project.output_dir is unresolved — set the env var it references"
 is_set "${HPRV_REF_FASTA:-}"   || die "reference.fasta is unresolved — set the env var it references"
 # existence, not just placeholder-resolution: a wrong bind-mount must fail here, not mid-Step-1
@@ -82,15 +93,31 @@ if run_step 2; then
         # an impact-only screen is still a coherent (if narrower) run.
         _opt HPRV_CADD_SNV   "CADD SNV (primary non-coding functional evidence)"
         _opt HPRV_CADD_INDEL "CADD indel (indel-capable functional score)"
-        # SpliceAI: optional splice keep-path (deep-intronic / exonic-synonymous). Degrades
-        # gracefully — its absence just leaves those splice classes to CADD's weak proxy.
-        _opt HPRV_SPLICEAI_SNV   "SpliceAI SNV scores (deep-intronic + synonymous splice detection)"
-        _opt HPRV_SPLICEAI_INDEL "SpliceAI indel scores (splice detection for indels)"
+        # SpliceAI is part of the DEFAULT screen (resources.vep.spliceai_required, default true):
+        # it is the only signal reaching deep-intronic cryptic sites + exonic-synonymous splice
+        # disruption, so its silent absence is a materially weaker screen, not a cosmetic loss.
+        # Required => HALT here, before VEP. Set spliceai_required: false to run without it.
+        if [[ "$(cfg_get resources.vep.spliceai_required true)" != "false" ]]; then
+            _sai_fix="fetch with scripts/download_spliceai.sh, or set resources.vep.spliceai_required: false to run without it"
+            _need HPRV_SPLICEAI_SNV   "SpliceAI SNV scores (deep-intronic + synonymous splice detection) — $_sai_fix"
+            _need HPRV_SPLICEAI_INDEL "SpliceAI indel scores (splice detection for indels) — $_sai_fix"
+        else
+            _opt HPRV_SPLICEAI_SNV   "SpliceAI SNV scores (deep-intronic + synonymous splice detection)"
+            _opt HPRV_SPLICEAI_INDEL "SpliceAI indel scores (splice detection for indels)"
+        fi
     fi
     if [[ ${#r_missing[@]} -gt 0 ]]; then
         warn "Required resources are missing:"
         for m in "${r_missing[@]}"; do warn "  - $m"; done
-        die "point resources.vep.cache_dir at a VEP ${HPRV_VEP_VERSION:-115} GRCh38 cache (or set resources.vep.annotated_vcf to a VEP VCF you already have), then re-run. See docs/resources.md."
+        die "point resources.vep.cache_dir at a VEP ${HPRV_VEP_VERSION:-115} GRCh38 cache (or set resources.vep.annotated_vcf to a VEP VCF you already have), and resolve each item above, then re-run. See docs/resources.md."
+    fi
+    # Step 2b availability gate. The backfill is ON by default, so an ABSENT env halts the run HERE
+    # — at second 1, before the hours of VEP — rather than after. Checked regardless of how the union
+    # is produced (the backfill runs on it either way, including the annotated_vcf ingest path).
+    # NB availability != failure: a transient failure mid-scoring still degrades (see the 2b call).
+    if [[ "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
+        _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
+        hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI backfill (Step 2b) is ENABLED but its isolated env is not available at '$_sai_env' (no executable bin/spliceai). That env ships only in the container image — run inside it (apptainer exec hprv.sif ...), point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill. See docs/resources.md#spliceai."
     fi
 fi
 
@@ -168,16 +195,24 @@ if run_step 2; then
     # shard/manifest sub-tasks, whose union is partial. (If enabled with SLURM, size the gather job
     # for TensorFlow inference — the backfill runs there.)
     if [[ ( ${#S2_PASSTHRU[@]} -eq 0 || "${S2_PASSTHRU[*]:-}" == "--gather" ) \
-          && "$(cfg_get resources.vep.spliceai_backfill.enabled false)" != "false" ]]; then
+          && "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
         log "== Step 2b: SpliceAI live backfill (variants with no precomputed score) =="
         b_io=1; [[ "$(cfg_get resources.vep.spliceai_backfill.indels_only true)" == "false" ]] && b_io=0
-        # `|| warn`: the backfill is OPTIONAL — ANY failure (not just the scoring subprocess) degrades
-        # to precomputed-only rather than aborting a long run. Every 02b failure point precedes the
-        # atomic union replace, so on failure the precomputed-scored union is left intact.
+        # Two-tier exit contract (see 02b): UNAVAILABLE halts, a transient FAILURE degrades.
+        #   3        -> the env/config is not usable: halt, matching the preflight gate.
+        #   other !0 -> a transient scoring/merge failure: warn and continue on precomputed scores.
+        # Degrading is safe because every 02b failure point precedes the atomic union replace, so
+        # the precomputed-scored union is left intact.
+        b_rc=0
         bash "$HERE/02b_spliceai_backfill.sh" \
             --annotated "$W/cohort.sites.annotated.vcf.gz" --ref "$HPRV_REF_FASTA" \
             --distance "$(cfg_get resources.vep.spliceai_backfill.distance 500)" --indels-only "$b_io" \
-            || warn "Step 2b (SpliceAI backfill) failed — continuing on precomputed SpliceAI scores (union unchanged)."
+            || b_rc=$?
+        if [[ "$b_rc" -eq 3 ]]; then
+            die "Step 2b (SpliceAI backfill) is enabled but unavailable — halting (see the error above). Set resources.vep.spliceai_backfill.enabled: false to run without it."
+        elif [[ "$b_rc" -ne 0 ]]; then
+            warn "Step 2b (SpliceAI backfill) failed (rc=$b_rc) — continuing on precomputed SpliceAI scores (union unchanged)."
+        fi
     fi
 fi
 
