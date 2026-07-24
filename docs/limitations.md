@@ -41,12 +41,17 @@ The raw score rides through to `candidates.calls.tsv` / the IGV export / the xls
 tiering. It is **keep-only** (a missing/None score never drops a variant, it only fails to rescue).
 
 **Residual caveats (why this is not a clean "solved"):**
-- **The PRECOMPUTED set is not exhaustive.** Illumina's tables score genome-wide SNVs and a large
-  indel set, but not every indel/context; and precomputed scores are transcript-anchored. A
-  missing score is **not** "no splice effect" (see *Using SpliceAI to triage splice-altering
-  variants in 7,220 individuals*, medRxiv 2025, which quantifies where precomputed scores fall
-  short vs running SpliceAI live). Running SpliceAI on-the-fly would catch more but needs the model
-  + GPU/CPU budget — out of scope for a screen; the precomputed raw set is the pragmatic best.
+- **The PRECOMPUTED set is not exhaustive — but there is now an optional live backfill.** Illumina's
+  tables score genome-wide SNVs and a large indel set, but not every indel/context, at a narrow
+  window; a missing score is **not** "no splice effect" (see *Using SpliceAI to triage splice-altering
+  variants in 7,220 individuals*, medRxiv 2025). **Step 2b** (`resources.vep.spliceai_backfill.enabled`,
+  off by default) closes most of this gap: it runs the stock Illumina model live over just the
+  cohort variants that carry **no** precomputed score (default: indels only — SNVs are complete), at
+  a **wider `-D` window (500)** to reach deep-intronic cryptic sites the precomputed `-D 50` set
+  misses, and folds the result into the same `vep_SpliceAI_pred_DS_*` fields BEFORE Step 3. The model
+  + GENCODE annotation are bundled in the image's isolated `spliceai` env (no extra download); it is
+  TensorFlow inference (~1 var/s/CPU) but the unscored set is small, so it stays cheap. See
+  [resources.md#spliceai](resources.md#spliceai).
 - **The FULL raw genome-wide set needs a one-time manual download.** It lives on Illumina BaseSpace
   (login-gated). The free no-login Ensembl mirror is **MANE-select SNV only** (no non-MANE
   transcripts, no indel file) — a real subset. Use the full raw for "don't miss anything". See
