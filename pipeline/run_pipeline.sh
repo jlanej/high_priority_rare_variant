@@ -85,7 +85,8 @@ is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf
 # ---------------------------------------------------------------------------
 # Resource preflight. Under the VEP-only contract the entire surface is: a VEP 115 GRCh38
 # cache (which carries gnomAD v4.1 frequencies + ClinVar itself) and the CADD plugin files.
-# No gnomAD / ClinVar / dbNSFP / SpliceAI / LOFTEE download exists to check.
+# No gnomAD / ClinVar / dbNSFP / LOFTEE download exists to check; SpliceAI IS checked below
+# (required by default) along with the Step-2b backfill env.
 # Only enforced when Step 2 actually runs — a `--from 3` re-run reads annotations that are
 # already in the VCF and needs none of this. If resources.vep.annotated_vcf is set, VEP is
 # not invoked at all, so only that file has to exist.
@@ -202,9 +203,10 @@ if run_step 2; then
     fi
     bash "$HERE/02_annotate_sites.sh" "${s2_args[@]}"
 
-    # Step 2b (optional): live-SpliceAI backfill of cohort variants with NO precomputed score
-    # (mostly novel indels), before Step 3 so a backfilled score is a keep-path. Off unless
-    # configured; graceful if the isolated `spliceai` env is absent (image-only).
+    # Step 2b (default on): live-SpliceAI backfill of cohort variants with NO precomputed score
+    # (mostly novel indels), before Step 3 so a backfilled score is a keep-path. ON unless disabled;
+    # an absent isolated `spliceai` env (image-only) exits 3 and HALTS — see the two-tier exit
+    # contract below, and the matching availability gate in the preflight above.
     # Runs when the union is FINAL: the single-node path (no passthru) OR the distributed
     # `--annotate-gather` sub-task (which assembles the final union) — but NOT the mid-distributed
     # shard/manifest sub-tasks, whose union is partial. (If enabled with SLURM, size the gather job

@@ -337,7 +337,8 @@ if ! _have CADD_PHRED; then
     warn "no vep_CADD_PHRED lifted — CADD is a primary functional predictor here, so without it a \
 variant below MODERATE impact can only be kept via SpliceAI (intronic/synonymous/UTR CADD evidence is gone)"
 fi
-# SpliceAI is optional; warn only if it was CONFIGURED (plugin data given) yet no score lifted — that
+# SpliceAI is required by default (enforced in run_pipeline's preflight, not here); warn only if it
+# was CONFIGURED (plugin data given) yet no score lifted — that
 # means the plugin/data is misconfigured, not merely unused, and the splice keep-path would be silently dead.
 if is_set "${HPRV_SPLICEAI_SNV:-}" && is_set "${HPRV_SPLICEAI_INDEL:-}" && ! _have SpliceAI_pred_DS_AG; then
     warn "SpliceAI score files are configured but no vep_SpliceAI_pred_DS_* was lifted — the plugin \

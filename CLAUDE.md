@@ -41,7 +41,7 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    the VEP-only contract (rule 6). Everything reads it through `annotations.frequency()` — one
    chokepoint, never a field getter directly.
 6. **VEP-centric contract.** The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS:
-   CADD (required-ish) and **SpliceAI** (optional). Nothing else is bcftools-transferred in: no
+   CADD (required-ish) and **SpliceAI** (required by default). Nothing else is bcftools-transferred in: no
    gnomAD, ClinVar, dbNSFP or LOFTEE file. Adding an annotation means either a VEP plugin or a
    `bcftools annotate` transfer in Step 2 **and** its INFO field in `annotations.F` — never a lookup
    that reaches around that contract. Known, accepted losses (see
@@ -139,7 +139,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   filterable; per-member `*_file`/`*_index` + `*_vcf*` track paths are RELATIVE to the data-dir
   `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
   map (`resources.cram_map`; `samtools view -C -T ref --regions-file bed`, ± `outputs.igv.padding`),
-  per-trio VCF tracks `vcfs/<trio>.vcf.gz`, `trios.tsv`, `sample_qc.tsv`, empty `curation.json`.
+  per-trio VCF tracks `vcfs/<trio>.vcf.gz`, `trios.tsv`, `sample_qc.tsv`, empty `curation.json`, and
+  `config.json` (`{"genome": ...}` from `outputs.igv.genome`, default `hg38` — the igv.js genome hint).
 - **Step 8b (optional, default ON)**: non-human-fraction (NHF) annotation. If a kraken2 DB is
   provided (`resources.kraken2_db`, bind-mounted DATA — never baked), `nonhuman-screen classify`
   runs over each screened member's **mini-CRAM** (no new source-CRAM I/O) against the per-trio VCF
@@ -193,7 +194,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   builds a separate `/opt/conda/envs/spliceai` and `02b_spliceai_backfill.sh` invokes it via
   `micromamba run -n spliceai spliceai …` — never mix it into the main env. The model weights + GENCODE
   annotation are BUNDLED in the package (no data download; the build smoke-test hard-fails if the model
-  won't load). Step 2b is optional (`resources.vep.spliceai_backfill.enabled`, off by default), runs
+  won't load). Step 2b is ON by default (`resources.vep.spliceai_backfill.enabled: true`; an absent
+  isolated env HALTS the run at the Step-2 preflight — set it `false` to opt out), runs
   after Step 2 and before Step 3 (so a backfilled score is a keep-path), scores only variants with no
   precomputed value (default indels), and folds them into the same `vep_SpliceAI_pred_DS_*` fields
   (`bcftools annotate`). Idempotent via a `.spliceai_backfill.done` marker that must be NEWER than the
@@ -208,9 +210,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 - **Resources (one-time, small):** the core surface is two things on the host — a **VEP 115 GRCh38
   cache** (~24 GB; it carries gnomAD v4.1 frequencies + ClinVar) and the **CADD** SNV+indel files —
-  plus, **optionally, SpliceAI** raw score files (`resources.vep.spliceai_snv`/`spliceai_indel`) to
-  turn on the splice keep-path. The full raw SpliceAI set is a one-time BaseSpace (login) download;
-  the pipeline degrades gracefully without it. Nothing else: no gnomAD, ClinVar, dbNSFP or LOFTEE download.
+  plus the **SpliceAI** raw score files (`resources.vep.spliceai_snv`/`spliceai_indel`), **required
+  by default**: when Step 2 invokes VEP, `resources.vep.spliceai_required: true` HALTS the run at
+  preflight if they are missing; set it `false` to degrade with a warning. Not enforced when
+  `resources.vep.annotated_vcf` is set. The full raw set is a one-time BaseSpace (login) download
+  (`scripts/download_spliceai.sh`). Nothing else: no gnomAD, ClinVar, dbNSFP or LOFTEE download.
   `prepare_resources.sh --dir DIR fetch|verify|emit-env` still fetches these, runs INSIDE the image
   (baked in at `/opt/hprv/scripts`, on PATH, with its pinned `/opt/hprv/resources/manifest.env`;
   `HPRV_RESOURCE_MANIFEST` re-pins without a rebuild), and `emit-env` writes the `${ENV}` exports

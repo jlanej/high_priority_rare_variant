@@ -11,12 +11,15 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 > it — which `prepare_resources.sh --dir DIR emit-env` does for you.
 
 > **STATUS — the VEP-only contract (read this before you download anything).**
-> The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD, and the
-> optional SpliceAI plugin** (see [## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
+> The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD and
+> SpliceAI** (see [## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
 > annotate` transfers**. **gnomAD, ClinVar, dbNSFP and LOFTEE data are no longer fetched, bind-mounted
 > or read** — the config keys that pointed at them are gone. The **required** acquisition therefore
-> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB)** — plus, to turn on the splice
-> keep-path, the **SpliceAI** raw score files — plus two small optional tables for Step-6 ranking.
+> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB)**
+> — SpliceAI is **required by default** (`resources.vep.spliceai_required: true`), so any run that
+> invokes VEP **halts at preflight** without it (not enforced with `resources.vep.annotated_vcf`
+> set); a bare `fetch` does **not** pull it — use `scripts/download_spliceai.sh`. Missing CADD, by
+> contrast, only warns. Plus two small optional tables for Step-6 ranking.
 > Everything else on this page is retained as the **shopping list for building on top** and is
 > clearly marked *not currently used*. What the reduced set costs the screen — and what each
 > re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
@@ -32,7 +35,8 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 
 ## Why a prepare script, not a bundled image
 
-1. **Size.** VEP cache ≈ 24 GB and CADD SNV ≈ 81 GB — even the *reduced* required set is ~107 GB.
+1. **Size.** VEP cache ≈ 24 GB, CADD SNV ≈ 81 GB, SpliceAI raw ≈ 28 GB — even the *reduced*
+   required set is ~135 GB.
    Baking that into a public image makes it un-pullable and violates the golden rule (the VEP cache
    is *never* baked; resources bind-mount).
 2. **License.** CADD (not redistributable) legally **cannot** ship inside a public image. The VEP
@@ -204,7 +208,7 @@ not need a checkout of this repo on the host:
 
 > **A bare `fetch` already prepares only the required set** (`reference`, `vep_cache`, `cadd`,
 > `constraint`) — it will **not** start the ~877 GB gnomAD download. The retired resources
-> (`gnomad_sites`, `clinvar`, `loftee`, `dbnsfp`, `spliceai`) run **only** when you name them with
+> (`gnomad_sites`, `clinvar`, `loftee`, `dbnsfp`) run **only** when you name them with
 > `--only`, so the roadmap restorations are one flag away. Passing `--only reference,vep_cache,cadd,constraint`
 > (as below) is therefore explicit-but-equivalent to a bare `fetch`.
 
@@ -234,11 +238,15 @@ at it.
 ### What each mode covers
 
 - **`fetch`** (default) prepares `reference`, `vep_cache`, `cadd`, `constraint` — the required set,
-  nothing more. Pass `--only gnomad_sites,clinvar,loftee,dbnsfp,spliceai` (any subset) to also
+  nothing more. Pass `--only gnomad_sites,clinvar,loftee,dbnsfp` (any subset) to also
   prepare a retired resource for a [roadmap restoration](ROADMAP.md); they are never fetched by
   default, because an ~877 GB gnomAD download for data no step reads is not a sane default.
+  **`spliceai` is not retired** — it IS read (Step 2 plugin + `selection.py`) and required by
+  default, but `--only spliceai` fetches only the MANE-only SNV mirror and leaves the indel file
+  gated; use `scripts/download_spliceai.sh` for the full raw set.
 - **`verify`** requires exactly the set `fetch` prepares, and reports the retired resources as
-  *not required* rather than failing on them. `run_pipeline.sh` additionally preflights what it
+  *not required* rather than failing on them. **SpliceAI is an exception**: `verify` reports it as
+  not-required, but `run_pipeline.sh` HALTS on it by default. `run_pipeline.sh` additionally preflights what it
   actually needs before doing work.
 - **`emit-env`** exports only the `${ENV}` placeholders `config/config.example.yaml` still has
   keys for. It also prints a commented `VEP_ANNOTATED_VCF` line — uncomment it to skip the VEP
@@ -276,8 +284,12 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 **WIRED** (not optional-unused): the SpliceAI VEP plugin runs in Step 2 over precomputed raw delta
 scores, and `selection.py` keeps a variant whose max delta score ≥ `filters.functional.spliceai_ds_min`
 (default 0.2). Config keys `resources.vep.spliceai_snv` / `spliceai_indel` (`${SPLICEAI_SNV}` /
-`${SPLICEAI_INDEL}`). Optional + graceful: unset ⇒ the splice keep-path is inactive (Step 2 warns).
-Fetch/verify with `prepare_resources.sh --only spliceai`.
+`${SPLICEAI_INDEL}`). **Required by default**: `resources.vep.spliceai_required: true` makes
+`run_pipeline.sh` HALT at preflight (before VEP) when either file is unset or missing. Set it
+`false` to degrade gracefully — only then does Step 2 warn and leave the splice keep-path inactive.
+Not enforced when `resources.vep.annotated_vcf` is set. Fetch the full raw set with
+`scripts/download_spliceai.sh`; `prepare_resources.sh --only spliceai` fetches only the no-login
+MANE-only SNV mirror and leaves the indel file gated.
 
 | File | Config key (`${ENV}`) | Source | ~Size |
 |---|---|---|---|
@@ -295,8 +307,9 @@ Fetch/verify with `prepare_resources.sh --only spliceai`.
   files (not the ~100 GB whole dataset), verifies + indexes them, checks contig naming, and emits
   the `export SPLICEAI_SNV/INDEL` lines. This is a **host/HPC** helper (uses your authenticated `bs`),
   separate from the in-image `prepare_resources.sh`.
-- **Live backfill (Step 2b) needs NO extra download.** The optional `resources.vep.spliceai_backfill`
-  path scores the small set of variants lacking a precomputed value (novel indels) with the stock
+- **Live backfill (Step 2b) needs NO extra download.** The `resources.vep.spliceai_backfill` path
+  (**ON by default**, `enabled: true`; an absent isolated `spliceai` env halts the run at preflight
+  — set `enabled: false` to opt out) scores the small set of variants lacking a precomputed value (novel indels) with the stock
   Illumina model. That model + its GENCODE annotation are **bundled in the image's isolated
   `spliceai` conda env** — the only data it needs is the reference FASTA you already provide. So the
   precomputed files above are the only SpliceAI *download*; the backfill is compute, not data.

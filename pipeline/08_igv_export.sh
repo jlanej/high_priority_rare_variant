@@ -9,7 +9,7 @@
 #   crams/<trio>/<sample>.cram(+.crai)   mini-CRAMs sliced around candidate loci
 #                    for child/mother/father (only if a sample->CRAM map is given).
 #   vcfs/<trio>.vcf.gz(+.tbi)            per-trio candidate VCF track.
-#   sample_qc.tsv    trio_id/role/sample_id + QC metrics (optional --sample-qc input).
+#   sample_qc.tsv    trio_id/role/sample_id + QC metrics (read from WORK/qc_report.tsv when present).
 #   trios.tsv        #kid mom dad.
 #   curation.json    empty review state ({}).
 #

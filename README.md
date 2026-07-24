@@ -21,11 +21,10 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 > that way.
 
 > 📋 **VEP-only contract — know what the screen cannot see *before* you run it.** Every
-> annotation comes from **one** source: a **VEP 115 GRCh38 cache + the CADD plugin**. No gnomAD,
-> ClinVar, dbNSFP, SpliceAI or LOFTEE file is downloaded or bind-mounted. That buys a simple,
-> sound, reproducible first pass and costs real coverage: **no `faf95`** (rarity is a grpmax
-> point-estimate proxy), **no SpliceAI** (deep-intronic and exonic-synonymous splice variants are
-> invisible), **no LOFTEE**, **no ClinVar star ratings**. Every gap is *additive* to fix — one
+> annotation comes from **one** source: a **VEP 115 GRCh38 cache + the CADD and SpliceAI
+> plugins**. No gnomAD, ClinVar, dbNSFP or LOFTEE file is downloaded or bind-mounted. That buys a
+> simple, sound, reproducible first pass and costs real coverage: **no `faf95`** (rarity is a grpmax
+> point-estimate proxy), **no LOFTEE**, **no ClinVar star ratings**. Every gap is *additive* to fix — one
 > `bcftools annotate` transfer each. The full ledger, with the cost to close each item, is
 > **[docs/limitations.md](docs/limitations.md)**. Read it before you interpret a negative result.
 
@@ -88,7 +87,7 @@ BA1) are dropped and never rescued.
 
 **4. Plausible-variant selection.** An inheritance-agnostic filter keeps a site if it is rare
 (permissive-union cutoff) **and** functionally credible. The functional ladder is deliberately
-**two rungs**: HIGH/MODERATE VEP impact, else **CADD ≥ 25.3**. **ClinVar P/LP** (no conflicts) is
+**three rungs**: HIGH/MODERATE VEP impact, else **SpliceAI Δ ≥ 0.2**, else **CADD ≥ 25.3**. **ClinVar P/LP** (no conflicts) is
 an override, and also rescues a variant from the rarity gate. Each kept site is tagged with *why*
 (`hprv_keep_reason`). Gene lists and constraint are **not** applied here (never-drop rule), so
 novel genes survive.
@@ -149,13 +148,22 @@ variant-review server.
 apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:latest
 
 # 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
-#    Under the VEP-only contract the pipeline needs FOUR things: a reference FASTA, a VEP 115
-#    GRCh38 cache, the CADD plugin data (license-gated, ~82 GB), and the per-gene constraint
-#    table (Step 6 ranking only). Nothing else is used — do not fetch the rest.
+#    Under the VEP-only contract the pipeline needs FIVE things: a reference FASTA, a VEP 115
+#    GRCh38 cache, the CADD plugin data (license-gated, ~82 GB), the SpliceAI raw hg38 score files
+#    (REQUIRED by default — resources.vep.spliceai_required: true HALTS the run at preflight when
+#    they are missing; set it false to run without SpliceAI), and the per-gene constraint table
+#    (Step 6 ranking only). Nothing else is used — do not fetch the rest.
 #    prepare_resources.sh + its pinned manifest ship IN the image (on PATH). See docs/resources.md.
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources --accept-license \
     --only reference,vep_cache,cadd,constraint fetch
+
+# 2b. SpliceAI raw hg38 scores. `--only spliceai` cannot finish the job: the SNV mirror it can
+#     reach is MANE-only and the indel file is login-gated with no no-login mirror. Use the
+#     BaseSpace helper (needs an authenticated `bs` CLI on the host). The `spliceai/` subdir is
+#     load-bearing — emit-env exports $DIR/spliceai/<file>, which is where these land.
+scripts/download_spliceai.sh --dir /data/hprv_resources/spliceai --ref "$REF_FASTA"
+
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
 
@@ -169,8 +177,8 @@ apptainer exec --bind /data hprv.sif \
 cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
 source /data/hprv_resources/resources.env            # exports REF_FASTA / VEP_CACHE / CADD_SNV / ...
 export HPRV_WORK=/path/to/work
-#    (emit-env also exports GNOMAD_SITES / CLINVAR_VCF / DBNSFP / SPLICEAI_* / LOFTEE_DATA —
-#     leftovers from the pre-contract resource set; no step reads them.)
+#    (resources.env also exports SPLICEAI_SNV / SPLICEAI_INDEL — these ARE read: Step 2 wires them
+#     as the VEP SpliceAI plugin, and spliceai_required (default true) HALTS preflight if missing.)
 
 # 4. Provide inputs (git-ignored):
 #    - a trios file: TSV with a header naming kid/dad/mom (any order); IDs match the VCFs:
@@ -226,9 +234,9 @@ and review (detected here only as a lightweight cross-reference), and **mtDNA he
 what each item costs to fix — is **[docs/limitations.md](docs/limitations.md)**. It is the anchor;
 the headlines are:
 
-- **From the VEP-only contract:** no SpliceAI (deep-intronic / exonic-synonymous splice variants
-  are invisible — the largest loss); no `faf95` (rarity is a point-estimate proxy); no `nhomalt`;
+- **From the VEP-only contract:** no `faf95` (rarity is a point-estimate proxy); no `nhomalt`;
   no LOFTEE; no ClinVar star ratings. Each is one `bcftools annotate` transfer away.
+  (SpliceAI is no longer on this list — it ships as a VEP plugin and is required by default.)
 - **Structural, independent of the contract:** SNV/indel only — **CNV/SV are a real blind spot**
   (10–15% of pediatric-cancer/rare-disease diagnoses); pseudogene/seg-dup regions (*PMS2*,
   *CYP21A2*, *SMN1*) are low-confidence from short reads; the phenotype (Exomiser/HPO) prior is
