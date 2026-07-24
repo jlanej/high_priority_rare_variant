@@ -9,6 +9,11 @@
 #
 # Per trio:  norm -m- -f ref  ->  isec (allele-aware) with plausible sites  ->
 #            annotate -c INFO from the (annotated) plausible sites  -> index.
+# The annotation SOURCE is a de-novo-free copy of the plausible sites (the GATK
+# hiConfDeNovo/loConfDeNovo tags stripped once, up front): the blanket `-c INFO`
+# transfer would otherwise overwrite a candidate's OWN de novo tags (which Step 5
+# reads from the trio VCF) if the plausible file ever carried them. Today it does
+# not (Step 1 strips all INFO), so this is a structural guard, not a live fix.
 # Emits a manifest of per-trio candidate VCFs for Step 5.
 #
 # Usage:
@@ -63,6 +68,30 @@ HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
 # ensure plausible sites indexed
 index_vcf "$PLAUSIBLE"
+
+# Build the annotation SOURCE = plausible sites with the GATK de novo tags stripped, ONCE
+# (shared across all trios). The per-trio transfer below is a blanket `bcftools annotate -c INFO`
+# (allele-exact: keyed on CHROM+POS+REF+ALT); on any INFO field the candidate ALSO carries, the
+# annotation source WINS. The only INFO a candidate carries into that step is its own
+# hiConfDeNovo/loConfDeNovo (preserved from the trio VCF; Step 5 reads them). Stripping those two
+# tags from the source makes it IMPOSSIBLE for the transfer to clobber the trio's real de novo
+# child-list — regardless of what the plausible file grows to carry. Today the plausible file has
+# no de novo tags (Step 1 does `annotate -x INFO`), so `-x` here just warns "tag not defined" and
+# is a no-op; the guard is defense-in-depth, keeping the "annotations come from VEP, de novo comes
+# from the trio" invariant structural rather than incidental. (The expected warnings are silenced;
+# a real failure still aborts via the explicit `|| die`.)
+PLAUSIBLE_TX="$HPRV_TMPDIR/plausible.tx.vcf.gz"
+bcftools annotate -x 'INFO/hiConfDeNovo,INFO/loConfDeNovo' --threads "$THREADS" \
+    -Oz -o "$PLAUSIBLE_TX" "$PLAUSIBLE" 2>/dev/null \
+    || die "failed to build de-novo-free annotation source from $PLAUSIBLE"
+# CRITICAL: PLAUSIBLE_TX is REWRITTEN every run, but index_vcf() is a no-op when ANY .tbi/.csi
+# already exists — so a stale index from a prior run (the tmpdir defaults to the PERSISTENT $W/tmp,
+# and PLAUSIBLE_TX is never cleaned) would be silently reused. `bcftools annotate` then reads
+# offsets that no longer match the rewritten data and SILENTLY drops the vep_*/gnomAD-frequency
+# transfer for high-coordinate variants (exit 0, .done still stamped) — corrupting the rarity
+# oracle in the authoritative per-trio VCFs. Force a fresh index to match the fresh data.
+rm -f "$PLAUSIBLE_TX".tbi "$PLAUSIBLE_TX".csi
+index_vcf "$PLAUSIBLE_TX"
 
 # Build a padded, merged BED of plausible loci ONCE. Region-restricting each trio VCF to
 # these windows BEFORE `norm` makes per-trio work scale with the candidate set, not the
@@ -189,8 +218,10 @@ for row in "${rows[@]}"; do
     # allele-aware intersection: trio records that match a plausible site exactly
     bcftools isec -c none -n=2 -w1 --threads "$THREADS" -Oz -o "$cand" "$norm" "$PLAUSIBLE"
     index_vcf "$cand"
-    # transfer all INFO annotations from the (annotated) plausible sites
-    bcftools annotate -a "$PLAUSIBLE" -c INFO --threads "$THREADS" -Oz -o "$out" "$cand"
+    # transfer all INFO annotations from the (annotated) plausible sites. The source is the
+    # de-novo-free copy built above, so this blanket `-c INFO` cannot overwrite the candidate's
+    # own hiConfDeNovo/loConfDeNovo (see the PLAUSIBLE_TX note). Allele-exact: keyed CHROM+POS+REF+ALT.
+    bcftools annotate -a "$PLAUSIBLE_TX" -c INFO --threads "$THREADS" -Oz -o "$out" "$cand"
     index_vcf "$out"
     require_intact_bgzip "$out"; mark_done "$out"
     rm -f "$norm" "$norm".{tbi,csi} "$cand" "$cand".{tbi,csi} 2>/dev/null || true
