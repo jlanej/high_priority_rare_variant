@@ -156,9 +156,12 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   `qc.sex_min_sites`, else sex is left unknown — a dedicated indexed chrX pass so the autosomal MIE
   cap can't starve it), and a **contamination** gate — verifyBamID **FREEMIX > 0.05**
   (`qc.freemix_threshold`) if a `*.selfSM` directory is supplied (`resources.selfsm_dir`), else a
-  VCF-only **CHARR** proxy (reference-read fraction at high-quality hom-alt SNV sites) **> 0.02**
-  (`qc.charr_threshold`). (Richer somalier ancestry/relatedness is a roadmap follow-on; CHARR: Lu
-  et al., AJHG 2023.)
+  VCF-only **raw (uncorrected) reference-read fraction** at high-quality hom-alt SNV sites **> 0.02**
+  (`qc.charr_threshold`) — a CHARR-*like* proxy, **not** the calibrated Lu-2023 CHARR statistic (no
+  `/mean(1−AF)`, no baseline subtraction; Step 0 runs pre-annotation so per-site AF is unavailable).
+  It reads only ~1/3 of the true contamination fraction, so it flags **gross (≳5–8%)** contamination,
+  not the 1–3% band; near 1–3%, use the FREEMIX path. (Richer somalier ancestry/relatedness is a
+  roadmap follow-on; CHARR: Lu et al., AJHG 2023.)
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 
