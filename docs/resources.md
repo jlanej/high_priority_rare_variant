@@ -149,8 +149,9 @@ skips, leaving the NHF columns blank (`outputs.igv.nonhuman_screen.enabled` defa
 | kraken2 DB | taxonomic classifier index for ALT-read NHF | `resources.kraken2_db` (`KRAKEN2_DB`) | **bind-mounted DATA, never baked**; ~tens of GB |
 
 - **Recommended DB: PrackenDB `k2_NCBI_reference`** (one NCBI reference assembly per species + human
-  + RefSeq viral + UniVec-Core, built at kraken2's default k=35). nonhuman-screen ships a fetch
-  helper (`scripts/download_kraken2_db.sh --db DIR`) that downloads, extracts, and validates it.
+  + RefSeq viral + UniVec-Core, built at kraken2's default k=35). The **nonhuman-screen package**
+  (not this repo) ships a fetch helper `scripts/download_kraken2_db.sh --db DIR` that downloads,
+  extracts, and validates it.
 - **The dir MUST contain** the index files `hash.k2d`, `opts.k2d`, `taxo.k2d` **AND** the taxonomy
   dumps `taxonomy/nodes.dmp` + `taxonomy/names.dmp` (either under `taxonomy/` or at the DB root).
   Without the dumps kraken2 falls back to exact-taxid matching and the NHF signal is **unreliable in
