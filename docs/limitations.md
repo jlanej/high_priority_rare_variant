@@ -10,7 +10,7 @@ What this pipeline **cannot currently see**, why, and what each would cost to fi
 ## Why the first pass looks like this
 
 The pipeline runs on a **VEP-centric contract**: VEP 115 GRCh38 — its cache plus its plugins (CADD,
-and optionally SpliceAI). No gnomAD, ClinVar, dbNSFP or LOFTEE file is bcftools-transferred in.
+and SpliceAI, required by default). No gnomAD, ClinVar, dbNSFP or LOFTEE file is bcftools-transferred in.
 
 That was a deliberate trade. The alternative was ~1.4 TB of resource acquisition (gnomAD joint
 sites alone are 877 GB), each piece with its own version pinning, license gate, index, contig-naming
@@ -41,11 +41,12 @@ The raw score rides through to `candidates.calls.tsv` / the IGV export / the xls
 tiering. It is **keep-only** (a missing/None score never drops a variant, it only fails to rescue).
 
 **Residual caveats (why this is not a clean "solved"):**
-- **The PRECOMPUTED set is not exhaustive — but there is now an optional live backfill.** Illumina's
+- **The PRECOMPUTED set is not exhaustive — but a live backfill now runs by default.** Illumina's
   tables score genome-wide SNVs and a large indel set, but not every indel/context, at a narrow
   window; a missing score is **not** "no splice effect" (see *Using SpliceAI to triage splice-altering
   variants in 7,220 individuals*, medRxiv 2025). **Step 2b** (`resources.vep.spliceai_backfill.enabled`,
-  off by default) closes most of this gap: it runs the stock Illumina model live over just the
+  **ON by default**; if the image's isolated `spliceai` env is absent the run HALTS at preflight —
+  set it `false` to opt out) closes most of this gap: it runs the stock Illumina model live over just the
   cohort variants that carry **no** precomputed score (default: indels only — SNVs are complete), at
   a **wider `-D` window (500)** to reach deep-intronic cryptic sites the precomputed `-D 50` set
   misses, and folds the result into the same `vep_SpliceAI_pred_DS_*` fields BEFORE Step 3. The model

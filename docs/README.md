@@ -41,7 +41,8 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > ### ⚠ VEP-only contract — read this before the tables
 >
 > Every annotation the pipeline reads comes from **one** tool: VEP 115 GRCh38 — its cache plus its
-> plugins (CADD, and **optionally SpliceAI**). No gnomAD / ClinVar / dbNSFP / LOFTEE file is
+> plugins (CADD, and **SpliceAI** — required by default, `resources.vep.spliceai_required: true`).
+> No gnomAD / ClinVar / dbNSFP / LOFTEE file is
 > bcftools-transferred in. Several rows below therefore describe **targets and reference science, not
 > what runs** — each is marked. The **IMPLEMENTED** column is what the code does.
 >
@@ -88,12 +89,21 @@ PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity
 | # | Signal | Cutoff | Reaches |
 |---|--------|--------|---------|
 | 1 | VEP **IMPACT** | keep if `HIGH` or `MODERATE` | all pLoF + all missense + inframe indels |
-| 2 | **SpliceAI** max Δ | keep if ≥ **0.2** (`spliceai_ds_min`; ClinGen SVI PP3-supporting) | deep-intronic cryptic splice sites + exonic-synonymous splice disruption — the class VEP's positional terms and CADD both under-call. Optional (needs the SpliceAI score files); keep-only |
+| 2 | **SpliceAI** max Δ | keep if ≥ **0.2** (`spliceai_ds_min`; ClinGen SVI PP3-supporting) | deep-intronic cryptic splice sites + exonic-synonymous splice disruption — the class VEP's positional terms and CADD both under-call. Required by default (`resources.vep.spliceai_required` **true** — missing score files HALT at Step-2 preflight; set it false to degrade with a warning; not enforced when `resources.vep.annotated_vcf` is set); keep-only |
 | 3 | **CADD PHRED** | keep if ≥ **25.3** | everything else below MODERATE — intronic / synonymous / UTR / regulatory |
 
 SpliceAI and CADD are the two keep-paths below MODERATE impact (SpliceAI checked first, so a splice
 hit is labelled `spliceai`, not the generic `cadd`). Lower `spliceai_ds_min` toward 0.1/0.05 for
-higher deep-intronic recall. Two honest caveats on that CADD 25.3:
+higher deep-intronic recall.
+
+**SpliceAI availability defaults** (this table is the single source of truth, so they live here):
+`resources.vep.spliceai_required` **true** — missing raw score files HALT at the Step-2 preflight;
+not enforced when `resources.vep.annotated_vcf` is set. `resources.vep.spliceai_backfill.enabled`
+**true** — Step 2b scores variants with no precomputed value (`indels_only` **true**, `distance`
+**500** bp); an absent isolated `spliceai` env HALTS at preflight, while a transient scoring failure
+degrades to precomputed-only with the union left intact.
+
+Two honest caveats on that CADD 25.3:
 - **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on
   **missense only**. Missense never reaches rung 3 — the CADD rung (it is MODERATE, kept at rung 1),
   so in practice 25.3 is applied *exclusively* to the non-coding variants it was **not** calibrated for.
@@ -113,7 +123,7 @@ assignment**, and this screen assigns no ACMG weight.
 
 *TARGET (not implemented — needs resources this contract does not have):* LOFTEE HC-no-flags +
 Abou-Tayoun PVS1 grading; REVEL PP3 0.644/0.773/0.932 + BP4 ≤0.290/≤0.183; AlphaMissense
-≥0.564; SpliceAI Δ≥0.2 (Walker-2023, calibrated on **raw** scores); MPC ≥2. These specify the
+≥0.564; MPC ≥2. These specify the
 planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one** predictor
 (REVEL is the ClinGen-calibrated choice), chosen before seeing results.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 02b_spliceai_backfill.sh — OPTIONAL: score cohort-union variants that carry NO precomputed
+# 02b_spliceai_backfill.sh — DEFAULT-ON (resources.vep.spliceai_backfill.enabled): score the
+# cohort-union variants that carry NO precomputed
 # SpliceAI delta score (mostly novel indels), live, with the stock Illumina model, and merge the
 # scores into cohort.sites.annotated.vcf.gz — into the SAME vep_SpliceAI_pred_DS_* fields Step 2's
 # SpliceAI plugin produces, so Step 3 selection reads precomputed and backfilled scores identically.
@@ -8,7 +9,9 @@
 # Runs AFTER Step 2 (the plugin has scored everything the precomputed files cover) and BEFORE Step 3
 # (so a backfilled score is a keep-path). The model + GENCODE annotation are bundled in the isolated
 # `spliceai` conda env baked into the image — NO data download beyond the reference FASTA. TensorFlow
-# inference is heavy, so this is OFF by default and gated on the env being present (graceful skip).
+# inference is heavy, but it runs only on the small unscored set, so this is ON by default. An
+# absent env is an AVAILABILITY error: exit 3 => the caller HALTS. A transient scoring failure
+# degrades to precomputed-only (exit 0). See the exit contract below.
 #
 # Usage:
 #   02b_spliceai_backfill.sh --annotated cohort.sites.annotated.vcf.gz --ref GRCh38.fa \
@@ -77,7 +80,7 @@ log "Step 2b: $n_unscored variant(s) lack a precomputed SpliceAI score — scori
 [[ "$n_unscored" -gt 50000 ]] && warn "Step 2b: $n_unscored unscored variants is a LOT — live SpliceAI is ~1 var/s/CPU (7/s GPU). Did you configure the precomputed resources.vep.spliceai_snv/indel? Backfill is meant to fill only the small novel-indel gap."
 
 # 2) score them live in the isolated env (bundled Illumina model + GENCODE grch38 annotation).
-# A backfill failure is NON-fatal: it is an optional enhancement, so warn loudly and leave the union
+# A TRANSIENT scoring failure is non-fatal (an absent env already halted at gate 1): warn loudly and leave the union
 # on its precomputed scores rather than aborting a long pipeline run.
 # `-p "$SPLICEAI_ENV"` (prefix), NOT `-n spliceai` (name): both availability gates resolve the env
 # through $SPLICEAI_ENV and tell the operator to point HPRV_SPLICEAI_ENV at it, but `-n` resolves by
