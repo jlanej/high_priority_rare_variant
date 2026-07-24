@@ -39,16 +39,19 @@ reference:
 # --- External, version-pinned, bind-mounted resources (never baked into the image) ---
 # Provide the ones you have; steps that need a missing resource fail loudly with a
 # clear message rather than silently skipping annotation.
-# VEP-ONLY CONTRACT. The annotation surface is a VEP 115 GRCh38 cache + the CADD plugin —
-# nothing else is downloaded or bind-mounted. Population frequency (gnomAD v4.1 per-population
-# AFs) and ClinVar (CLIN_SIG) come out of the cache itself via --af_gnomade/--af_gnomadg and
-# --check_existing. What that costs, in one place (details in docs/allele_frequency.md):
+# VEP-CENTRIC CONTRACT. The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS
+# (CADD, and optionally SpliceAI) — nothing else is bcftools-transferred in. Population frequency
+# (gnomAD v4.1 per-population AFs) and ClinVar (CLIN_SIG) come out of the cache itself via
+# --af_gnomade/--af_gnomadg and --check_existing. What that costs, in one place (details in
+# docs/allele_frequency.md):
 #   * no faf95        — the cache has no AC/AN, so the 95% CI correction cannot be computed at
 #                       any price. Rarity uses a grpmax-PROXY point estimate instead, which runs
 #                       slightly stringent on low-count alleles (errs toward dropping).
 #   * no nhomalt      — the gnomAD-homozygote sanity check on de novo calls is gone.
-#   * no SpliceAI     — deep-intronic and exonic-synonymous splice variants are invisible to the
-#                       screen. CADD is a lossy proxy (v1.6+ ingests SpliceAI as a feature).
+#   * SpliceAI: WIRED  — precomputed raw splice deltas via the SpliceAI plugin (resources.vep.
+#                       spliceai_snv/indel) restore deep-intronic + exonic-synonymous splice
+#                       detection. Caveat: the PRECOMPUTED set does not score every indel/context,
+#                       so a missing score is not "no effect" (it never drops, only fails to rescue).
 #   * no LOFTEE       — no HC/LC pLoF confidence (was near-inert for selection; matters for tiering).
 #   * no ClinVar stars— the >=2-star gate is unimplementable; unstarred P/LP is honored instead.
 #   * no REVEL/AlphaMissense/MPC — these were already inert for selection (missense-only scores,
@@ -71,6 +74,27 @@ resources:
     csq_select: ""
     cadd_snv: ${CADD_SNV}         # whole_genome_SNVs.tsv.gz (+ .tbi)
     cadd_indel: ${CADD_INDEL}     # gnomad indel CADD tsv.gz (+ .tbi)
+    # SpliceAI precomputed splice delta scores, wired as a VEP plugin (like CADD). Use the FULL,
+    # RAW genome-wide files (spliceai_scores.raw.snv.hg38.vcf.gz + raw.indel), each bgzipped +
+    # tabix-indexed, so deep-intronic / non-MANE / synonymous splice sites are not masked out.
+    # Optional + graceful: leave unset and the splice keep-path is simply inactive (Step 2 warns).
+    # The full raw set is Illumina BaseSpace (login); a no-login MANE-only SNV mirror is a partial
+    # fallback. See docs/resources.md#spliceai and prepare_resources.sh --only spliceai.
+    spliceai_snv: ${SPLICEAI_SNV}     # spliceai_scores.raw.snv.hg38.vcf.gz (+ .tbi)
+    spliceai_indel: ${SPLICEAI_INDEL} # spliceai_scores.raw.indel.hg38.vcf.gz (+ .tbi)
+    # Step 2b — OPTIONAL live SpliceAI backfill. The precomputed files above cover every genome-wide
+    # SNV but a FINITE indel set at a narrow window, so some candidates (mostly novel indels) carry
+    # no precomputed score. When enabled, Step 2b runs the stock Illumina SpliceAI model (bundled in
+    # the image's isolated `spliceai` env — no extra download beyond the reference) over just those
+    # unscored variants and folds the result into the same vep_SpliceAI_pred_DS_* fields. OFF by
+    # default: it is TensorFlow inference (~1 variant/s/CPU, ~7/s GPU), and the precomputed set
+    # already covers the vast majority. Graceful if the env is absent (skips, precomputed only).
+    spliceai_backfill:
+      enabled: false        # opt-in; requires the image (the spliceai env is not on a bare host)
+      indels_only: true     # SNVs are precomputed-complete, so backfill only the novel-indel gap
+      distance: 500         # SpliceAI -D window (bp). Wider than the precomputed -D 50 to catch
+                            #   deep-intronic cryptic sites far from the variant — the class the
+                            #   precomputed set misses. Larger = slower + more distal calls to review.
     # Step 2 (the dominant cost) shards the VEP call BY CONTIG: each contig is an independent run
     # with its own .done, so a job killed at the scheduler walltime RESUMES on re-submit instead
     # of re-annotating from scratch — and the shards can be driven as a SLURM array (one contig
@@ -147,10 +171,18 @@ filters:
     benign_ba1: 0.05              # drop, never rescue (ClinGen BA1)
 
   functional:
-    # Step-3 selection keeps a variant on EITHER: HIGH/MODERATE VEP impact, or CADD over its
-    # cutoff. That is the whole ladder — see src/hprv/selection.py. The predictor stack this
-    # used to carry (REVEL/AlphaMissense/MPC/SpliceAI/LOFTEE) is gone with its resource files.
+    # Step-3 selection keeps a variant on ANY of three rungs (an OR): HIGH/MODERATE VEP impact,
+    # SpliceAI delta score over its cutoff, or CADD over its cutoff — see src/hprv/selection.py.
+    # (REVEL/AlphaMissense/MPC/LOFTEE remain out: missense-only scores are unreachable — a scored
+    # missense is already MODERATE and kept at the impact rung.)
     keep_impacts: [HIGH, MODERATE]
+    # SpliceAI max delta score (max over acceptor/donor gain/loss) keep-path. The ONLY signal that
+    # reaches a deep-intronic cryptic splice site or an exonic-synonymous splice disruption. 0.2 is
+    # the ClinGen SVI PP3-supporting minimum (best practice, publishable). Lower it toward 0.1 or
+    # 0.05 for higher deep-intronic recall (sensitivity for variants >20 bp into introns rises
+    # sharply below 0.2) at the cost of more review volume; the raw score rides through to the
+    # report either way, so a below-cutoff score is visible to the curator, just not auto-kept.
+    spliceai_ds_min: 0.2
     # CADD is the ONLY functional predictor, and the ONLY keep-path for anything VEP rates below
     # MODERATE — so this one number IS the entire non-coding screen. Two honest caveats:
     #  1. PROVENANCE. 25.3 is Pejaver-2022's PP3-supporting cutoff, calibrated on MISSENSE ONLY.

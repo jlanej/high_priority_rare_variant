@@ -80,8 +80,12 @@ if run_step 2; then
         # variant VEP rates below MODERATE. Without it the screen is impact-only: every
         # intronic / synonymous / UTR / regulatory candidate is unreachable. Loud, not fatal —
         # an impact-only screen is still a coherent (if narrower) run.
-        _opt HPRV_CADD_SNV   "CADD SNV (the only non-coding evidence in this contract)"
-        _opt HPRV_CADD_INDEL "CADD indel (the only indel-capable score in this contract)"
+        _opt HPRV_CADD_SNV   "CADD SNV (primary non-coding functional evidence)"
+        _opt HPRV_CADD_INDEL "CADD indel (indel-capable functional score)"
+        # SpliceAI: optional splice keep-path (deep-intronic / exonic-synonymous). Degrades
+        # gracefully — its absence just leaves those splice classes to CADD's weak proxy.
+        _opt HPRV_SPLICEAI_SNV   "SpliceAI SNV scores (deep-intronic + synonymous splice detection)"
+        _opt HPRV_SPLICEAI_INDEL "SpliceAI indel scores (splice detection for indels)"
     fi
     if [[ ${#r_missing[@]} -gt 0 ]]; then
         warn "Required resources are missing:"
@@ -155,6 +159,26 @@ if run_step 2; then
         log "== Step 2: annotate sites (VEP once) =="
     fi
     bash "$HERE/02_annotate_sites.sh" "${s2_args[@]}"
+
+    # Step 2b (optional): live-SpliceAI backfill of cohort variants with NO precomputed score
+    # (mostly novel indels), before Step 3 so a backfilled score is a keep-path. Off unless
+    # configured; graceful if the isolated `spliceai` env is absent (image-only).
+    # Runs when the union is FINAL: the single-node path (no passthru) OR the distributed
+    # `--annotate-gather` sub-task (which assembles the final union) — but NOT the mid-distributed
+    # shard/manifest sub-tasks, whose union is partial. (If enabled with SLURM, size the gather job
+    # for TensorFlow inference — the backfill runs there.)
+    if [[ ( ${#S2_PASSTHRU[@]} -eq 0 || "${S2_PASSTHRU[*]:-}" == "--gather" ) \
+          && "$(cfg_get resources.vep.spliceai_backfill.enabled false)" != "false" ]]; then
+        log "== Step 2b: SpliceAI live backfill (variants with no precomputed score) =="
+        b_io=1; [[ "$(cfg_get resources.vep.spliceai_backfill.indels_only true)" == "false" ]] && b_io=0
+        # `|| warn`: the backfill is OPTIONAL — ANY failure (not just the scoring subprocess) degrades
+        # to precomputed-only rather than aborting a long run. Every 02b failure point precedes the
+        # atomic union replace, so on failure the precomputed-scored union is left intact.
+        bash "$HERE/02b_spliceai_backfill.sh" \
+            --annotated "$W/cohort.sites.annotated.vcf.gz" --ref "$HPRV_REF_FASTA" \
+            --distance "$(cfg_get resources.vep.spliceai_backfill.distance 500)" --indels-only "$b_io" \
+            || warn "Step 2b (SpliceAI backfill) failed — continuing on precomputed SpliceAI scores (union unchanged)."
+    fi
 fi
 
 if run_step 3; then

@@ -69,15 +69,26 @@ def main(argv=None) -> int:
     # variant below MODERATE impact can survive. If this regresses the screen silently goes
     # coding-only and every intronic/synonymous candidate vanishes. ---
     check(plaus.get(("chr1", 18000)) == "cadd",
-          "deep-intronic MODIFIER kept via CADD (the sole non-coding keep-path)")
+          "deep-intronic MODIFIER kept via CADD (a non-coding keep-path)")
     check(("chr1", 18500) not in plaus,
           "intronic MODIFIER with sub-threshold CADD dropped (the CADD gate really gates)")
+
+    # --- SpliceAI keep-path: the SpliceAI plugin (now wired) is the ONLY signal that reaches a
+    # deep-intronic cryptic splice site CADD misses. A MODIFIER with low CADD but DS >= 0.2 must be
+    # kept via 'spliceai'; its low-DS control must drop. If this regresses, deep-intronic splice
+    # detection goes silently dark again. ---
+    check(plaus.get(("chr1", 18700)) == "spliceai",
+          "deep-intronic MODIFIER (low CADD) kept via SpliceAI delta score >= threshold")
+    check(("chr1", 18800) not in plaus,
+          "intronic MODIFIER with sub-threshold SpliceAI + low CADD dropped (the SpliceAI gate gates)")
 
     # --- The gating-dead predictors must not reappear. REVEL/AlphaMissense/MPC are missense-only
     # scores, and every missense is IMPACT=MODERATE, which selection.py keeps at an earlier
     # branch — so these keep-reasons were unreachable even when the code still had them. This is
-    # the audit's falsifiable prediction, enforced: they must be exactly 0, cohort-wide. ---
-    for dead in ("revel", "alphamissense", "mpc", "spliceai", "loftee_hc"):
+    # the audit's falsifiable prediction, enforced: they must be exactly 0, cohort-wide. NB
+    # 'spliceai' is deliberately NOT in this list any more: SpliceAI is re-wired (a real data source
+    # now) and DOES fire, asserted above at chr1:18700. ---
+    for dead in ("revel", "alphamissense", "mpc", "loftee_hc"):
         check(dead not in set(plaus.values()), f"no site kept via '{dead}' (removed / unreachable)")
 
     # --- Step 5: inheritance calls ---
@@ -159,6 +170,12 @@ def main(argv=None) -> int:
     # CADD-only keep survives into an actual call, not just Step 3
     check(has("CH_A", "dominant", "chr1", 18000, "GENEIN"),
           "deep-intronic CADD-kept variant becomes a dominant call")
+    # SpliceAI-kept variant becomes a call AND carries its delta score into candidates.calls.tsv
+    check(has("CH_A", "dominant", "chr1", 18700, "GENESAI"),
+          "deep-intronic SpliceAI-kept variant becomes a dominant call")
+    sai = [r for r in calls if r["symbol"] == "GENESAI"]
+    check(sai and all(r.get("spliceai_ds") == "0.55" for r in sai),
+          "the SpliceAI delta score (0.55) flows into candidates.calls.tsv for the curator")
 
     # --- Step 6: recurrence-based gene consolidation ---
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}

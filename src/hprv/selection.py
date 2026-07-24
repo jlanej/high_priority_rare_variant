@@ -5,12 +5,14 @@ biologically plausible and record WHY. Inheritance-agnostic (permissive-union ra
 ClinVar P/LP as an override, BA1-common never rescued, gene lists NOT applied here
 (never-drop rule). See docs/pipeline_design.md (Step 3).
 
-The functional ladder is deliberately two rungs — VEP IMPACT, then CADD. It used to try
-spliceai -> revel -> alphamissense -> cadd -> mpc; under the VEP-only contract three of
-those have no data source, and the missense pair were provably unreachable anyway (a
-scored variant is missense => MODERATE => kept at the impact rung). Keeping them would
-have meant an OR over correlated predictors that never fires — worse than useless,
-because it reads as discriminative power the screen does not have.
+The functional ladder is three rungs — VEP IMPACT, then SpliceAI, then CADD (an OR: any one
+keeps). SpliceAI is back because it now has a real data source (the precomputed raw genome-wide
+splice scores, wired as a VEP plugin in Step 2): it is the ONLY signal that reaches a deep-intronic
+cryptic splice site or an exonic-synonymous splice disruption, which both VEP's positional terms
+and CADD under-call. The missense predictors (REVEL/AlphaMissense/MPC) stay OUT: they are
+missense-only, and a scored missense is IMPACT=MODERATE => already kept at the impact rung, so
+they never fire — an OR over correlated predictors that reads as discriminative power the screen
+does not have. Each rung is keep-ONLY (a None/absent score never drops a variant).
 """
 
 from __future__ import annotations
@@ -33,16 +35,22 @@ def build_classifier(cfg):
     ba1 = _f(cfg, "filters.rarity.benign_ba1", 0.05)
     rec_max = _f(cfg, "filters.rarity.recessive_max", 1.0e-2)  # permissive-union cutoff
     cadd_sup = _f(cfg, "filters.functional.cadd_phred_supporting", 25.3)
+    sai_min = _f(cfg, "filters.functional.spliceai_ds_min", 0.2)
     keep_impacts = set(get(cfg, "filters.functional.keep_impacts", ["HIGH", "MODERATE"]))
 
     def functional_reason(v):
         if (A.impact(v) or "") in keep_impacts:
             return "impact_" + (A.impact(v) or "").lower()
-        # Everything below MODERATE reaches here, and CADD is the only score left that can
-        # speak to it — the missense predictors (REVEL/AlphaMissense/MPC) could not, since a
-        # variant carrying one is missense, hence MODERATE, hence already returned above.
-        # That makes this the pipeline's ONLY keep-path for intronic / synonymous / UTR /
-        # regulatory variants, so its threshold is the whole non-coding screen. See
+        # SpliceAI: the specific splice-disruption signal. It is the ONLY predictor that reaches a
+        # cryptic splice site deep in an intron, or an exonic-synonymous variant that breaks
+        # splicing — cases VEP's positional splice terms miss entirely and CADD only weakly
+        # re-encodes. Checked BEFORE CADD so a splice hit is labelled 'spliceai' (actionable),
+        # not the generic 'cadd'. Keep-only; the raw delta score rides through for reviewer tiering.
+        # ClinGen SVI uses >= 0.2 for PP3-supporting; a missing score never drops (see spliceai_ds).
+        if (ds := A.spliceai_ds(v)) is not None and ds >= sai_min:
+            return "spliceai"
+        # CADD is the general functional score and the other keep-path below MODERATE impact — for
+        # intronic / synonymous / UTR / regulatory variants SpliceAI does not flag. See
         # docs/functional_annotation.md for why 25.3 is a discovery rank here and not the
         # Pejaver PP3-supporting cutoff it is named after (that calibration is missense-only).
         if (val := A.cadd(v)) is not None and val >= cadd_sup:
