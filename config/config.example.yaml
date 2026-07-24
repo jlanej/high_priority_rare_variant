@@ -77,20 +77,28 @@ resources:
     # SpliceAI precomputed splice delta scores, wired as a VEP plugin (like CADD). Use the FULL,
     # RAW genome-wide files (spliceai_scores.raw.snv.hg38.vcf.gz + raw.indel), each bgzipped +
     # tabix-indexed, so deep-intronic / non-MANE / synonymous splice sites are not masked out.
-    # Optional + graceful: leave unset and the splice keep-path is simply inactive (Step 2 warns).
     # The full raw set is Illumina BaseSpace (login); a no-login MANE-only SNV mirror is a partial
-    # fallback. See docs/resources.md#spliceai and prepare_resources.sh --only spliceai.
+    # fallback. See docs/resources.md#spliceai and scripts/download_spliceai.sh.
     spliceai_snv: ${SPLICEAI_SNV}     # spliceai_scores.raw.snv.hg38.vcf.gz (+ .tbi)
     spliceai_indel: ${SPLICEAI_INDEL} # spliceai_scores.raw.indel.hg38.vcf.gz (+ .tbi)
-    # Step 2b — OPTIONAL live SpliceAI backfill. The precomputed files above cover every genome-wide
-    # SNV but a FINITE indel set at a narrow window, so some candidates (mostly novel indels) carry
-    # no precomputed score. When enabled, Step 2b runs the stock Illumina SpliceAI model (bundled in
+    # SpliceAI is part of the DEFAULT screen: it is the only signal that reaches deep-intronic
+    # cryptic sites and exonic-synonymous splice disruption, so a run that silently lacks it is a
+    # materially weaker screen. `required: true` therefore HALTS the run at preflight (second 1,
+    # before VEP) if the score files above are missing, instead of degrading quietly. Set false to
+    # deliberately run without SpliceAI (dev/quick runs) — then it degrades with a warning as before.
+    # Not enforced when resources.vep.annotated_vcf is set (VEP is not invoked at all).
+    spliceai_required: true
+    # Step 2b — live SpliceAI backfill, ON by default. The precomputed files above cover every
+    # genome-wide SNV but a FINITE indel set at a narrow window, so some candidates (mostly novel
+    # indels) carry no precomputed score. Step 2b runs the stock Illumina SpliceAI model (bundled in
     # the image's isolated `spliceai` env — no extra download beyond the reference) over just those
-    # unscored variants and folds the result into the same vep_SpliceAI_pred_DS_* fields. OFF by
-    # default: it is TensorFlow inference (~1 variant/s/CPU, ~7/s GPU), and the precomputed set
-    # already covers the vast majority. Graceful if the env is absent (skips, precomputed only).
+    # unscored variants and folds the result into the same vep_SpliceAI_pred_DS_* fields.
+    # It is TensorFlow inference (~1 variant/s/CPU, ~7/s GPU), but it runs only on the small unscored
+    # set. AVAILABILITY halts: if enabled and the isolated env is absent (e.g. a bare host rather
+    # than the image), the run STOPS at preflight — set enabled: false to opt out explicitly.
+    # A transient failure mid-scoring still degrades to precomputed-only (the union is left intact).
     spliceai_backfill:
-      enabled: false        # opt-in; requires the image (the spliceai env is not on a bare host)
+      enabled: true         # requires the image (the spliceai env is not on a bare host)
       indels_only: true     # SNVs are precomputed-complete, so backfill only the novel-indel gap
       distance: 500         # SpliceAI -D window (bp). Wider than the precomputed -D 50 to catch
                             #   deep-intronic cryptic sites far from the variant — the class the

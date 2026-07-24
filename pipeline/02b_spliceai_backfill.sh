@@ -37,11 +37,14 @@ done
 [[ -n "$REF" && -f "$REF" ]] || die "need --ref <GRCh38 FASTA> (the same reference the cohort was called against)"
 [[ "$DISTANCE" =~ ^[0-9]+$ ]] || die "--distance must be a non-negative integer"
 
-# Gate 1: the isolated spliceai env must be present (image-only). On a bare host / CI it is absent —
-# warn and skip so the pipeline still runs on the precomputed scores alone.
+# Gate 1: the isolated spliceai env must be present (image-only). The backfill is ON by default, so
+# an absent env is an AVAILABILITY error, not a silent skip: exit 3 tells the caller to HALT. (This
+# is normally unreachable — run_pipeline's preflight checks the same thing before VEP — so reaching
+# it means 2b was invoked directly, or the env vanished mid-run.) Exit 3 is the caller's contract:
+# 3 = unavailable/halt, any other non-zero = degrade to precomputed-only. See run_pipeline.sh.
 if ! hprv_run -- test -x "$SPLICEAI_ENV/bin/spliceai"; then
-    warn "Step 2b: the isolated 'spliceai' env ($SPLICEAI_ENV) is not present in the runtime — skipping live backfill (precomputed scores only). It ships only in the container image."
-    exit 0
+    warn "Step 2b: the isolated 'spliceai' env ($SPLICEAI_ENV) is not present in the runtime. It ships only in the container image — run inside it, point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill."
+    exit 3
 fi
 
 # Idempotency: skip if a completed backfill is NEWER than the annotated union (i.e. the union has not
