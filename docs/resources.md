@@ -166,13 +166,15 @@ Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host i
 The script ships in the image at `/opt/hprv/scripts/` and is on `PATH`, so call it by name — you do
 not need a checkout of this repo on the host:
 
-> **Always pass `--only`.** The script predates the VEP-only contract and has not been trimmed: a
-> bare `fetch` still runs `prep_gnomad`, `prep_clinvar`, `prep_loftee`, `prep_dbnsfp` and
-> `prep_spliceai` — i.e. it will happily begin streaming **~877 GB of gnomAD** the pipeline will
-> never open. The `--only` list below is the contract's required set.
+> **A bare `fetch` already prepares only the required set** (`reference`, `vep_cache`, `cadd`,
+> `constraint`) — it will **not** start the ~877 GB gnomAD download. The retired resources
+> (`gnomad_sites`, `clinvar`, `loftee`, `dbnsfp`, `spliceai`) run **only** when you name them with
+> `--only`, so the roadmap restorations are one flag away. Passing `--only reference,vep_cache,cadd,constraint`
+> (as below) is therefore explicit-but-equivalent to a bare `fetch`.
 
 ```bash
-# 1. fetch + prepare ONLY what the VEP-only contract reads
+# 1. fetch + prepare what the VEP-only contract reads (bare `fetch` does the same set;
+#    the explicit --only just documents it)
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources fetch \
     --only reference,vep_cache,cadd,constraint --accept-license

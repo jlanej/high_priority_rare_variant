@@ -5,6 +5,14 @@ How curated disease-gene knowledge bases and HPO-driven phenotype matching are u
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
+> ⚠️ **STATUS: TARGET / not yet wired.** This entire layer — gene-list tiering, ACMG-SF/PanelApp
+> overlays, and Exomiser/LIRICAL/HPO phenotype ranking — is **planned, not implemented**. No code
+> in `pipeline/` or `src/` reads a gene list, assigns a Tier 1/2/3, or runs a phenotype ranker; the
+> corresponding config keys (`resources.gene_lists.*`, `overlays.pediatric_cancer.*`,
+> `overlays.phenotype.*`) are `[reserved]` and unread. Read this as the design for the intended
+> layer, not a description of current behavior. (Constraint weighting in Step 6 — LOEUF/pLI/s_het/
+> pHaplo — IS wired; see [gene_constraint.md](gene_constraint.md).)
+
 ## TL;DR
 
 - Gene lists and phenotype scores are **priors/tiers, never hard gates**. Rarity, impact, and trio-QC filtering run **before and independently of** list membership, so a novel gene is never dropped for absence from curation (the **never-drop rule**).

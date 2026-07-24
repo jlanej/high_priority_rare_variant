@@ -162,7 +162,7 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 
-### Pediatric cancer
+### Pediatric cancer — TARGET (overlay not yet wired; `[reserved]` in config, no code reads it)
 - Version-pinned gene-list **union** (prior/tier, not hard filter): ACMG **SF v3.3** (84 genes)
   cancer subset ∪ **PanelApp GE green** (Childhood solid tumours panel 243, Adult susceptibility
   245) ∪ curated recessive CPS set (MLH1/MSH2/MSH6/PMS2, FANC\*, BRCA2, ATM, DIS3L2, BLM).
@@ -195,7 +195,7 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 - OPTIONAL secondary: de novo Poisson enrichment vs the Samocha model (exome-wide **P < 2.5e-6**,
   BH **q < 0.05**) when a mutation-rate table is supplied.
 
-### A-priori gene lists & phenotype — priors/tiers, never hard include/exclude (**never-drop rule**)
+### A-priori gene lists & phenotype — TARGET (priors/tiers not yet wired; `[reserved]` in config, no code reads gene lists or HPO/Exomiser)
 - Tier 1 known gene → lenient thresholds; Tier 2 strong candidate (constraint/expression); Tier 3
   novel → retained at lower prior. Rarity/impact/QC gating applied *before and independently of*
   list priors. Phenotype: **Exomiser** + LIRICAL as ranking priors (not hard gates); HPO per

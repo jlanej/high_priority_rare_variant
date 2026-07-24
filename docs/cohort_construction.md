@@ -14,7 +14,7 @@ How to combine independently-called GMKF Kids First per-trio VCFs into a defensi
 - The frequency oracle is **external gnomAD v4.1**, read through the **VEP cache** as a **grpmax point-estimate proxy** — **not** `faf95`, which the cache cannot supply (no AC/AN) and which remains the TARGET (see [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md)). The argument below is unaffected: the point is that the denominator is *external*, never internal. Internal recurrence is valid **only** as an artifact/blocklist signal.
 - Normalize **before** any union: `norm -m-` (split multiallelics), left-align/`-c` against the **exact GRCh38 build** the trios were called on, then `view -G` to drop genotypes.
 - If a real genotype matrix is ever required, re-run true **joint genotyping from the per-trio gVCFs** (GLnexus or GATK `GenomicsDBImport`→`GenotypeGVCFs`) — you cannot recover it from variant-only VCFs.
-- Pin **bcftools/htslib 1.22** (project default, overridable; see [tooling_and_reproducibility.md](tooling_and_reproducibility.md)).
+- Pin **bcftools/htslib 1.23** (project default, overridable; see [tooling_and_reproducibility.md](tooling_and_reproducibility.md)).
 
 ## The core hazard: a naive merge fabricates genotypes and corrupts AC/AN
 
@@ -61,7 +61,7 @@ Otherwise the "same" variant carries multiple representations and dedup/annotati
 
 1. **Split multiallelics to biallelic**: `bcftools norm -m-` (default splits all types).
 2. **Left-align and normalize indels against the reference**: requires `-f <GRCh38.fa>`; left-alignment/normalization only fires when `--fasta-ref` is supplied. Use the **exact GRCh38 build the trios were called against** — matching contig naming (e.g. `chr1`) and including the alt/decoy contigs per Kids First.
-3. **Check REF against the reference** (`-c s`/`-c w` reports REF/ALT mismatches — resolve, don't ignore).
+3. **Check REF against the reference** for mismatches. The pipeline uses `-c w` (**warn**, never silently rewrite) so a build/contig mismatch stays visible rather than being masked by an automatic `-c s` rewrite.
 4. **Drop genotypes** to make the file sites-only: `bcftools view -G`.
 5. **Sort, bgzip, index** each file (`bcftools sort`; `bcftools index -t`).
 6. **Union with dedup**: `bcftools concat -a -D` on the normalized sites files removes duplicate identical records; follow with `sort` + `norm -d exact` to collapse residual duplicates that differ only in representation.
@@ -72,7 +72,9 @@ See [bcftools norm/view/concat docs](https://samtools.github.io/bcftools/bcftool
 
 FILTER and INFO were computed **per trio** and are not comparable across the cohort. For a sites list, either strip them or compute any recurrence tag yourself with semantics you control:
 
-- Strip incomparable fields: `bcftools annotate -x INFO,FILTER`.
+- Strip the incomparable per-trio INFO: `bcftools annotate -x INFO`. (The pipeline keeps the FILTER
+  column — records are already reduced to PASS/`.` by an upstream `bcftools view -f`, so there is
+  nothing incomparable left there to strip.)
 - If you keep a recurrence count, compute it with `bcftools +fill-tags` (or your own `INFO/NS`-style counter over the input files) — **do not** carry per-trio AC/AN into the cohort file as though it were population frequency.
 
 Per-trio genotype/QC gates (GQ, DP, allele balance, FILTER=PASS, refined-PP handling, de novo re-verification) belong upstream, at the trio level — see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md). Reconciling FILTER here is only about not laundering incomparable per-trio calls into a cohort-level field.
@@ -82,7 +84,7 @@ Per-trio genotype/QC gates (GQ, DP, allele balance, FILTER=PASS, refined-PP hand
 Per-trio prep (run on each trio file):
 
 ```bash
-bcftools norm -m- -f "${REF_FASTA}" -c s "${TRIO_VCF}" -Ou \
+bcftools norm -m- -f "${REF_FASTA}" -c w "${TRIO_VCF}" -Ou \
   | bcftools view -G -Oz -o "${TRIO_SITES}" \
   && bcftools index -t "${TRIO_SITES}"
 ```
@@ -99,7 +101,7 @@ bcftools concat -a -D -Ou ${TRIO_SITES_GLOB} \
 Strip incomparable per-trio annotations (retain only a self-computed recurrence tag if desired):
 
 ```bash
-bcftools annotate -x INFO,FILTER "${COHORT_SITES}" -Oz -o "${COHORT_SITES_CLEAN}"
+bcftools annotate -x INFO "${COHORT_SITES}" -Oz -o "${COHORT_SITES_CLEAN}"
 ```
 
 Escalation only, and only if gVCFs exist — a real genotype matrix via joint genotyping:
@@ -132,14 +134,14 @@ The population-rarity decision lives entirely with the external oracle: **gnomAD
 | `--missing-to-ref` | **Never** | Guarantees AN inflation, hides missingness |
 | Multiallelic handling | `bcftools norm -m-` | Split to biallelic before union |
 | Left-align / normalize | `norm -f <GRCh38.fa>` on the exact build the trios used | Contig-name matched; alt/decoy per Kids First |
-| REF check | `norm -c s` (resolve mismatches) | Do not ignore |
+| REF check | `norm -c w` (warn on REF/ALT mismatch; never rewrite) | Surface build/contig problems, don't mask them |
 | Drop genotypes | `bcftools view -G` | Makes the file sites-only |
 | Union + dedup | `concat -a -D` → `sort` → `norm -d exact` | Collapse residual representation duplicates |
-| Per-trio FILTER/INFO | Strip (`annotate -x INFO,FILTER`) | Incomparable across independent calls |
+| Per-trio INFO | Strip (`annotate -x INFO`) | Incomparable across independent calls (FILTER kept — already PASS-filtered upstream) |
 | Internal recurrence | Self-computed; **artifact/blocklist signal only** | Never a population frequency |
 | Frequency oracle | **External gnomAD v4.1** via the VEP cache, **grpmax proxy** (point estimate). `faf95` = TARGET, not implemented | See [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md) |
 | Genotype matrix (if ever needed) | Joint-genotype from **gVCFs** (GLnexus / GATK) | Cannot be recovered from variant-only VCFs |
-| Tool versions | **bcftools/htslib 1.22** (default, overridable) | See [tooling_and_reproducibility.md](tooling_and_reproducibility.md) |
+| Tool versions | **bcftools/htslib 1.23** (default, overridable) | See [tooling_and_reproducibility.md](tooling_and_reproducibility.md) |
 
 All values are **defaults**, overridable in `config/config.example.yaml`. A gene-specific ClinGen VCEP threshold (applied downstream in the frequency/classification layers) overrides any generic cutoff.
 
