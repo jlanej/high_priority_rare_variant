@@ -92,7 +92,8 @@ outdir="$(abspath_dir "$OUT")"; mkdir -p "$outdir"
 # Bind every resource dir so tool calls see them inside/outside the container.
 binds="$outdir"
 for r in "$SITES" "$REF" "$PRE_VEP" "${HPRV_VEP_CACHE:-}" "${HPRV_VEP_PLUGINS:-}" \
-         "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}"; do
+         "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
+         "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}"; do
     is_set "$r" && [[ -e "$r" ]] && binds+=" $(abspath_dir "$r")"
 done
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
@@ -223,6 +224,20 @@ else
         vep_args+=(--plugin "CADD,snv=${HPRV_CADD_SNV},indels=${HPRV_CADD_INDEL}")
     else warn "CADD plugin not configured — with no CADD there is NO functional evidence for any variant VEP rates below MODERATE (intronic/synonymous/UTR/regulatory); the screen degrades to an impact-only filter"; fi
 
+    # SpliceAI plugin: precomputed raw genome-wide splice delta scores (Illumina), the one signal
+    # that reaches deep-intronic cryptic sites + exonic-synonymous splice disruptions VEP's
+    # positional terms and CADD both under-call. Emits vep_SpliceAI_pred_DS_* (+ DP_*) subfields.
+    # NB the plugin's own `cutoff=` is deliberately NOT passed — we lift the raw delta scores and
+    # threshold in selection.py (filters.functional.spliceai_ds_min) so nothing is masked pre-review.
+    # Files must be bgzipped + tabix-indexed. Optional + graceful (same as CADD).
+    # Check EXISTENCE, not just set-ness: emit-env exports the SpliceAI paths unconditionally, so a
+    # configured-but-not-yet-downloaded file must skip the plugin gracefully rather than make VEP
+    # abort on an unopenable score file. Both snv= and indel= are required by the plugin.
+    if is_set "${HPRV_SPLICEAI_SNV:-}" && [[ -e "$HPRV_SPLICEAI_SNV" ]] \
+       && is_set "${HPRV_SPLICEAI_INDEL:-}" && [[ -e "$HPRV_SPLICEAI_INDEL" ]]; then
+        vep_args+=(--plugin "SpliceAI,snv=${HPRV_SPLICEAI_SNV},indel=${HPRV_SPLICEAI_INDEL}")
+    else warn "SpliceAI plugin inactive (score files unset or not present) — deep-intronic and exonic-synonymous splice-disrupting variants that VEP's positional terms miss will be invisible (CADD is only a weak, lossy proxy for the splice signal). See docs/resources.md to add spliceai_snv/spliceai_indel."; fi
+
     if is_set "$SHARD_CONTIG"; then
         # --- scatter (one SLURM array task): annotate a single contig -> shard + .done, then stop.
         # No split-vep, no gather, no $OUT — the dependent gather job assembles the whole. Idempotent
@@ -278,8 +293,11 @@ csq_fmt="${csq_line##*Format: }"; csq_fmt="${csq_fmt%%\">*}"
 # Deliberately NOT the full population set and NOT MAX_AF: see the frequency check below.
 GRPMAX_AF_FIELDS="gnomADe_AFR_AF gnomADe_AMR_AF gnomADe_EAS_AF gnomADe_NFE_AF gnomADe_SAS_AF \
                   gnomADg_AFR_AF gnomADg_AMR_AF gnomADg_EAS_AF gnomADg_NFE_AF gnomADg_SAS_AF"
+SPLICEAI_FIELDS="SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
+                 SpliceAI_pred_DP_AG SpliceAI_pred_DP_AL SpliceAI_pred_DP_DG SpliceAI_pred_DP_DL \
+                 SpliceAI_pred_SYMBOL"
 want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT \
-      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS"
+      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS"
 have_fields=""
 for w in $want; do
     [[ "|$csq_fmt|" == *"|$w|"* ]] && have_fields+="${have_fields:+,}$w"
@@ -304,8 +322,15 @@ population frequency would be silently absent and NOTHING would be filtered as c
 --af_gnomade --af_gnomadg (or --everything)."
 log "Step 2: rarity oracle = $_n_grpmax/10 gnomAD grpmax-eligible AF fields"
 if ! _have CADD_PHRED; then
-    warn "no vep_CADD_PHRED lifted — CADD is the ONLY functional predictor under this contract, so \
-without it nothing below MODERATE impact can ever be kept (all intronic/synonymous/UTR evidence is gone)"
+    warn "no vep_CADD_PHRED lifted — CADD is a primary functional predictor here, so without it a \
+variant below MODERATE impact can only be kept via SpliceAI (intronic/synonymous/UTR CADD evidence is gone)"
+fi
+# SpliceAI is optional; warn only if it was CONFIGURED (plugin data given) yet no score lifted — that
+# means the plugin/data is misconfigured, not merely unused, and the splice keep-path would be silently dead.
+if is_set "${HPRV_SPLICEAI_SNV:-}" && is_set "${HPRV_SPLICEAI_INDEL:-}" && ! _have SpliceAI_pred_DS_AG; then
+    warn "SpliceAI score files are configured but no vep_SpliceAI_pred_DS_* was lifted — the plugin \
+produced no scores (wrong build/filenames, un-indexed .tbi, or a VEP/plugin mismatch). The splice \
+keep-path is inactive; verify the raw snv/indel VCFs are GRCh38, bgzipped and tabix-indexed."
 fi
 if ! _have CLIN_SIG; then warn "no vep_CLIN_SIG lifted — the ClinVar P/LP override is inactive (re-run VEP with --check_existing)"; fi
 

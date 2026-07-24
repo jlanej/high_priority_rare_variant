@@ -8,16 +8,19 @@ Assigns molecular consequence and calibrated deleteriousness evidence to rare SN
 > ### ⚠ Status: most of this document is reference science, not running code
 >
 > The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD plugin, and
-> nothing else. No LOFTEE, dbNSFP, SpliceAI or ClinVar file is downloaded or bind-mounted.
+> nothing else. No LOFTEE, dbNSFP or ClinVar file is bcftools-transferred in. (SpliceAI IS wired
+> now, as a VEP plugin — see the Splicing predictors section below.)
 >
-> **What is IMPLEMENTED at the Step-3 screen is a two-rung ladder and nothing more:**
+> **What is IMPLEMENTED at the Step-3 screen is a three-rung ladder (an OR — any one keeps):**
 > 1. VEP `IMPACT` ∈ `keep_impacts` (`[HIGH, MODERATE]`) → keep;
-> 2. else `CADD_PHRED ≥ 25.3` → keep; else drop `not_functional`.
+> 2. else `SpliceAI` max delta score ≥ `spliceai_ds_min` (0.2) → keep (when the SpliceAI plugin is
+>    configured — the deep-intronic / synonymous splice keep-path);
+> 3. else `CADD_PHRED ≥ 25.3` → keep; else drop `not_functional`.
 > Plus a ClinVar `CLIN_SIG` P/LP override (**unstarred** — the cache carries no review status) and
 > a BA1 drop at AF ≥ 0.05. See [`src/hprv/selection.py`](../src/hprv/selection.py).
 >
 > **Not available:** LOFTEE (HC/LC, flags), REVEL, AlphaMissense, MPC, MetaRNN, BayesDel, VEST4,
-> SpliceAI, ClinVar review status. Every threshold below that names one of them is a **TARGET**
+> ClinVar review status. Every threshold below that names one of them is a **TARGET**
 > for the tiering step in [ROADMAP.md](ROADMAP.md), not a filter that fires today. The science is
 > retained deliberately: it is the justification for that roadmap.
 >
@@ -30,7 +33,7 @@ Assigns molecular consequence and calibrated deleteriousness evidence to rare SN
 - **IMPLEMENTED — the whole functional ladder:** **VEP IMPACT** (HIGH/MODERATE kept) → **CADD PHRED ≥ 25.3** → drop. One annotation source (VEP 115 cache), one plugin (CADD). Version-pin both.
 - **IMPLEMENTED — ClinVar `CLIN_SIG` P/LP keeps a variant** and rescues it from the rarity gate, at **any** review status; no star gate exists (the cache has no `CLNREVSTAT`). This over-retains rather than over-drops — safe for a screen, costly in curation.
 - **CADD is on an off-label threshold.** 25.3 is Pejaver-2022's PP3-supporting cutoff, calibrated on **missense only**; missense never reaches the CADD rung (it is MODERATE, kept a rung earlier), so 25.3 is applied *exclusively* to the non-coding variants it was never calibrated for. It is a **discovery rank (≈ top 0.3% genome-wide), not PP3 evidence**. See [CADD as the only predictor](#cadd-as-the-only-predictor--implemented-and-off-label).
-- **VEP IMPACT** (HIGH/MODERATE/LOW/MODIFIER) is a coarse convenience tier only — never rely on it alone for splice-adjacent variants. With no SpliceAI to layer on, **that is exactly what the screen currently does**, and deep-intronic / exonic-synonymous splice variants are invisible to it.
+- **VEP IMPACT** (HIGH/MODERATE/LOW/MODIFIER) is a coarse convenience tier only — never rely on it alone for splice-adjacent variants. The screen layers **SpliceAI** on top of IMPACT (rung 2) to catch the deep-intronic / exonic-synonymous splice variants IMPACT bins as MODIFIER/LOW — when the SpliceAI plugin is configured (see below).
 - **TARGET — pLoF confidence = LOFTEE HC with no flags**; grade PVS1 via the Abou Tayoun 2018 decision tree (NMD-escape / last-exon / 3′-terminal-50 bp / single-exon downgrade), gated on ClinGen gene–disease validity ≥ Moderate and a known LoF mechanism.
 - **TARGET — missense primary = REVEL** (Pejaver-2022 calibrated): PP3 supporting **≥ 0.644**, moderate **≥ 0.773**, strong **≥ 0.932**; BP4 supporting **≤ 0.290**, moderate **≤ 0.183**. **AlphaMissense** (likely_pathogenic **≥ 0.564**) as orthogonal support only. These are **reporting/tiering** values: as a *screen* filter they are provably inert (see [the unreachability note](#why-the-missense-predictors-never-filtered-anything)).
 - **TARGET — splicing = Walker-2023 calibrated SpliceAI, on RAW scores**: PP3 Δ **≥ 0.2**, BP4 Δ **≤ 0.1**, 0.1–0.2 uninformative; canonical ±1,2 with Δ **≥ 0.5** = high tier. If PVS1(splice) applies, do not also apply PP3.
@@ -49,7 +52,7 @@ Ensembl VEP assigns Sequence Ontology consequence terms and bins them into four 
 | **LOW** | `splice_region_variant`, `synonymous_variant`, `stop_retained_variant`, `start_retained_variant`, `incomplete_terminal_codon_variant` | Usually low priority — but `splice_region_variant` can be highly deleterious |
 | **MODIFIER** | non-coding / intronic / UTR / intergenic / regulatory | Predictions difficult; never sole evidence |
 
-Caveat: `splice_region_variant` is binned LOW yet can abolish splicing. Never use IMPACT alone for any splice-adjacent variant — layer SpliceAI on top (see [Splicing predictors](#splicing-predictors--target-not-implemented), which is a TARGET: no SpliceAI layer exists today). Prioritize MANE Select / canonical transcripts, but retain per-transcript annotations so a consequence on a clinically relevant non-canonical transcript is not lost.
+Caveat: `splice_region_variant` is binned LOW yet can abolish splicing. Never use IMPACT alone for any splice-adjacent variant — the screen layers SpliceAI on top (see [Splicing predictors](#splicing-predictors--implemented)). Prioritize MANE Select / canonical transcripts, but retain per-transcript annotations so a consequence on a clinically relevant non-canonical transcript is not lost.
 
 **As implemented**, IMPACT is not a convenience tier — it is the *first and dominant rung* of the screen. `keep_impacts: [HIGH, MODERATE]` keeps every pLoF and every missense outright, and `functional_reason()` **returns** there without consulting any score. LOW and MODIFIER variants get exactly one further chance: CADD. Two consequences worth stating plainly:
 
@@ -133,18 +136,22 @@ CADD v1.7 (via the dedicated plugin: `whole_genome_SNVs.tsv.gz` + the gnomAD ind
 
 Fixing this is **calibration work, not a download** — region-stratified thresholds or a purpose-built non-coding predictor. Until then, the honest reading of a non-coding candidate is "ranked high by a genome-wide scalar", not "predicted pathogenic". If CADD is not configured, Step 2 warns and the screen degrades to an impact-only filter with **no** evidence for any sub-MODERATE variant. See [limitations.md §4](limitations.md).
 
-## Splicing predictors — TARGET, not implemented
+## Splicing predictors — IMPLEMENTED
 
-> **Not running, and this is the single largest loss in the screen.** No SpliceAI file is present,
-> so splice detection is whatever VEP's **positional** consequence terms reach:
-> `splice_donor_variant` / `splice_acceptor_variant` (the ±1,2 dinucleotides, HIGH) and
-> `splice_region_variant` (≈ ±3–8 intronic / 1–3 exonic, LOW). A variant creating a **cryptic
-> splice site deep in an intron** (`intron_variant`, MODIFIER) or an **exonic synonymous change
-> that disrupts splicing** (`synonymous_variant`, LOW) is **invisible to this screen** unless CADD
-> happens to rescue it. CADD v1.6+ ingests SpliceAI and MMSplice as *input features*, so it is a
-> **lossy proxy** — a strong splice signal tends to raise CADD — **not a substitute**: it is a
-> single genome-wide scalar with no calibrated non-coding threshold. Cost to fix ≈ 0.6 GB; see
-> [limitations.md §1](limitations.md) for the mirror, the SNV-only trap and the contig-naming trap.
+> **SpliceAI is WIRED** (it was the single largest loss). The SpliceAI VEP plugin runs in Step 2
+> over the precomputed **raw** delta scores; `selection.py` keeps a variant (rung 2) when its max
+> delta score ≥ `filters.functional.spliceai_ds_min` (default **0.2**). This nominates exactly what
+> VEP's **positional** terms miss — a **cryptic splice site deep in an intron** (`intron_variant`,
+> MODIFIER) or an **exonic synonymous change that disrupts splicing** (`synonymous_variant`, LOW) —
+> which VEP alone bins below `keep_impacts`. Positional terms still contribute: `splice_donor` /
+> `splice_acceptor` (±1,2, HIGH) are kept at rung 1; `splice_region` (≈ ±3–8 intronic / 1–3 exonic,
+> LOW) is now backed by the SpliceAI score. **Optional + graceful** (unset ⇒ splice keep-path off,
+> Step 2 warns) and **keep-only** (a missing score never drops — the precomputed set is not
+> exhaustive; see spliceai_ds()). CADD v1.6+ ingests SpliceAI as an input feature, so it remains a
+> weak backstop below the SpliceAI threshold. **Setup:** the full raw genome-wide set is a one-time
+> Illumina BaseSpace download (the free Ensembl mirror is MANE-only SNV); see
+> [resources.md#spliceai](resources.md#spliceai) and [limitations.md §1](limitations.md) for the
+> mirror/indel and contig-naming traps.
 
 - **SpliceAI** (delta score 0–1). The original heuristics were 0.2 (high recall), 0.5 (recommended), 0.8 (high precision). The **ClinGen SVI Splicing Subgroup (Walker 2023)** calibrated cutoffs for variants outside the essential ±1,2 dinucleotides:
 

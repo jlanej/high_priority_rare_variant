@@ -41,6 +41,10 @@ CSQ_FIELDS = [
     "gnomADg_AF", "gnomADg_AFR_AF", "gnomADg_AMI_AF", "gnomADg_AMR_AF", "gnomADg_ASJ_AF",
     "gnomADg_EAS_AF", "gnomADg_FIN_AF", "gnomADg_MID_AF", "gnomADg_NFE_AF", "gnomADg_SAS_AF",
     "MAX_AF", "MAX_AF_POPS",
+    # SpliceAI plugin subfields (VCF-output shape). The mock puts the delta score in one event
+    # field so annotations.spliceai_ds() (max over the four) sees it, exercising the splice keep-path.
+    "SpliceAI_pred_SYMBOL", "SpliceAI_pred_DS_AG", "SpliceAI_pred_DS_AL",
+    "SpliceAI_pred_DS_DG", "SpliceAI_pred_DS_DL",
 ]
 
 # VEP's own header lines. Step 2 checks these to refuse a wrong-build annotation, so the mock
@@ -86,6 +90,9 @@ def annotate(inp, lookup, out) -> int:
                 f["CADD_RAW"] = row["cadd"]
             if row.get("clnsig"):
                 f["CLIN_SIG"] = row["clnsig"]
+            if row.get("spliceai"):
+                f["SpliceAI_pred_DS_AL"] = row["spliceai"]   # one event; spliceai_ds() takes the max
+                f["SpliceAI_pred_SYMBOL"] = row["gene"]
             if row.get("af"):
                 # Put the AF in the requested population only. A grpmax-eligible group drives
                 # annotations.frequency(); a bottlenecked one (mid/ami/asj/fin) must not — and

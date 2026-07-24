@@ -141,7 +141,7 @@ Because the non-joint design already denies a valid internal AF, treat TRAPD as 
 
 ### What actually qualifies (IMPLEMENTED)
 
-Step 6 has **no mask concept**. It consumes whatever Step 5 emitted, and Step 5's variants are whatever Step 3's classifier kept. That classifier (`src/hprv/selection.py`) is a deliberately **two-rung** ladder:
+Step 6 has **no mask concept**. It consumes whatever Step 5 emitted, and Step 5's variants are whatever Step 3's classifier kept. That classifier (`src/hprv/selection.py`) is a deliberately **three-rung** ladder (IMPACT, SpliceAI, CADD):
 
 1. VEP `IMPACT` ∈ `keep_impacts` (**HIGH, MODERATE**) → keep;
 2. **else** `CADD_PHRED ≥ 25.3` → keep;
@@ -228,7 +228,7 @@ A recurrent gene is only interesting if it is **intolerant of the class of varia
 - **Pseudogene / segmental-duplication genes** (*PMS2*/*PMS2CL*, *CYP21A2*, *SMN1/2*, *NEB*, *GBA*) yield low-confidence short-read calls; their per-gene counts are unreliable and those regions should be flagged, not trusted, in the burden tally.
 - **Proband post-zygotic mosaicism** (*NF1*, overgrowth) produces low-VAF calls that fall outside the het AB 0.25–0.75 band and are dropped before the burden count — a source of false-negative de novos.
 - **No calibration diagnostic is implemented.** The synonymous λ ≈ 1 check described above is a **TARGET, not a built-in**: nothing in Step 6 computes a synonymous burden, and `--syn-denovo-count` is reserved and unwired. So the module currently has **no self-check that its qualifying filters are unbiased** — the recurrence null's calibration rests on the gnomAD frequencies being right, untested. Pipeline-wide sensitivity/precision likewise still needs GIAB/CMRG truth sets and a positive-control variant panel: currently **unmeasured**, not measured-and-acceptable.
-- **No splice-aware qualification.** With no SpliceAI, a gene whose recurrent signal is deep-intronic or exonic-synonymous splice disruption is invisible to the tally unless CADD happens to rescue the variant ([limitations.md §1](limitations.md)). This is the largest single variant-class gap feeding this module.
+- **Splice-aware qualification (SpliceAI, now wired).** A gene whose recurrent signal is deep-intronic or exonic-synonymous splice disruption is now nominated on its SpliceAI delta score (rung 2 of the Step-3 classifier), when the SpliceAI plugin is configured — so such a signal reaches this tally instead of relying on CADD to rescue the variant ([limitations.md §1](limitations.md)). Absence of the score files leaves this class to CADD's weak proxy again.
 - **Phenotype dependency** — phenotype-driven ranking assumes per-proband HPO terms, which are frequently sparse or absent in consortium data (see [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md)); burden nomination itself is phenotype-agnostic, which is a strength for discovery.
 
 ## Example: parameterized qualifying-variant extraction

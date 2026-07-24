@@ -11,11 +11,12 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 > it — which `prepare_resources.sh --dir DIR emit-env` does for you.
 
 > **STATUS — the VEP-only contract (read this before you download anything).**
-> The pipeline's annotation source is **a VEP 115 GRCh38 cache + the CADD plugin, and nothing
-> else**. Step 2 performs **no external `bcftools annotate` transfers**. **gnomAD, ClinVar, dbNSFP,
-> SpliceAI and LOFTEE data are no longer fetched, bind-mounted or read** — the config keys that
-> pointed at them are gone. The **required** acquisition therefore collapses to: **VEP cache
-> (~24 GB) + CADD SNV+indel (~82 GB)**, plus two small optional tables for Step-6 ranking.
+> The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD, and the
+> optional SpliceAI plugin** (see [## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
+> annotate` transfers**. **gnomAD, ClinVar, dbNSFP and LOFTEE data are no longer fetched, bind-mounted
+> or read** — the config keys that pointed at them are gone. The **required** acquisition therefore
+> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB)** — plus, to turn on the splice
+> keep-path, the **SpliceAI** raw score files — plus two small optional tables for Step-6 ranking.
 > Everything else on this page is retained as the **shopping list for building on top** and is
 > clearly marked *not currently used*. What the reduced set costs the screen — and what each
 > re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
@@ -172,15 +173,17 @@ skips, leaving the NHF columns blank (`outputs.igv.nonhuman_screen.enabled` defa
 An earlier version of this page argued "no, never skip the downloads." **The pipeline now does
 exactly that, on purpose.** The trade was ~1.4 TB of acquisition — each piece with its own version
 pin, license gate, index and contig-naming hazard — against a simple, sound, reproducible spine:
-one annotation source, one frequency chokepoint, one two-rung functional ladder. The first pass
+one annotation source, one frequency chokepoint, one functional ladder. The first pass
 takes the spine. The price, per resource, is honest and bounded:
 
 | Dropped | What the cache gives instead | The real price |
 |---|---|---|
 | gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | no **faf95** (unrecoverable — no AC/AN), no **nhomalt**. Rarity is a point estimate, erring toward *dropping* |
 | ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | no **CLNREVSTAT** ⇒ no star gate; stale. Over-*retains* |
-| SpliceAI | VEP positional splice terms only | **the biggest loss**: deep-intronic + synonymous splice variants are invisible |
 | LOFTEE | VEP `IMPACT` | near-zero for *selection*; costs PVS1 tiering |
+
+(SpliceAI was on this list as "the biggest loss" — it is now **wired** as the third functional
+rung; see [## SpliceAI](#spliceai) and [limitations.md §1](limitations.md).)
 | dbNSFP (REVEL/AM/MPC/MetaRNN) | SIFT/PolyPhen (unused) | **zero selection power** — see below |
 
 **The dbNSFP row is the one that surprises people, so it is worth stating plainly:** REVEL,
@@ -264,22 +267,34 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 | Resource | ~Size | Why you'd add it | Acquisition trap |
 |---|---|---|---|
 | **ClinVar** GRCh38 VCF | ~0.18 GB | restores `CLNREVSTAT` ⇒ the ≥2★ gate, `CLNSIGCONF`, and un-stales ClinVar (monthly vs. the cache's 2025-02) | none — free, public domain, dated monthly release from NCBI |
-| **SpliceAI** slim | ~0.6 GB | **the highest-value addition**: recovers deep-intronic + synonymous splice variants | filter the free Ensembl MANE mirror to Δ ≥ 0.1 (~99% of the 27 GB table is dead weight). Mirror is **SNV-only** (indels are BaseSpace/login-gated) and uses Ensembl contigs (`1`, `X`) vs. GMKF's `chr` — **a mismatched `tabix` query returns empty with exit code 0**, so assert a non-zero record count |
 | **REVEL + AlphaMissense** (dedicated) | ~1.3 GB | missense scores for *reporting/tiering* and a future PP3/BP4 step — **not** selection power | use `AlphaMissense_hg38.tsv.gz` (643 MB) + `revel-v1.3_all_chromosomes.zip` (667 MB), **never** the 30 GB dbNSFP (dead URL, 5 useful columns). Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`/`am_class`, **not** `AlphaMissense_score` |
 | **gnomAD v4.1 joint** slim | ~10 GB | restores real **faf95** + **nhomalt** (the homozygote sanity check) | stream-slim the 24 chromosome VCFs to ~5 of their 664 INFO fields; nothing but the slim output lands on disk and GCS egress is free. Confirmed v4.1 joint tags: `AF_joint`, `AF_grpmax_joint`, `fafmax_faf95_max_joint`, `nhomalt_joint` |
 | **LOFTEE** GRCh38 data | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | mostly the GERP bigwig. Use the plugin's **`grch38` branch** (already baked in; master is GRCh37-only) |
 
-### SpliceAI: raw vs. masked — a correction
+## SpliceAI
 
-Earlier versions of this doc — and of the note in `resources/manifest.env`, now corrected — claimed
-the Step-3 cutoff of 0.2 was calibrated on **masked** SpliceAI scores, and that the free raw mirror
-was therefore permissive. **That was backwards.** Walker-2023 calibrated on
-**raw** scores — the paper states it used the maximum raw SpliceAI delta score, and the word
-"masked" does not appear in it at all. Since masked ≤ raw always, applying a raw-calibrated 0.2 to
-*masked* scores is **more stringent**, i.e. a sensitivity loss, not a permissive one. The free
-Ensembl mirror being raw is therefore **correct for this threshold**, not a compromise. (A free
-masked MANE mirror does also exist on the Ensembl FTP if you want one.)
+**WIRED** (not optional-unused): the SpliceAI VEP plugin runs in Step 2 over precomputed raw delta
+scores, and `selection.py` keeps a variant whose max delta score ≥ `filters.functional.spliceai_ds_min`
+(default 0.2). Config keys `resources.vep.spliceai_snv` / `spliceai_indel` (`${SPLICEAI_SNV}` /
+`${SPLICEAI_INDEL}`). Optional + graceful: unset ⇒ the splice keep-path is inactive (Step 2 warns).
+Fetch/verify with `prepare_resources.sh --only spliceai`.
 
-The real caveat is the **window**, which the old note omitted: Walker used ±4,999 nt, whereas
-SpliceAI's precomputed files default to `-D 50`. Distant cryptic-site effects are outside the
-precomputed set regardless of which build you pick.
+| File | Config key (`${ENV}`) | Source | ~Size |
+|---|---|---|---|
+| `spliceai_scores.raw.snv.hg38.vcf.gz` (+ `.tbi`) | `resources.vep.spliceai_snv` (`SPLICEAI_SNV`) | **full**: Illumina BaseSpace (login); no-login **MANE-only** mirror on Ensembl FTP | ~27 GB |
+| `spliceai_scores.raw.indel.hg38.vcf.gz` (+ `.tbi`) | `resources.vep.spliceai_indel` (`SPLICEAI_INDEL`) | Illumina BaseSpace (login) — **no** free mirror | ~1 GB |
+
+- **Use the FULL, RAW genome-wide files for "don't miss anything".** The **raw** (not masked) set
+  keeps scores everywhere, so deep-intronic and non-canonical sites are not zeroed out. The free
+  no-login Ensembl mirror is **MANE-select SNV only** (no non-MANE transcripts, no indel file) — a
+  genuine subset; the full genome-wide raw SNV **+** indel VCFs are on Illumina BaseSpace (login),
+  a one-time manual download. Both must be **bgzipped + `tabix -p vcf`**-indexed.
+- **Threshold.** The default `spliceai_ds_min: 0.2` is the ClinGen SVI PP3-supporting cutoff.
+  Walker-2023 calibrated on **raw** (not masked) scores, so a raw-calibrated 0.2 is correct for the
+  raw files here. Lower it toward 0.1/0.05 for higher deep-intronic recall (the raw score rides
+  through to the outputs regardless, so a below-cutoff score is still visible to a reviewer).
+- **Two traps.** (1) The precomputed files default to a `-D 50` window — distant cryptic-site
+  effects are outside the precomputed set regardless of build (running SpliceAI live catches more).
+  (2) Contig naming: the Ensembl mirror uses `1`/`X`, GMKF is `chr`-prefixed — a mismatched `tabix`
+  query returns empty with **exit code 0**. Step 2's presence guard ("no `vep_SpliceAI_pred_DS_*`
+  lifted") catches a silently-dead plugin, but confirm the score VCF's contigs match your reference.

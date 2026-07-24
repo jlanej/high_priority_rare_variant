@@ -169,7 +169,7 @@ def test_audit_record_and_summarize(tmpdir="/tmp/_hprv_audit"):
 
 def test_step3_classifier():
     cfg = {"filters": {"rarity": {"benign_ba1": 0.05, "recessive_max": 1e-2},
-                       "functional": {"cadd_phred_supporting": 20.0,
+                       "functional": {"cadd_phred_supporting": 20.0, "spliceai_ds_min": 0.2,
                                       "keep_impacts": ["HIGH", "MODERATE"]}}}
     classify = build_classifier(cfg)
     # BA1-common -> dropped, never rescued
@@ -199,6 +199,26 @@ def test_step3_classifier():
     # drop it. This is why the old missense-predictor branches were unreachable: any variant
     # carrying REVEL/AlphaMissense/MPC is missense => MODERATE => already returned here.
     assert classify(FakeVar({"vep_IMPACT": "MODERATE", "vep_CADD_PHRED": "0.1"})) == (True, "impact_moderate")
+    # --- SpliceAI: the splice keep-path, checked BEFORE CADD so a splice hit is labelled 'spliceai' ---
+    # deep-intronic MODIFIER with strong splice, low CADD -> kept via spliceai (not cadd, not dropped)
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "3",
+                             "vep_SpliceAI_pred_DS_AL": "0.55"})) == (True, "spliceai")
+    # spliceai_ds is the MAX over the four events (here the donor-gain field)
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_SpliceAI_pred_DS_DG": "0.30"})) == (True, "spliceai")
+    # below the splice cutoff AND below CADD -> dropped
+    assert classify(FakeVar({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "3",
+                             "vep_SpliceAI_pred_DS_AL": "0.15"})) == (False, "not_functional")
+    # a strong splice signal never rescues a BA1-common variant
+    assert classify(FakeVar({"vep_gnomADe_NFE_AF": "0.2",
+                             "vep_SpliceAI_pred_DS_AL": "0.9"})) == (False, "ba1")
+
+
+def test_annotations_spliceai_ds():
+    # max over the four delta-score events; None when unscored (never drops, only fails to rescue)
+    assert A.spliceai_ds(FakeVar({"vep_SpliceAI_pred_DS_AG": "0.03", "vep_SpliceAI_pred_DS_AL": "0.91",
+                                  "vep_SpliceAI_pred_DS_DG": "0.10", "vep_SpliceAI_pred_DS_DL": "0.00"})) == 0.91
+    assert A.spliceai_ds(FakeVar({})) is None
+    assert A.spliceai_ds(FakeVar({"vep_SpliceAI_pred_DS_AL": "."})) is None
 
 
 def test_contamination():

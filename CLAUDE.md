@@ -40,14 +40,17 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    does not carry, so it is unrecoverable rather than approximated. It is the deliberate cost of
    the VEP-only contract (rule 6). Everything reads it through `annotations.frequency()` — one
    chokepoint, never a field getter directly.
-6. **VEP-only contract.** The annotation surface is a VEP 115 GRCh38 cache + the CADD plugin.
-   Nothing else is downloaded or bind-mounted: no gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE
-   file. Adding an annotation means adding a `bcftools annotate` transfer in Step 2 **and** its
-   INFO field in `annotations.F` — never a lookup that reaches around that contract. Known,
-   accepted losses (see [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no
-   nhomalt, **no SpliceAI ⇒ deep-intronic/synonymous splice variants are invisible**, no LOFTEE,
-   no ClinVar stars. CADD is consequently the ONLY functional predictor and the ONLY keep-path
-   below MODERATE impact.
+6. **VEP-centric contract.** The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS:
+   CADD (required-ish) and **SpliceAI** (optional). Nothing else is bcftools-transferred in: no
+   gnomAD, ClinVar, dbNSFP or LOFTEE file. Adding an annotation means either a VEP plugin or a
+   `bcftools annotate` transfer in Step 2 **and** its INFO field in `annotations.F` — never a lookup
+   that reaches around that contract. Known, accepted losses (see
+   [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no nhomalt, no LOFTEE, no
+   ClinVar stars. Below MODERATE impact there are now TWO keep-paths: **SpliceAI** (max delta
+   ≥ `spliceai_ds_min`, default 0.2 — the deep-intronic/synonymous splice signal; checked first) and
+   **CADD** (≥ `cadd_phred_supporting`, default 25.3 — everything else non-coding). SpliceAI is a
+   VEP plugin over the precomputed RAW scores (`resources.vep.spliceai_snv`/`spliceai_indel`); the
+   precomputed set is not exhaustive, so a missing score is not "no effect" (keep-only, never drops).
 3. **Gene lists and constraint are priors/tiers, never hard include/exclude** — the "never-drop
    rule" keeps novel-gene discovery alive. Rarity/impact/QC gating happens *before and
    independently of* any list.
@@ -98,6 +101,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   fields lifted by `bcftools +split-vep` with a `vep_` prefix — there are no `hprv_*` transfers
   any more. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
   `vep_BIOTYPE`, `vep_HGVSc`, `vep_HGVSp`, `vep_MANE_SELECT`, `vep_CADD_PHRED`, `vep_CLIN_SIG`,
+  `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` (+ `DP_*`, `SYMBOL`; `annotations.spliceai_ds()` = the max,
+  the splice keep-path — present only when the SpliceAI plugin is configured),
   `vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF` (the rarity oracle), plus `vep_MAX_AF` /
   `vep_MAX_AF_POPS` / `vep_gnomAD{e,g}_AF` for REPORTING ONLY — never as filter fields (see rule
   2). Add a new annotation by wiring it through Step 2's split-vep `want` list AND
@@ -191,9 +196,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Running
 
-- **Resources (one-time, small):** under the VEP-only contract you need exactly two things on the
-  host — a **VEP 115 GRCh38 cache** (~24 GB; it carries gnomAD v4.1 frequencies + ClinVar) and the
-  **CADD** SNV+indel files. Nothing else: no gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE download.
+- **Resources (one-time, small):** the core surface is two things on the host — a **VEP 115 GRCh38
+  cache** (~24 GB; it carries gnomAD v4.1 frequencies + ClinVar) and the **CADD** SNV+indel files —
+  plus, **optionally, SpliceAI** raw score files (`resources.vep.spliceai_snv`/`spliceai_indel`) to
+  turn on the splice keep-path. The full raw SpliceAI set is a one-time BaseSpace (login) download;
+  the pipeline degrades gracefully without it. Nothing else: no gnomAD, ClinVar, dbNSFP or LOFTEE download.
   `prepare_resources.sh --dir DIR fetch|verify|emit-env` still fetches these, runs INSIDE the image
   (baked in at `/opt/hprv/scripts`, on PATH, with its pinned `/opt/hprv/resources/manifest.env`;
   `HPRV_RESOURCE_MANIFEST` re-pins without a rebuild), and `emit-env` writes the `${ENV}` exports

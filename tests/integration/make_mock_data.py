@@ -71,6 +71,7 @@ V = []
 
 def add(**k):
     k.setdefault("cadd", ""); k.setdefault("af", None); k.setdefault("af_pop", "gnomADe_NFE_AF")
+    k.setdefault("spliceai", "")
     k.setdefault("clnsig", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
     V.append(k)
 
@@ -202,6 +203,20 @@ add(file="A", chrom="chr1", pos=18000, gene="GENEIN", csq="intron_variant", impa
 # ...and its control: same intronic MODIFIER, CADD BELOW the cutoff -> must be dropped.
 add(file="A", chrom="chr1", pos=18500, gene="GENEINLO", csq="intron_variant", impact="MODIFIER",
     cadd="3.0", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
+# --- SpliceAI keep: a deep-intronic MODIFIER whose CADD is BELOW the cutoff (so CADD cannot
+#     rescue it) but whose SpliceAI delta score is >= spliceai_ds_min. This is the sole path by
+#     which a cryptic-splice variant that both VEP's positional terms and CADD miss survives
+#     Step 3. If the SpliceAI branch ever breaks, deep-intronic splice signal goes invisible and
+#     this assertion notices. Inherited het -> also a dominant call in GENESAI (validates the
+#     spliceai_ds column flowing into candidates.calls.tsv). ---
+add(file="A", chrom="chr1", pos=18700, gene="GENESAI", csq="intron_variant", impact="MODIFIER",
+    cadd="3.0", spliceai="0.55", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+# ...and its control: same, but SpliceAI BELOW the cutoff and CADD low -> must be dropped.
+add(file="A", chrom="chr1", pos=18800, gene="GENESAILO", csq="intron_variant", impact="MODIFIER",
+    cadd="3.0", spliceai="0.10", af=5e-5,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
 # --- FOUNDER-POPULATION allele: frequent ONLY in a bottlenecked group gnomAD's grpmax excludes
@@ -383,7 +398,7 @@ def main(argv=None) -> int:
     # BOTH alleles here or the second leg reaches Step 3 with no CSQ and is dropped as
     # not_functional, quietly destroying the very comp-het the multiallelic case exists to test.
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
-        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\n")
+        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\tspliceai\n")
         seen = set()
         for v in V:
             alts = [altbase(v["pos"])]
@@ -397,7 +412,7 @@ def main(argv=None) -> int:
                 af = "" if v["af"] is None else f"{v['af']:.6g}"
                 fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{a}\t"
                          f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
-                         f"{v['af_pop']}\t{v['clnsig']}\n")
+                         f"{v['af_pop']}\t{v['clnsig']}\t{v['spliceai']}\n")
 
     # Step-6 tables
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:
