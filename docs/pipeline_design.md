@@ -157,6 +157,13 @@ flowchart TD
 
 *(Planned, not yet delivered: an ACMG-SF / pediatric-cancer overlay + phenotype-ranked tiered report — see [CLAUDE.md](../CLAUDE.md) Open TODOs.)*
 
+**Step 8 is resumable without re-reading source CRAMs.** There is deliberately no step-level `.done`
+(Step 8 must re-run to pick up a re-curated candidate set), so each mini-CRAM self-guards: a re-run
+reuses a valid prior slice for the **same** candidate region set — keyed to the content of the
+per-trio merged BED, not its mtime — using only local reads, and never re-opens the multi-GB source
+CRAM on the (often flaky FUSE/SBFS) mount. A **changed** candidate set re-slices; a corrupt slice
+regenerates. Step 8b (NHF) is idempotent the same way via a per-`(trio, member)` `.done` sentinel.
+
 **Step 8b — non-human-fraction (NHF), optional review aid.** When `resources.kraken2_db` is set,
 `nonhuman-screen` classifies each screened member's ALT-supporting reads (in the mini-CRAMs Step 8
 already sliced — no new source-CRAM I/O) with kraken2 and records the fraction that are non-human.

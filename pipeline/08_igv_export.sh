@@ -140,20 +140,44 @@ done < <(tail -n +2 "$resolved")
 #     open at a time. Reads are index-based (small); serial access is the gentlest pattern
 #     for a flaky FUSE/SBFS mount (the multi-core part is samtools' own -@ $JOBS per slice).
 #     Each slice validates (quickcheck) and retries once on a transient read failure; a
-#     persistently-bad source CRAM warns and is skipped (never aborts the whole export). ---
-# Slice one candidate-region set from one source CRAM. Runs in a SUBSHELL (see the
-# loop) so its `set +e` is local: we must handle samtools exit codes ourselves and
-# retry/skip a transiently-bad read rather than let `set -e` abort the whole export
-# on the first failure. Slices AND indexes in one pass (--write-index) because the
-# igv.js server needs the .crai. Returns 0 if a valid slice landed, 1 to skip.
+#     persistently-bad source CRAM warns and is skipped (never aborts the whole export).
+#
+#     IDEMPOTENT / RESUMABLE: Step 8 has no step-level .done (it must re-run to pick up a changed
+#     candidate set), so each slice self-guards. A re-run — after a walltime kill, or to recover a
+#     few slices that failed on a flaky mount — REUSES a valid prior mini-CRAM for the SAME region
+#     set WITHOUT re-reading the multi-GB source CRAM off the mount. That reuse is the whole point
+#     on a beta FUSE/SBFS mount; it also composes with Step 8b, which already .done-guards NHF. ---
+# Content key of the candidate REGION SET, from the per-trio merged BED. Keyed to BED CONTENT, not
+# mtime: Pass 1 rebuilds $merged every run, so its mtime always changes even when the candidate set
+# is identical — only the content tells us whether the regions actually changed. cksum is POSIX
+# (present on the host and in the image) and reads a small LOCAL file. A plain "file exists +
+# quickcheck" guard would instead serve a STALE mini-CRAM after a re-run whose candidate set changed
+# (curation re-ran): content-keying skips an unchanged set and re-slices a changed one.
+_bed_key() { cksum < "$1" 2>/dev/null | awk '{print $1"-"$2}'; }
+
+# Slice one candidate-region set from one source CRAM. Runs in a SUBSHELL (see the loop) so its
+# `set +e` is local: we must handle samtools exit codes ourselves and retry/skip a transiently-bad
+# read rather than let `set -e` abort the whole export on the first failure. Slices AND indexes in
+# one pass (--write-index) because the igv.js server needs the .crai. Returns: 0 = freshly sliced,
+# 3 = reused a valid cached slice (no source read), 1 = failed/skipped.
 extract_one() {
     set +e
     local trio="$1" role="$2" sample="$3" src="$4" merged="$5" ocram="$6" attempt
+    local donef="${ocram}.done" key; key="$(_bed_key "$merged")"
+    # Idempotent skip — LOCAL reads only, NEVER $src (that is the point): a prior slice for the
+    # CURRENT region key that is present, indexed, and passes quickcheck. Its .done records the key.
+    if [[ -f "$donef" && -s "$ocram" && -f "$ocram.crai" && "$(cat "$donef" 2>/dev/null)" == "$key" ]] \
+       && hprv_run -- samtools quickcheck "$ocram" 2>/dev/null; then
+        return 3
+    fi
+    # Absent / stale (region set changed) / corrupt: clear any partial artifacts and (re)slice.
+    rm -f "$ocram" "$ocram.crai" "$donef"
     for attempt in 1 2; do
         if hprv_run -- samtools view -C -@ "$JOBS" -T "$REF" --regions-file "$merged" \
                 --write-index -o "$ocram" "$src" 2>/dev/null \
            && [[ -s "$ocram" && -f "$ocram.crai" ]] \
            && hprv_run -- samtools quickcheck "$ocram" 2>/dev/null; then
+            printf '%s\n' "$key" > "$donef"   # stamp completion with the region key we sliced for
             return 0
         fi
         rm -f "$ocram" "$ocram.crai"
@@ -170,15 +194,21 @@ extract_one() {
 # NB: `grep -c` prints 0 AND exits 1 on an all-blank/empty file, so `|| echo 0` would
 # append a second "0" -> a "0\n0" that breaks the `-gt` test. Keep grep's own count.
 n_tasks=$(grep -cve '^[[:space:]]*$' "$tasks" 2>/dev/null || true); n_tasks=${n_tasks:-0}
-n_extracted=0
+n_extracted=0 n_sliced=0 n_cached=0
 if [[ "$n_tasks" -gt 0 ]]; then
-    log "Step 8: slicing $n_tasks mini-CRAM(s) serially (FUSE-safe; $JOBS thread(s)/slice)"
+    log "Step 8: up to $n_tasks mini-CRAM(s), serial (FUSE-safe; $JOBS thread(s)/slice); valid cached slices are reused"
     while IFS=$'\t' read -r trio role sample src merged ocram; do
         [[ -z "$trio" ]] && continue
-        if ( extract_one "$trio" "$role" "$sample" "$src" "$merged" "$ocram" ); then
-            n_extracted=$((n_extracted + 1))
-        fi
+        # `( … ) || rc=$?` keeps extract_one's `set +e` in its subshell AND captures its distinct
+        # return code (0 sliced / 3 cached / 1 failed) without tripping the loop's `set -e`.
+        rc=0; ( extract_one "$trio" "$role" "$sample" "$src" "$merged" "$ocram" ) || rc=$?
+        case "$rc" in
+            0) n_extracted=$((n_extracted + 1)); n_sliced=$((n_sliced + 1)) ;;
+            3) n_extracted=$((n_extracted + 1)); n_cached=$((n_cached + 1)) ;;
+            *) : ;;   # failed/skipped-bad: already warned inside extract_one
+        esac
     done < "$tasks"
+    [[ "$n_cached" -gt 0 ]] && log "Step 8: reused $n_cached valid cached mini-CRAM(s) (idempotent resume — no source-CRAM reads); sliced $n_sliced"
 fi
 
 # --- Step 8b: non-human-fraction (NHF) annotation of ALT-supporting reads --------------------
