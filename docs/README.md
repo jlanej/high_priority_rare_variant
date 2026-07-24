@@ -40,9 +40,9 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 
 > ### ⚠ VEP-only contract — read this before the tables
 >
-> Every annotation the pipeline reads comes from **one** source: a VEP 115 GRCh38 cache plus the
-> CADD plugin. No gnomAD / ClinVar / dbNSFP / SpliceAI / LOFTEE file is downloaded or
-> bind-mounted. Several rows below therefore describe **targets and reference science, not
+> Every annotation the pipeline reads comes from **one** tool: VEP 115 GRCh38 — its cache plus its
+> plugins (CADD, and **optionally SpliceAI**). No gnomAD / ClinVar / dbNSFP / LOFTEE file is
+> bcftools-transferred in. Several rows below therefore describe **targets and reference science, not
 > what runs** — each is marked. The **IMPLEMENTED** column is what the code does.
 >
 > Not available under this contract, and what each costs:
@@ -50,7 +50,6 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > |--------|-------------|
 > | `faf95` | The cache has no AC/AN, so the 95% CI correction **cannot be computed at any price**. Rarity uses a grpmax **point-estimate proxy**, which runs slightly stringent on low-count alleles. |
 > | `nhomalt` | No gnomAD-homozygote sanity check on de novo calls. |
-> | SpliceAI | **Deep-intronic and exonic-synonymous splice variants are invisible to the screen.** CADD is a lossy proxy (v1.6+ ingests SpliceAI as an input feature). The single largest loss. |
 > | LOFTEE | No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for the planned tiering step. |
 > | ClinVar stars | No `CLNREVSTAT` ⇒ the ≥2★ gate is unimplementable; unstarred P/LP is honored. ClinVar is also as stale as the cache (VEP 115 ⇒ ClinVar 2025-02). |
 > | REVEL / AlphaMissense / MPC | **No loss to selection** — see the note under the functional table. |
@@ -84,18 +83,20 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity gate itself.
 
 ### Functional / in-silico
-**IMPLEMENTED — the entire ladder is two rungs**, tried in order (`src/hprv/selection.py`):
+**IMPLEMENTED — the ladder is three rungs (an OR: any one keeps)**, tried in order (`src/hprv/selection.py`):
 
 | # | Signal | Cutoff | Reaches |
 |---|--------|--------|---------|
 | 1 | VEP **IMPACT** | keep if `HIGH` or `MODERATE` | all pLoF + all missense + inframe indels |
-| 2 | **CADD PHRED** | keep if ≥ **25.3** | everything below MODERATE — intronic / synonymous / UTR / regulatory |
+| 2 | **SpliceAI** max Δ | keep if ≥ **0.2** (`spliceai_ds_min`; ClinGen SVI PP3-supporting) | deep-intronic cryptic splice sites + exonic-synonymous splice disruption — the class VEP's positional terms and CADD both under-call. Optional (needs the SpliceAI score files); keep-only |
+| 3 | **CADD PHRED** | keep if ≥ **25.3** | everything else below MODERATE — intronic / synonymous / UTR / regulatory |
 
-CADD is therefore the **only** functional predictor, and the **only** keep-path for any
-non-coding variant. Two honest caveats on that 25.3:
+SpliceAI and CADD are the two keep-paths below MODERATE impact (SpliceAI checked first, so a splice
+hit is labelled `spliceai`, not the generic `cadd`). Lower `spliceai_ds_min` toward 0.1/0.05 for
+higher deep-intronic recall. Two honest caveats on that CADD 25.3:
 - **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on
-  **missense only**. Missense never reaches rung 2 (it is MODERATE, kept at rung 1), so in
-  practice 25.3 is applied *exclusively* to the non-coding variants it was **not** calibrated for.
+  **missense only**. Missense never reaches rung 3 — the CADD rung (it is MODERATE, kept at rung 1),
+  so in practice 25.3 is applied *exclusively* to the non-coding variants it was **not** calibrated for.
   Read it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3 evidence.
 - There is no ClinGen-endorsed non-coding CADD threshold to replace it with.
 

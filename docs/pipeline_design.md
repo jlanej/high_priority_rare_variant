@@ -279,8 +279,8 @@ synthesized genotype matrix.
 ## Known scope limitations (stated honestly, not hidden)
 
 **The full ledger is [limitations.md](limitations.md)** — what the first pass cannot see, why, and
-what each costs to fix (in short: no SpliceAI ⇒ deep-intronic and exonic-synonymous splice variants
-are invisible; no faf95 ⇒ point-estimate rarity; no nhomalt, no LOFTEE, no ClinVar stars). Read it
+what each costs to fix (in short: no faf95 ⇒ point-estimate rarity; no nhomalt, no LOFTEE, no
+ClinVar stars — SpliceAI is now wired as the splice keep-path). Read it
 before interpreting a negative result. Every one of those gaps is **additive** to fix: the contract
 is a single seam — one `bcftools annotate` in `02_annotate_sites.sh` plus one field in
 `annotations.F`. What follows is the scope that is deliberately *out* of this pipeline regardless of

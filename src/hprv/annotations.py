@@ -1,17 +1,19 @@
 """Read the annotations produced by pipeline Step 2 and evaluate genotype QC.
 
-**VEP-only contract.** Every annotation this pipeline reads comes from ONE source: a VEP
-115 (GRCh38) VCF whose CSQ fields Step 2 lifts to INFO with a ``vep_`` prefix (via
-``bcftools +split-vep``). No external sites VCF is transferred in — no gnomAD, ClinVar,
-dbNSFP, SpliceAI or LOFTEE file is fetched or bind-mounted. The only plugin required is
-CADD (genome-wide, SNV+indel); everything else rides in the cache. This module is the
-single place that knows those field names and how to coerce their (string) values, so the
-selection, inheritance, and burden steps all read them identically.
+**VEP-centric contract.** Every annotation this pipeline reads comes from ONE tool: VEP 115
+(GRCh38) — its cache plus its score plugins — whose CSQ fields Step 2 lifts to INFO with a
+``vep_`` prefix (via ``bcftools +split-vep``). No external sites VCF is bcftools-transferred in
+— no gnomAD, ClinVar, dbNSFP or LOFTEE file is annotated in. The plugins are CADD (genome-wide
+functional, SNV+indel) and — optionally — SpliceAI (precomputed raw genome-wide splice delta
+scores); population frequency and ClinVar ride in the cache itself. This module is the single
+place that knows those field names and how to coerce their (string) values, so the selection,
+inheritance, and burden steps all read them identically.
 
 What that costs is documented in docs/allele_frequency.md and docs/functional_annotation.md;
-in short: no faf95 (no CI correction), no nhomalt, no SpliceAI, no LOFTEE, no ClinVar
-review status. Reintroducing any of them means adding its INFO field here and a transfer
-in Step 2 — nothing else in the codebase reaches around this contract.
+in short: no faf95 (no CI correction), no nhomalt, no LOFTEE, no ClinVar review status. SpliceAI
+IS available now (when its score files are provided) — but the PRECOMPUTED set has its own limits
+(a missing score is NOT evidence of no effect; see spliceai_ds()). Adding another annotation means
+adding its INFO field here AND its plugin/transfer in Step 2 — nothing else reaches around this.
 
 All getters are defensive: they return ``None`` for missing/'.'/unparseable values
 and take the max over ``&``/``,``-joined multi-transcript values for scores.
@@ -51,6 +53,20 @@ F = {
     # v1.6+ ingests SpliceAI/MMSplice as input features, so it carries a lossy
     # re-encoding of the splice signal the SpliceAI plugin would have supplied.
     "cadd": "vep_CADD_PHRED",
+    # --- splice prediction (SpliceAI plugin; precomputed raw genome-wide scores) ---
+    # Four per-event delta scores in [0,1]: Acceptor/Donor Gain/Loss. spliceai_ds() takes the MAX
+    # = the standard SpliceAI "delta score" used for thresholding. DP_* are the predicted cryptic-
+    # site positions (bp offset from the variant), carried for curator context. These are the CSQ
+    # subfields the SpliceAI VEP plugin emits in VCF output (lifted verbatim by split-vep).
+    "spliceai_ds_ag": "vep_SpliceAI_pred_DS_AG",
+    "spliceai_ds_al": "vep_SpliceAI_pred_DS_AL",
+    "spliceai_ds_dg": "vep_SpliceAI_pred_DS_DG",
+    "spliceai_ds_dl": "vep_SpliceAI_pred_DS_DL",
+    "spliceai_dp_ag": "vep_SpliceAI_pred_DP_AG",
+    "spliceai_dp_al": "vep_SpliceAI_pred_DP_AL",
+    "spliceai_dp_dg": "vep_SpliceAI_pred_DP_DG",
+    "spliceai_dp_dl": "vep_SpliceAI_pred_DP_DL",
+    "spliceai_symbol": "vep_SpliceAI_pred_SYMBOL",
     # --- clinical ---
     # ClinVar significance as cached by VEP (--check_existing, via --everything).
     # The cache exposes CLIN_SIG ONLY: there is no review status (CLNREVSTAT), so star
@@ -164,6 +180,21 @@ def frequency(variant) -> Optional[float]:
 # every missense is IMPACT=MODERATE, which selection.py keeps at an earlier branch.
 def cadd(variant) -> Optional[float]:
     return _max_float(variant, "cadd")
+
+
+def spliceai_ds(variant) -> Optional[float]:
+    """Max SpliceAI delta score over the four events (acceptor/donor gain/loss), or None.
+
+    The standard SpliceAI "delta score" (0-1): the probability that the variant alters splicing at
+    the most-affected of the four possible splice-site changes. Thresholding this is the splice
+    keep-path (filters.functional.spliceai_ds_min; ClinGen SVI uses >= 0.2 for PP3-supporting).
+    None means SpliceAI did NOT score the variant — the precomputed raw set covers genome-wide SNVs
+    + a large indel set, but not every possible indel, and a **missing score is not evidence of no
+    splice effect** (it never drops a variant; it only fails to rescue one). See
+    docs/functional_annotation.md.
+    """
+    return _max_float(variant, "spliceai_ds_ag", "spliceai_ds_al",
+                      "spliceai_ds_dg", "spliceai_ds_dl")
 
 
 def impact(variant) -> Optional[str]:

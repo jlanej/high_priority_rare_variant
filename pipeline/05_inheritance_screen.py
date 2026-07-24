@@ -32,7 +32,7 @@ COLS = [
     # grpmax_af is THE rarity field (annotations.frequency()); max_af/max_af_pops ride
     # along for review only, so a curator can see when a call is being driven by a
     # founder-group frequency that grpmax deliberately ignores.
-    "consequence", "impact", "grpmax_af", "max_af", "max_af_pops", "cadd",
+    "consequence", "impact", "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds",
     "clnsig", "child_gt", "child_gq", "child_dp", "child_ab",
     "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck", "flags",
 ]
@@ -66,6 +66,7 @@ def base_row(trio_id, v, gt, mode, pair_id=""):
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
         "grpmax_af": fmt(A.grpmax_af(v)), "max_af": fmt(A._max_float(v, "max_af")),
         "max_af_pops": A._str(v, "max_af_pops") or "", "cadd": fmt(A.cadd(v)),
+        "spliceai_ds": fmt(A.spliceai_ds(v)),   # max SpliceAI delta score, for reviewer tiering
         "clnsig": A.clnsig(v) or "",
         "child_gt": (v.gt_bases[gt.c] if v.gt_bases is not None else ""),
         "child_gq": fmt(G.gq(v, gt.c)), "child_dp": fmt(G.dp(v, gt.c)),

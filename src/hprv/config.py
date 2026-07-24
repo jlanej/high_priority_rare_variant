@@ -77,6 +77,9 @@ SH_MAP = {
     "HPRV_VEP_SHARD_BY_CONTIG": "resources.vep.shard_by_contig",
     "HPRV_CADD_SNV": "resources.vep.cadd_snv",
     "HPRV_CADD_INDEL": "resources.vep.cadd_indel",
+    # SpliceAI plugin score files (precomputed raw genome-wide splice deltas). Optional, like CADD.
+    "HPRV_SPLICEAI_SNV": "resources.vep.spliceai_snv",
+    "HPRV_SPLICEAI_INDEL": "resources.vep.spliceai_indel",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
     # kraken2 DB for Step-8b non-human-fraction screening (bind-mounted DATA, never baked).

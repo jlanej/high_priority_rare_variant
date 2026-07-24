@@ -32,7 +32,7 @@ COLUMNS = [
     "child_gt", "mother_gt", "father_gt", "child_GQ", "child_DP", "child_AB",
     # max_af/max_af_pops are shown next to grpmax_af so a reviewer can spot a call whose
     # frequency is driven by a founder group grpmax excludes (see annotations.GRPMAX_POPS).
-    "grpmax_af", "max_af", "max_af_pops", "cadd", "clin_sig",
+    "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds", "clin_sig",
     # Step-8b NHF: fraction of each member's ALT-supporting reads that classify NON-human, with
     # its read-count denominator right beside it (an NHF over few reads is noise). nhf_flag is a
     # single convenience boolean (>= NHF_FLAG_FRACTION over >= min_reads in any screened member).
@@ -167,6 +167,7 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "child_DP": r.get("child_dp"), "child_AB": r.get("child_ab"),
                 "grpmax_af": r.get("grpmax_af"), "max_af": r.get("max_af"),
                 "max_af_pops": r.get("max_af_pops"), "cadd": r.get("cadd"),
+                "spliceai_ds": r.get("spliceai_ds"),
                 "clin_sig": r.get("clnsig"),
                 "child_nhf": member_nhf["child"][0], "child_nhf_reads": member_nhf["child"][1],
                 "mother_nhf": member_nhf["mother"][0], "mother_nhf_reads": member_nhf["mother"][1],

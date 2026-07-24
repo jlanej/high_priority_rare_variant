@@ -9,8 +9,8 @@ What this pipeline **cannot currently see**, why, and what each would cost to fi
 
 ## Why the first pass looks like this
 
-The pipeline runs on a **VEP-only contract**: a VEP 115 GRCh38 cache plus the CADD plugin, and
-nothing else. No gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE file is downloaded or bind-mounted.
+The pipeline runs on a **VEP-centric contract**: VEP 115 GRCh38 — its cache plus its plugins (CADD,
+and optionally SpliceAI). No gnomAD, ClinVar, dbNSFP or LOFTEE file is bcftools-transferred in.
 
 That was a deliberate trade. The alternative was ~1.4 TB of resource acquisition (gnomAD joint
 sites alone are 877 GB), each piece with its own version pinning, license gate, index, contig-naming
@@ -19,39 +19,44 @@ gnomAD v4.1 frequencies and ClinVar, and the group already runs VEP. So the firs
 **simple, sound, reproducible spine** — one annotation source, one frequency chokepoint, one
 functional ladder — and pays for it in the coverage documented below.
 
-Everything here is **additive to fix**. The contract is a single seam: each item below is
-re-enabled by one `bcftools annotate` transfer in `02_annotate_sites.sh` plus its INFO field in
-`annotations.F`. Nothing in the architecture forecloses any of it.
+Most items here are **additive to fix** — and §1 (SpliceAI) already has been. The contract is a
+narrow seam: each is re-enabled by **either a VEP plugin (as SpliceAI and CADD are) or one `bcftools
+annotate` transfer** in `02_annotate_sites.sh`, plus its INFO field in `annotations.F`. Nothing in
+the architecture forecloses any of it.
 
 ## The ledger
 
 Ordered by what they cost a real diagnosis, worst first.
 
-### 1. No SpliceAI — deep-intronic and synonymous splice variants are invisible
+### 1. SpliceAI — now WIRED (was the largest loss); residual caveats below
 
-**The largest loss, and the only one that removes a whole variant class.**
+**Resolved.** SpliceAI is now a first-class keep-path. Step 2 runs the SpliceAI VEP plugin over
+the precomputed raw delta scores (`resources.vep.spliceai_snv`/`spliceai_indel`), split-vep lifts
+`vep_SpliceAI_pred_DS_*`, and `selection.py` keeps a variant whose max delta score ≥
+`filters.functional.spliceai_ds_min` (default **0.2**, the ClinGen SVI PP3-supporting cutoff). So a
+variant that **creates a cryptic splice site 200 bp into an intron**, or a **synonymous exonic
+change that disrupts splicing** — annotated `intron_variant` (MODIFIER) or `synonymous_variant`
+(LOW), both below `keep_impacts` — is now nominated on its splice signal instead of being dropped.
+The raw score rides through to `candidates.calls.tsv` / the IGV export / the xlsx for reviewer
+tiering. It is **keep-only** (a missing/None score never drops a variant, it only fails to rescue).
 
-Without SpliceAI, splice detection is whatever VEP's *positional* consequence terms can reach:
-`splice_donor_variant` / `splice_acceptor_variant` (the ±1,2 dinucleotides, HIGH) and
-`splice_region_variant` (roughly ±3–8 intronic / 1–3 exonic, LOW). That is it.
-
-So a variant that **creates a cryptic splice site 200 bp into an intron**, or a **synonymous
-exonic change that disrupts splicing**, is annotated `intron_variant` (MODIFIER) or
-`synonymous_variant` (LOW) — both below `keep_impacts` — and is dropped at Step 3 unless CADD
-happens to rescue it. This is a recognised rare-disease diagnostic category, and the screen
-cannot nominate it.
-
-**Partial mitigation, not a substitute:** CADD v1.6+ ingests SpliceAI and MMSplice as *input
-features*, so a strong splice signal tends to raise CADD. It is a lossy re-encoding through a
-single genome-wide scalar, with no calibrated non-coding threshold (see §4).
-
-**Cost to fix:** ~0.6 GB. Filter the free Ensembl MANE mirror to Δ ≥ 0.1 (only ~1% of records
-reach the 0.2 supporting cutoff, so the full 27 GB table is ~99% dead weight for this pipeline).
-Because SpliceAI is a *keep-only* rule — absence yields `None`, which never drops anything — a
-filtered subset is lossless for current behaviour. Two traps: the free mirror is **SNV-only**
-(no indel file exists on it at all; indels are BaseSpace/login-gated), and it uses Ensembl-style
-contigs (`1`, `X`) while GMKF is `chr`-prefixed — a mismatched `tabix` query returns empty with
-**exit code 0**, so assert a non-zero record count.
+**Residual caveats (why this is not a clean "solved"):**
+- **The PRECOMPUTED set is not exhaustive.** Illumina's tables score genome-wide SNVs and a large
+  indel set, but not every indel/context; and precomputed scores are transcript-anchored. A
+  missing score is **not** "no splice effect" (see *Using SpliceAI to triage splice-altering
+  variants in 7,220 individuals*, medRxiv 2025, which quantifies where precomputed scores fall
+  short vs running SpliceAI live). Running SpliceAI on-the-fly would catch more but needs the model
+  + GPU/CPU budget — out of scope for a screen; the precomputed raw set is the pragmatic best.
+- **The FULL raw genome-wide set needs a one-time manual download.** It lives on Illumina BaseSpace
+  (login-gated). The free no-login Ensembl mirror is **MANE-select SNV only** (no non-MANE
+  transcripts, no indel file) — a real subset. Use the full raw for "don't miss anything". See
+  [resources.md](resources.md#spliceai).
+- **Contig-naming trap.** The Ensembl mirror uses `1`/`X`; GMKF is `chr`-prefixed. A mismatched
+  `tabix` query returns empty with **exit code 0** — Step 2's presence guard (`no
+  vep_SpliceAI_pred_DS_* lifted`) catches a silently-dead plugin, but confirm the score VCF's
+  contigs match your reference.
+- CADD v1.6+ also ingests SpliceAI as an input feature, so it remains a weak backstop for splice
+  signal below the SpliceAI keep threshold.
 
 ### 2. No faf95 — the rarity gate is a point estimate
 

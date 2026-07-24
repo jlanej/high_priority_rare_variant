@@ -80,8 +80,12 @@ if run_step 2; then
         # variant VEP rates below MODERATE. Without it the screen is impact-only: every
         # intronic / synonymous / UTR / regulatory candidate is unreachable. Loud, not fatal —
         # an impact-only screen is still a coherent (if narrower) run.
-        _opt HPRV_CADD_SNV   "CADD SNV (the only non-coding evidence in this contract)"
-        _opt HPRV_CADD_INDEL "CADD indel (the only indel-capable score in this contract)"
+        _opt HPRV_CADD_SNV   "CADD SNV (primary non-coding functional evidence)"
+        _opt HPRV_CADD_INDEL "CADD indel (indel-capable functional score)"
+        # SpliceAI: optional splice keep-path (deep-intronic / exonic-synonymous). Degrades
+        # gracefully — its absence just leaves those splice classes to CADD's weak proxy.
+        _opt HPRV_SPLICEAI_SNV   "SpliceAI SNV scores (deep-intronic + synonymous splice detection)"
+        _opt HPRV_SPLICEAI_INDEL "SpliceAI indel scores (splice detection for indels)"
     fi
     if [[ ${#r_missing[@]} -gt 0 ]]; then
         warn "Required resources are missing:"
