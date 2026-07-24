@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Pipeline Step 0: per-trio QC gate (garbage-in guard).
+"""Pipeline Step 0: per-trio QC — advisory pass/flag list (garbage-in guard, human-reviewed).
+
+Computes Mendelian-error rate, chrX-inferred sex, and contamination per trio and folds them into an
+`overall_pass` flag. This is ADVISORY: flags are surfaced to the reviewer (xlsx QC sheet + IGV
+sample_qc.tsv) but no step auto-excludes a flagged trio (see the overall_pass comment below).
 
 Mostly self-contained (no extra resources): for each trio computes three gates and
 flags trios that fail any of them:
@@ -210,6 +214,12 @@ def main(argv=None) -> int:
                     src = "freemix"
             contam_flag = "1" if flags else "0"
 
+            # ADVISORY only: overall_pass folds the three flags into one column that is SURFACED to
+            # the mandatory human reviewer (xlsx QC sheet + IGV sample_qc.tsv) but does NOT auto-
+            # exclude a trio — Steps 1/2/4 run over the full resolved manifest and Step 6 never reads
+            # it, so a flagged trio still contributes calls and recurrence pending human review.
+            # Automated gating is deliberately deferred (never-drop ethos + the contamination proxy's
+            # limited sensitivity, see contamination.py); it would be a config-gated policy change.
             overall = "1" if (mie_flag == "0" and sex_match == "1" and contam_flag == "0") else "0"
             if overall == "0":
                 n_fail += 1
