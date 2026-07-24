@@ -166,9 +166,20 @@ if is_set "$PRE_VEP"; then
         *'##VEP='*) ;;
         *) die "--vep-vcf has no ##VEP header line — it is not a VEP-annotated VCF: $PRE_VEP";;
     esac
-    case "$pre_header" in
-        *"assembly=\"GRCh38"*|*'assembly=GRCh38'*) ;;
-        *) warn "--vep-vcf does not declare assembly=GRCh38 — verify the build; every coordinate downstream assumes GRCh38";;
+    # Build check must FAIL LOUDLY, not warn: a GRCh37 VEP VCF carries a valid ##VEP header and valid
+    # vep_gnomAD*_AF, so nothing else stops it — Step 3 would select on GRCh37 coordinates and Step 4
+    # would transfer annotations by POSITION onto GRCh38 trios, silently losing/mis-annotating calls.
+    # Scope the assembly token to the ##VEP= line so a stray `assembly=` on a ##contig line isn't
+    # misread. die only on an EXPLICIT non-GRCh38 assembly; warn (don't fail) when the token is absent
+    # — a legitimate GRCh38 VEP VCF may omit it, and both hard guards below still apply.
+    vep_line="$(printf '%s\n' "$pre_header" | grep -m1 '^##VEP=' || true)"
+    case "$vep_line" in
+        *'assembly="GRCh38'*|*'assembly=GRCh38'*) ;;                              # explicitly GRCh38 — good
+        *assembly=*) die "--vep-vcf explicitly declares a non-GRCh38 assembly in its ##VEP header, but \
+every coordinate downstream (Step 3 selection, Step 4 position-keyed transfer) assumes GRCh38 — ingesting \
+it would silently mis-map. Re-annotate against a GRCh38 cache. ##VEP: ${vep_line#*assembly=}" ;;
+        *) warn "--vep-vcf's ##VEP header declares no assembly= token — cannot verify the build; every \
+coordinate downstream assumes GRCh38. Proceeding on the assumption it is GRCh38." ;;
     esac
     case "$pre_header" in
         *"##VEP=\"v${VEP_VERSION}"*) ;;

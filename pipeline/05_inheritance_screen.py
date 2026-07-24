@@ -114,6 +114,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     # gene -> list of (origin, variant, key); origin in {mat, pat, both, denovo}.
     # Feeds both compound-het pairing (recessive) and dominant (inherited het) calls.
     hets = {}
+    # P4 observability: a ClinVar P/LP variant the child carries whose grpmax AF is >= recessive_max
+    # is kept by Step 3's clinvar_plp rescue but fails EVERY Step-5 mode (all gate at rec_max/dom_max),
+    # so it silently yields no call. Count it so that inert-band drop is auditable, not silent.
+    n_plp_inert = 0
 
     for v in vcf:
         if require_pass and v.FILTER:  # cyvcf2 FILTER is None for PASS/'.'
@@ -127,6 +131,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             continue
         c, d, m = gt.c, gt.d, gt.m
         gc, gd, gmm = v.gt_types[c], v.gt_types[d], v.gt_types[m]
+        if gc in (G.HET, G.HOM_ALT) and A.clnsig_is_plp(v):
+            _fr = A.frequency(v)
+            if _fr is not None and _fr >= rec_max:
+                n_plp_inert += 1   # P/LP the child carries, dropped by every mode's rarity gate
 
         # male non-PAR chrX/chrY = hemizygous; a het call there is a QC red flag
         male_x = G.is_sex_nonpar(v) and gt.child_male
@@ -309,7 +317,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     if unver:
                         r["flags"] += ";origin_unverified"
                     rows.append(r)
-    return rows
+    return rows, n_plp_inert
 
 
 def main(argv=None) -> int:
@@ -338,6 +346,7 @@ def main(argv=None) -> int:
 
     n_trios = 0
     all_rows = []
+    n_plp_inert_total = 0
     for r in rows:
         trio_id, vcf_path, ped_path = r.get("trio_id"), r.get("candidates_vcf"), r.get("ped")
         ped = parse_ped(ped_path)
@@ -366,14 +375,17 @@ def main(argv=None) -> int:
             sys.stderr.write(f"WARN: {trio_id}: {e}; skipping\n")
             vcf.close()
             continue
-        trio_rows = screen_trio(trio_id, vcf, gt, cfg)
+        trio_rows, n_plp_inert = screen_trio(trio_id, vcf, gt, cfg)
         vcf.close()
         n_trios += 1
+        n_plp_inert_total += n_plp_inert
         # per-trio audit: total calls + counts by mode
         tmodes = {}
         for row in trio_rows:
             tmodes[row["mode"]] = tmodes.get(row["mode"], 0) + 1
         audit.record("05_inheritance", "candidate_calls", len(trio_rows), scope=trio_id)
+        if n_plp_inert:
+            audit.record("05_inheritance", "clinvar_plp_dropped_ge_recessive_max", n_plp_inert, scope=trio_id)
         for mode, c in sorted(tmodes.items()):
             audit.record("05_inheritance", f"mode.{mode}", c, scope=trio_id)
         all_rows.extend(trio_rows)
@@ -388,6 +400,7 @@ def main(argv=None) -> int:
         by_mode[r["mode"]] = by_mode.get(r["mode"], 0) + 1
     audit.record("05_inheritance", "trios_screened", n_trios)
     audit.record("05_inheritance", "candidate_calls_total", len(all_rows))
+    audit.record("05_inheritance", "clinvar_plp_dropped_ge_recessive_max", n_plp_inert_total)
     for mode, c in sorted(by_mode.items()):
         audit.record("05_inheritance", f"mode.{mode}", c)
     sys.stderr.write(

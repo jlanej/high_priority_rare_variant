@@ -295,17 +295,34 @@ def main(argv=None) -> int:
             "modes": ";".join(modes),
         })
 
-    # BH-FDR + exome-wide flag PER model family (each is its own family of tests: dominant het,
-    # biallelic, X-linked, secondary de novo) — so recessive-only recurrent genes get a corrected q.
+    # BH-FDR + exome-wide flag PER model family. The three INHERITED families correct over the
+    # CALLED genes — legitimately conditional on observing >= min_carriers carriers (the test only
+    # exists once a gene is nominated; see gene_burden.md) — so recessive-only recurrent genes get a
+    # corrected q.
     for pcol, qcol, sigcol in (
         ("p_recurrence", "q_recurrence", "recurrence_exome_wide_sig"),
         ("p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig"),
         ("p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig"),
-        ("dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig"),
     ):
         for r, q in zip(rows, bh_fdr([r[pcol] for r in rows])):
             r[qcol] = q
             r[sigcol] = "1" if (r[pcol] is not None and r[pcol] < exome_p) else "0"
+
+    # The secondary DE NOVO family is DIFFERENT: the denovolyzeR/Samocha model tests EVERY gene in the
+    # mutation table, where a zero-DNM gene is a valid null at p = poisson.sf(-1, exp) = 1.0 — NOT an
+    # absent test. Correcting over called genes only would make dn_q_enrich anti-conservative by
+    # ~n_model / n_called (can be ~100x) and flag a single-DNM gene as FDR-significant when the true
+    # q ≈ 1.0. So BH over the full model universe: pad the p-vector with p=1.0 for every mutation-model
+    # gene that produced no candidate row, then keep the q's for the real rows. (bh_fdr's ranking is
+    # driven by len(present) — pass the padded VECTOR, not just a larger m.) dn_exome_wide_sig is a
+    # fixed p<exome_p Bonferroni flag and is m-independent, so it is unchanged.
+    dn_ps = [r["dn_p_enrich"] for r in rows]
+    n_tested = sum(1 for p in dn_ps if p is not None)
+    pad = max(0, len(mut) - n_tested) if mut else 0
+    dn_q_full = iter(bh_fdr([p for p in dn_ps if p is not None] + [1.0] * pad))
+    for r in rows:
+        r["dn_q_enrich"] = next(dn_q_full) if r["dn_p_enrich"] is not None else None
+        r["dn_exome_wide_sig"] = "1" if (r["dn_p_enrich"] is not None and r["dn_p_enrich"] < exome_p) else "0"
 
     # Rank: recurrent first; DISTINCT-variant recurrence above SAME-variant (founder/artifact); then
     # by the strongest recurrence p across models; then constraint, counts, secondary de novo.
@@ -331,8 +348,16 @@ def main(argv=None) -> int:
 
     n_recurrent = sum(1 for r in rows if r["recurrent"] == "1")
     n_rec_con = sum(1 for r in rows if r["recurrent"] == "1" and r["constrained"] == "1")
-    n_rec_sig = sum(1 for r in rows if r.get("recurrence_exome_wide_sig") == "1")
-    n_rec_fdr = sum(1 for r in rows if r.get("q_recurrence") is not None and r["q_recurrence"] < fdr_q)
+    # Count a gene as recurrence-significant if ANY inherited family (dominant / biallelic / X-linked)
+    # is significant — matching how genes_recurrent uses the all-model carrier universe. Reading only
+    # the dominant family (as before) under-counted recessive-only / X-linked-only significant genes;
+    # genes.ranked.tsv already carries every per-family column, so this only fixes the summary tally.
+    _sig_cols = ("recurrence_exome_wide_sig", "recurrence_biallelic_exome_wide_sig",
+                 "recurrence_xlinked_exome_wide_sig")
+    _q_cols = ("q_recurrence", "q_recurrence_biallelic", "q_recurrence_xlinked")
+    n_rec_sig = sum(1 for r in rows if any(r.get(c) == "1" for c in _sig_cols))
+    n_rec_fdr = sum(1 for r in rows
+                    if any(r.get(c) is not None and r[c] < fdr_q for c in _q_cols))
     audit.record("06_burden", "n_trios", n_trios)
     audit.record("06_burden", "genes_nominated", len(rows))
     audit.record("06_burden", "genes_recurrent", n_recurrent)

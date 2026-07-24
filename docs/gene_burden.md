@@ -77,6 +77,19 @@ The dominant-het count is the **key new signal**: individually a rare inherited 
 > `--syn-denovo-count` is reserved and not yet wired into the expectation, and Step 6 prints this
 > warning at runtime. An uncalibrated expectation absorbs the cohort's DNM-calling sensitivity
 > into the test statistic, so treat these p-values as a **rank**, not a significance claim.
+>
+> **Two implementation notes (distinct from the uncalibrated-mean caveat above):**
+> 1. **BH denominator = the mutation-model universe.** Unlike the recurrence families (whose BH is
+>    legitimately conditional on observing ≥ `min_carriers` carriers), `dn_q_enrich` is BH-corrected
+>    over **every gene in the `--mutrate` table** — a zero-DNM model gene is a valid null test at
+>    `p = poisson.sf(-1, exp) = 1.0`, seeded by padding the p-vector. Correcting over called genes
+>    only would make `q` anti-conservative by ~`n_model / n_called`. (`dn_exome_wide_sig` is a fixed
+>    `p < 2.5e-6` Bonferroni flag and is unaffected.)
+> 2. **A single POOLED protein-altering test.** Step 6 sums the LoF and missense rates/counts into
+>    one Poisson test (denovolyzeR's pooled "prot" class) and reports one `dn_p_enrich`; it does
+>    **not** emit the per-class (LoF / missense / synonymous) breakdown of `denovolyzeByGene(classes=…)`.
+>    A LoF-specific test would give more power/interpretability for haploinsufficient genes — a
+>    possible enhancement, but out of scope for this off-by-default secondary arm.
 
 ### The Samocha framework
 
@@ -86,7 +99,7 @@ Samocha et al. (*Nat Genet* 2014) derive per-gene, per-consequence-class expecte
 
 | Tool | Method | Fit for this pipeline |
 | --- | --- | --- |
-| **denovolyzeR** (R) | Per-gene / gene-set Poisson enrichment for LoF, missense, synonymous; CCDS-level exome-wide test | **Default for the optional de novo arm.** Simplest, well-suited to a modest trio cohort. |
+| **denovolyzeR** (R) | Per-gene / gene-set Poisson enrichment for LoF, missense, synonymous; CCDS-level exome-wide test | **Model for the optional de novo arm** (Step 6 implements a **single pooled** LoF+missense "prot" Poisson test, not the per-class breakdown — see the notes above). Simplest, well-suited to a modest trio cohort. |
 | DeNovoWEST (Kaplanis 2020) | Unified severity-weighted simulation test adding missense-clustering | Higher power on large NDD cohorts; heavier inputs. |
 | extTADA / TADA (Nguyen 2017) | Bayesian integration of de novo + case-control counts; per-gene BF/FDR | Useful only if combining both signal arms. |
 
