@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import sys
 
 from cyvcf2 import VCF
@@ -68,6 +69,15 @@ def scan_sex(vcf_path, child_id, thr, max_x):
         return 0, 0
     try:
         it = vcf(x)                       # indexed region jump (preferred)
+        # cyvcf2.VCF.__call__ is a GENERATOR function, so `vcf(x)` returns without running its
+        # body — the tabix load and its `assert self.idx != NULL` fire on the first next(), i.e.
+        # inside the for-loop below and OUTSIDE this try. Without forcing the first element here
+        # the fallback is dead code and an unindexed VCF raises AssertionError straight through
+        # qc_trio/main into `set -euo pipefail`, killing the whole run. Unindexed trio VCFs are a
+        # supported input, and Step 0 runs before anything indexes them.
+        it = itertools.chain([next(it)], it)
+    except StopIteration:
+        it = iter(())                     # chrX in the header but no records there
     except Exception:
         it = vcf                          # unindexed: full scan, filtered below
     x_het = x_hom = 0

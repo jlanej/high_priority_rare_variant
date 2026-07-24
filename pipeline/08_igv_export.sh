@@ -132,7 +132,15 @@ while IFS=$'\t' read -r trio vcf ped samples; do
     if [[ -f "$vcfmapdir/$trio" ]]; then IFS= read -r cvcf < "$vcfmapdir/$trio" || true; fi
     if [[ -n "$cvcf" && -f "$cvcf" ]]; then
         cp -f "$cvcf" "$DATA/vcfs/${trio}.vcf.gz"
-        hprv_run --bind "$DATA" -- bcftools index -t -f "$DATA/vcfs/${trio}.vcf.gz" 2>/dev/null || true
+        # Warn + degrade rather than swallow (this step must not abort — see the contract below).
+        # igv.py existence-checks only the .vcf.gz but emits "<vcf>.tbi" unconditionally into the
+        # *_vcf_index columns, so a silently-failed index hands the review server a path to a
+        # nonexistent file — and a `-f` re-index that fails can leave a STALE .tbi beside a freshly
+        # copied VCF. Dropping the VCF makes the consumer blank the track, as a failed slice does.
+        if ! hprv_run --bind "$DATA" -- bcftools index -t -f "$DATA/vcfs/${trio}.vcf.gz"; then
+            warn "  [$trio] could not index the VCF track — dropping it (the review server will show no VCF track for this trio)"
+            rm -f "$DATA/vcfs/${trio}.vcf.gz" "$DATA/vcfs/${trio}.vcf.gz.tbi"
+        fi
     fi
 done < <(tail -n +2 "$resolved")
 
@@ -284,7 +292,14 @@ if is_set "$KRAKEN2_DB"; then
                         *)          [[ "$role" == "child" ]] || is_carrier "$trio" "$role" || continue ;;
                     esac
                     outp="$nhf_dir/$trio/${sample}"; out_tsv="${outp}.variant_nhf.tsv"
-                    if [[ -f "$out_tsv" && -f "${out_tsv}.done" ]]; then n_nhf=$((n_nhf+1)); continue; fi
+                    # CONTENT-keyed on both real inputs (mini-CRAM + per-trio VCF), like the
+                    # mini-CRAM guard above — a bare existence check would reuse a stale
+                    # variant_nhf.tsv after a legitimate re-slice or a Step-4 re-run. Rows missing
+                    # from a stale table blank out as "NHF disabled", and a stale near-zero-read row
+                    # renders nhf_flag=0 ("screened, clean") — an affirmatively wrong down-rank.
+                    # Not mtime: $tvcf is cp -f'd every run, so its mtime is always fresh.
+                    nhf_key="$(_bed_key "$cram")-$(_bed_key "$tvcf")"
+                    if [[ -f "$out_tsv" && "$(cat "${out_tsv}.done" 2>/dev/null)" == "$nhf_key" ]]; then n_nhf=$((n_nhf+1)); continue; fi
                     mkdir -p "$nhf_dir/$trio"
                     errf="$HPRV_TMPDIR/nhf.${trio}.${sample}.err"
                     # shellcheck disable=SC2086  # $NHF_MMAP is an intentional word (empty or --memory-mapping)
@@ -293,7 +308,7 @@ if is_set "$KRAKEN2_DB"; then
                             --kraken2-db "$KRAKEN2_DB" --confidence "$NHF_CONF" \
                             --threads "$JOBS" $NHF_MMAP --out-prefix "$outp" 2>"$errf" \
                        && [[ -f "$out_tsv" ]]; then
-                        touch "${out_tsv}.done"; n_nhf=$((n_nhf+1))
+                        printf '%s\n' "$nhf_key" > "${out_tsv}.done"; n_nhf=$((n_nhf+1))
                     else
                         warn "  [$trio] NHF screen failed for $role $sample (kraken2 missing, or a read/DB error): $(tail -n1 "$errf" 2>/dev/null); leaving its NHF blank"
                         rm -f "$out_tsv" "${outp}.summary.json"

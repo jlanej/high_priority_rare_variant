@@ -98,6 +98,27 @@ def test_frequency_excludes_bottlenecked_pops():
     assert abs(A.frequency(plus_nfe) - 3e-5) < 1e-12
 
 
+def test_frequency_reads_multivalued_af_tuples():
+    """cyvcf2 hands back a TUPLE for a multi-valued numeric INFO field, not a comma-joined string.
+
+    split-vep types every vep_gnomAD{e,g}_<POP>_AF column Number=.,Type=Float, so any selector
+    emitting more than one CSQ block (-s all, -s mane at a two-gene locus, -s pick on a multiallelic
+    site) yields a tuple. str(tuple) is "(0.001, 0.004)", whose tokens both fail float() — the old
+    reader returned None, i.e. "absent from gnomAD => rarest", silently RETAINING a common
+    polymorphism. Golden rule 2: frequency() is the rarity oracle, so this must never regress.
+    (Every other test here feeds strings, which is exactly why this hid.)
+    """
+    tup = FakeVar({"vep_gnomADe_NFE_AF": (0.001, 0.004)})
+    assert abs(A.frequency(tup) - 0.004) < 1e-12
+    # mixed: a tuple with a missing entry, and the max must still win across fields
+    mixed = FakeVar({"vep_gnomADe_NFE_AF": (".", 2e-5), "vep_gnomADg_AFR_AF": (7e-5,)})
+    assert abs(A.frequency(mixed) - 7e-5) < 1e-12
+    # a plain scalar float (single-value field) still works
+    assert abs(A.frequency(FakeVar({"vep_gnomADe_SAS_AF": 1.5e-4})) - 1.5e-4) < 1e-12
+    # and the string form (what most callers see) is unchanged
+    assert abs(A.frequency(FakeVar({"vep_gnomADe_EAS_AF": "0.002&0.003"})) - 0.003) < 1e-12
+
+
 def test_annotations_clinvar():
     # VEP CLIN_SIG is lowercase and '&'-joined; the ClinVar VCF's CLNSIG was Capitalised and
     # '/'-joined. Both must parse, so the predicate survives either annotation source.
