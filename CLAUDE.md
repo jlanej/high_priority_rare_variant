@@ -194,8 +194,9 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   builds a separate `/opt/conda/envs/spliceai` and `02b_spliceai_backfill.sh` invokes it via
   `micromamba run -n spliceai spliceai …` — never mix it into the main env. The model weights + GENCODE
   annotation are BUNDLED in the package (no data download; the build smoke-test hard-fails if the model
-  won't load). Step 2b is ON by default (`resources.vep.spliceai_backfill.enabled: true`; an absent
-  isolated env HALTS the run at the Step-2 preflight — set it `false` to opt out), runs
+  won't load). Step 2b is OFF by default (`resources.vep.spliceai_backfill.enabled: false`) — the screen
+  currently runs on the PRECOMPUTED scores alone. Set it `true` to also score the unscored gap; an
+  absent isolated env then HALTS at the Step-2 preflight rather than silently skipping. It runs
   after Step 2 and before Step 3 (so a backfilled score is a keep-path), scores only variants with no
   precomputed value (default indels), and folds them into the same `vep_SpliceAI_pred_DS_*` fields
   (`bcftools annotate`). Idempotent via a `.spliceai_backfill.done` marker that must be NEWER than the

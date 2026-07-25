@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 02b_spliceai_backfill.sh — DEFAULT-ON (resources.vep.spliceai_backfill.enabled): score the
-# cohort-union variants that carry NO precomputed
+# 02b_spliceai_backfill.sh — OPT-IN (resources.vep.spliceai_backfill.enabled, default false):
+# score the cohort-union variants that carry NO precomputed
 # SpliceAI delta score (mostly novel indels), live, with the stock Illumina model, and merge the
 # scores into cohort.sites.annotated.vcf.gz — into the SAME vep_SpliceAI_pred_DS_* fields Step 2's
 # SpliceAI plugin produces, so Step 3 selection reads precomputed and backfilled scores identically.
@@ -9,9 +9,10 @@
 # Runs AFTER Step 2 (the plugin has scored everything the precomputed files cover) and BEFORE Step 3
 # (so a backfilled score is a keep-path). The model + GENCODE annotation are bundled in the isolated
 # `spliceai` conda env baked into the image — NO data download beyond the reference FASTA. TensorFlow
-# inference is heavy, but it runs only on the small unscored set, so this is ON by default. An
-# absent env is an AVAILABILITY error: exit 3 => the caller HALTS. A transient scoring failure
-# degrades to precomputed-only (exit 0). See the exit contract below.
+# inference is heavy and, unbounded, is measured in days on a WGS cohort, so this is OFF by default
+# and the screen runs on precomputed scores alone. When it IS enabled, an absent env is an
+# AVAILABILITY error: exit 3 => the caller HALTS. A transient scoring failure degrades to
+# precomputed-only (exit 0). See the exit contract below.
 #
 # Usage:
 #   02b_spliceai_backfill.sh --annotated cohort.sites.annotated.vcf.gz --ref GRCh38.fa \
@@ -40,8 +41,8 @@ done
 [[ -n "$REF" && -f "$REF" ]] || die "need --ref <GRCh38 FASTA> (the same reference the cohort was called against)"
 [[ "$DISTANCE" =~ ^[0-9]+$ ]] || die "--distance must be a non-negative integer"
 
-# Gate 1: the isolated spliceai env must be present (image-only). The backfill is ON by default, so
-# an absent env is an AVAILABILITY error, not a silent skip: exit 3 tells the caller to HALT. (This
+# Gate 1: the isolated spliceai env must be present (image-only). Reaching here means the backfill
+# was explicitly enabled, so an absent env is an AVAILABILITY error, not a silent skip: exit 3 tells the caller to HALT. (This
 # is normally unreachable — run_pipeline's preflight checks the same thing before VEP — so reaching
 # it means 2b was invoked directly, or the env vanished mid-run.) Exit 3 is the caller's contract:
 # 3 = unavailable/halt, any other non-zero = degrade to precomputed-only. See run_pipeline.sh.
