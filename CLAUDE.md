@@ -201,6 +201,17 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   precomputed value (default indels), and folds them into the same `vep_SpliceAI_pred_DS_*` fields
   (`bcftools annotate`). Idempotent via a `.spliceai_backfill.done` marker that must be NEWER than the
   union; a scoring failure warns + degrades to precomputed-only rather than aborting the run.
+- **`$(producer | head ...)` under `set -euo pipefail` is a silent-abort trap.** `head` (and
+  `grep -q`, `grep -m1`) exits as soon as it has what it needs and closes the pipe, so the
+  producer dies of SIGPIPE = **exit 141**; `pipefail` makes that the pipeline's status and
+  `set -e` aborts the assignment — before any guard can report it. It fires when the data is
+  HEALTHY (enough output to make `head` exit early), so it reads as "works on toy input, dies on
+  real input, no error message". `scripts/download_spliceai.sh` hit exactly this and could
+  essentially never reach its success path. Two shapes, two fixes: put `|| true` INSIDE the
+  `$( )` after the pipeline (the surrounding `[[ ]]` guard still catches genuinely bad data), and
+  never pipe into `grep -q` when the pipeline's status is the answer — it fails *silently wrong*
+  rather than aborting (a chr-prefixed reference was reported as `nochr`). Use `grep -cx` +
+  a count test, which reads to EOF and cannot SIGPIPE the producer.
 - **Apptainer:** point `APPTAINER_TMPDIR`/`CACHEDIR` at real disk and **do not use
   `--containall`** — a tmpfs `/tmp` OOMs heavy VEP/sort (documented failure in the group's
   original annotate script; `common.sh` already sets a disk-backed workdir).
