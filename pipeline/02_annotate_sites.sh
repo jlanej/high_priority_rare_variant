@@ -6,15 +6,17 @@
 # once over distinct sites rather than per trio. See docs/functional_annotation.md
 # and docs/pipeline_design.md (Step 2).
 #
-# Pipeline: VEP (cache + CADD plugin) -> bcftools +split-vep (lift CSQ -> INFO).
+# Pipeline: VEP (cache + CADD and SpliceAI plugins) -> bcftools +split-vep (lift CSQ -> INFO).
 #
 # **VEP-only contract.** Everything downstream reads comes out of the VEP cache: the
 # gnomAD v4.1 per-population AFs (--af_gnomade/--af_gnomadg), ClinVar CLIN_SIG
-# (--check_existing), and CADD from its plugin. NOTHING is transferred in from an
-# external sites VCF — no gnomAD, ClinVar, dbNSFP, SpliceAI or LOFTEE download exists.
+# (--check_existing), and CADD + SpliceAI from their plugins. NOTHING is transferred in
+# from an external sites VCF — no gnomAD, ClinVar, dbNSFP or LOFTEE download exists.
+# (SpliceAI DOES have a download — the precomputed raw score files the plugin reads —
+#  but it is a PLUGIN input, not a bcftools transfer, so the contract holds.)
 # The cost is real and deliberate; see docs/allele_frequency.md for the ledger:
 #   - no faf95 (the cache has no AC/AN, so the CI correction is not reconstructible)
-#   - no nhomalt, no SpliceAI, no LOFTEE, no ClinVar review status/stars
+#   - no nhomalt, no LOFTEE, no ClinVar review status/stars
 # Re-adding any of them = one bcftools annotate here + its INFO field in annotations.F.
 #
 # Already have a VEP VCF? Pass --vep-vcf (or set resources.vep.annotated_vcf) and the

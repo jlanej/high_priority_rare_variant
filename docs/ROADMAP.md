@@ -7,7 +7,8 @@ update it as items land. (Out of scope by design: de novo review, mtDNA — sepa
 
 ## Restoring the VEP-only contract's gaps (start here — best ROI in the repo)
 
-The first pass runs on a VEP 115 cache + CADD alone; see **[limitations.md](limitations.md)** for
+The first pass runs on a VEP 115 cache + the CADD and SpliceAI plugins; see
+**[limitations.md](limitations.md)** for
 the full ledger of what that costs and why each was an acceptable trade. Each row below is
 **additive**: one `bcftools annotate` transfer in `02_annotate_sites.sh` plus its INFO field in
 `annotations.F`. Nothing in the architecture blocks any of them. Ranked by clinical value per GB.
@@ -15,7 +16,7 @@ the full ledger of what that costs and why each was an acceptable trade. Each ro
 | # | Restore | Size | Buys | Notes |
 |---|---------|:----:|------|-------|
 | R1 | **ClinVar VCF** | ~0.18 GB | `CLNREVSTAT` ⇒ the ≥2★ auto-promote gate, + a monthly release instead of the cache's ClinVar 2025-02 | Cheapest win by an order of magnitude. |
-| R2 | **SpliceAI slim (Δ≥0.1)** | ~0.6 GB | Deep-intronic + exonic-synonymous splice — **a whole variant class the screen currently cannot nominate** | Highest clinical value. Filter the free Ensembl MANE mirror; lossless (keep-only rule). SNV-only — no indel file exists on the free mirror. Guard contig naming (`1` vs `chr1`): a mismatched tabix query returns empty at **exit 0**. |
+| R2 | **✅ DONE — SpliceAI** | ~28 GB | Deep-intronic + exonic-synonymous splice, as rung 2 of the functional ladder (Δ ≥ `spliceai_ds_min`, default 0.2) | Shipped BETTER than this row proposed: the FULL raw SNV+indel set as a VEP **plugin** (not a bcftools transfer, not the Δ≥0.1 MANE-only slim), **required by default** (`spliceai_required`). Remaining gap: the precomputed set covers only 1 nt insertions and deletions ≤ 4 nt, at ±50 nt — see limitations.md. Contig-naming guard still applies. |
 | R3 | **gnomAD slim (5 of 664 INFO fields)** | ~10 GB | True `faf95` (restores the CI correction) + `nhomalt` (the recessive false-positive tell) | Stream-slim the 24 joint chrom VCFs; nothing but the slim lands. GCS egress is free. Requires htslib built with libcurl — check `samtools --version` (not `bcftools --version`, which prints no feature line). |
 | R4 | **Dedicated REVEL (+ AlphaMissense)** | ~1.3 GB | Reporting/tiering columns; the ClinGen-calibrated predictor for a PP3/BP4 step | **Buys the *screen* nothing** — see limitations.md §7. Use the dedicated files, **not** dbNSFP (30 GB for 5 columns, and its URL is dead: S3 `NoSuchBucket`, now registration-gated). Trap: Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`, not `AlphaMissense_score`. |
 | R5 | **LOFTEE data** | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | Plugin code already in the image; near-inert for *selection* (HIGH impact already keeps every pLoF), so this is a tiering prerequisite. |
@@ -54,7 +55,7 @@ robust sex-check (on #2).
 | # | Gap | Impact | Effort | Why now |
 |---|-----|:------:|:------:|---------|
 | 9 | **Germline CNV calling (GATK-gCNV) + ACMG/ClinGen dosage annotation (AnnotSV/ClassifyCNV) + CNV-in-trans into the comp-het resolver** (ExomeDepth as a concordance second caller). | High | High | Largest true blind spot: 10–15% of pediatric-CPS diagnoses are CNV/SV (single-exon RB1/SMARCB1/DICER1/NF1/PMS2 deletions). **Needs re-accessing Kids First CRAMs + a ≥100–150-sample batch** — a new data-model dependency. |
-| 10 | **Phenotype ranker (Exomiser hiPHIVE) as an additive prior**, tuned per the 2025 optimization (human-only associations; REVEL+AlphaMissense+SpliceAI blend we already compute) + graceful sparse/absent-HPO degradation. | High | High | Phenotype-blind ranking buries the true diagnosis when every proband carries many rare functional variants. **Ship tuned** — mis-tuned Exomiser underperforms its own baseline. Needs HPO ingestion. |
+| 10 | **Phenotype ranker (Exomiser hiPHIVE) as an additive prior**, tuned per the 2025 optimization (human-only associations; of its REVEL+AlphaMissense+SpliceAI blend we currently compute only SpliceAI) + graceful sparse/absent-HPO degradation. | High | High | Phenotype-blind ranking buries the true diagnosis when every proband carries many rare functional variants. **Ship tuned** — mis-tuned Exomiser underperforms its own baseline. Needs HPO ingestion. |
 | 11 | **Read-backed + population phasing** (WhatsHap where reads span; **gnomAD variant co-occurrence** for distant pairs) with a **three-class phase output** (trans / cis-reject / unknown-review). | High | Med–High | Comp-het is only called for the mat×pat case today; parent-of-origin-only cis pairs inflate carrier counts. gnomAD co-occurrence is a public lookup (no data cost); read-backed needs BAMs (couples with #9). |
 | 12 | **Runs-of-homozygosity / homozygosity mapping (AutoMap / `bcftools roh`)** to prioritize homozygous-recessive candidates inside ROH tracts. | High | Med | ~50% reduction in candidate hom variants with 92.5% of causal variants inside ROH; a per-proband signal currently discarded. Unlocks F_ROH priors; complements UPD (#6). |
 
