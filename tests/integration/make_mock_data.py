@@ -436,9 +436,10 @@ reference: {{fasta: {W}/reference.fa}}
 resources:
   # Step 2 ingests this instead of invoking `vep` (mock_vep.py writes it). Everything else in
   # Step 2 — build checks, split-vep, selector, frequency guard — runs for real against it.
-  # spliceai_backfill is ON by default and HALTS when its isolated env is missing; CI/host runs
-  # have no such env (it ships only in the image), so opt out explicitly here. The precomputed
-  # SpliceAI keep-path is still exercised — mock_vep.py writes vep_SpliceAI_pred_DS_* directly.
+  # spliceai_backfill is off by default; pinned explicitly here so a future default flip cannot
+  # silently start invoking TensorFlow in CI (host runs have no such env — it ships only in the
+  # image). The precomputed SpliceAI keep-path is still exercised: mock_vep.py writes
+  # vep_SpliceAI_pred_DS_* directly.
   vep: {{annotated_vcf: {W}/cohort.sites.vep.vcf.gz, version: 115,
          spliceai_backfill: {{enabled: false}}}}
   mutation_rate_table: {W}/mutrate.tsv

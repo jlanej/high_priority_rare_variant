@@ -136,14 +136,15 @@ require_writable_dir "$W" "project.output_dir"
 require_writable_dir "$HPRV_TMPDIR" "runtime.tmpdir (scratch for norm/sort/VEP)"
 require_writable_dir "$HPRV_AUDIT_DIR" "audit dir"
 
-# Step 2b availability gate. The backfill is ON by default, so an ABSENT env halts the run HERE —
+# Step 2b availability gate. Only when the backfill is explicitly ENABLED (it is off by default,
+# so the screen runs on precomputed scores alone): an ABSENT env then halts the run HERE —
 # at second 1, before the hours of VEP — rather than after. Checked regardless of how the union is
 # produced (the backfill runs on it either way, including the annotated_vcf ingest path).
 # Placed AFTER the tmpdir is defaulted + write-probed above: this is the first hprv_run in the
 # orchestrator's own shell, and hprv_run does `mkdir -p "$HPRV_TMPDIR"` and passes --workdir to
 # apptainer/docker, so running it any earlier would probe with an empty tmpdir and image.
 # NB availability != failure: a transient failure mid-scoring still degrades (see the 2b call).
-if run_step 2 && [[ "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
+if run_step 2 && [[ "$(cfg_get resources.vep.spliceai_backfill.enabled false)" == "true" ]]; then
     _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
     hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI backfill (Step 2b) is ENABLED but its isolated env is not available at '$_sai_env' (no executable bin/spliceai). That env ships only in the container image — run inside it (apptainer exec hprv.sif ...), point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill. See docs/resources.md#spliceai."
 fi
@@ -204,7 +205,7 @@ if run_step 2; then
     bash "$HERE/02_annotate_sites.sh" "${s2_args[@]}"
 
     # Step 2b (default on): live-SpliceAI backfill of cohort variants with NO precomputed score
-    # (mostly novel indels), before Step 3 so a backfilled score is a keep-path. ON unless disabled;
+    # (mostly novel indels), before Step 3 so a backfilled score is a keep-path. OFF by default;
     # an absent isolated `spliceai` env (image-only) exits 3 and HALTS — see the two-tier exit
     # contract below, and the matching availability gate in the preflight above.
     # Runs when the union is FINAL: the single-node path (no passthru) OR the distributed
@@ -212,7 +213,7 @@ if run_step 2; then
     # shard/manifest sub-tasks, whose union is partial. (If enabled with SLURM, size the gather job
     # for TensorFlow inference — the backfill runs there.)
     if [[ ( ${#S2_PASSTHRU[@]} -eq 0 || "${S2_PASSTHRU[*]:-}" == "--gather" ) \
-          && "$(cfg_get resources.vep.spliceai_backfill.enabled true)" != "false" ]]; then
+          && "$(cfg_get resources.vep.spliceai_backfill.enabled false)" == "true" ]]; then
         log "== Step 2b: SpliceAI live backfill (variants with no precomputed score) =="
         b_io=1; [[ "$(cfg_get resources.vep.spliceai_backfill.indels_only true)" == "false" ]] && b_io=0
         # Two-tier exit contract (see 02b): UNAVAILABLE halts, a transient FAILURE degrades.

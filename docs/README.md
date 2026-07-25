@@ -99,9 +99,11 @@ higher deep-intronic recall.
 **SpliceAI availability defaults** (this table is the single source of truth, so they live here):
 `resources.vep.spliceai_required` **true** — missing raw score files HALT at the Step-2 preflight;
 not enforced when `resources.vep.annotated_vcf` is set. `resources.vep.spliceai_backfill.enabled`
-**true** — Step 2b scores variants with no precomputed value (`indels_only` **true**, `distance`
-**500** bp); an absent isolated `spliceai` env HALTS at preflight, while a transient scoring failure
-degrades to precomputed-only with the union left intact.
+**false** — the screen runs on the PRECOMPUTED scores alone; variants the precomputed set does not
+cover (insertions > 1 nt, deletions > 4 nt) simply carry no splice evidence, which never drops them
+but cannot rescue them either. Set it `true` to score that gap live (`indels_only` **true**,
+`distance` **500** bp); an absent isolated `spliceai` env then HALTS at preflight, while a transient
+scoring failure degrades to precomputed-only with the union left intact.
 
 Two honest caveats on that CADD 25.3:
 - **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on

@@ -147,7 +147,7 @@ flowchart TD
 | 0 | QC report per trio; **advisory** pass/flag list (surfaced in the xlsx QC sheet + IGV `sample_qc.tsv`) | flags suspect trios for human review — flagged trios are **NOT** auto-excluded; they still contribute calls + recurrence pending review |
 | 1 | `cohort.sites.vcf.gz` (site-only, normalized, de-duplicated union) | the set of loci seen anywhere in the cohort — **not** a frequency |
 | 2 | `cohort.sites.annotated.vcf.gz` | every annotation the pipeline reads, computed once: VEP CSQ lifted to `INFO/vep_*` — consequence/IMPACT/SYMBOL/MANE, gnomAD v4.1 per-population AFs, ClinVar `CLIN_SIG`, CADD, SpliceAI delta scores (`vep_SpliceAI_pred_DS_*`). Constraint is **not** here; it joins by gene symbol at Step 6 |
-| 2b | `cohort.sites.annotated.vcf.gz` rewritten in place + `.spliceai_backfill.done` | *(default on)* live-SpliceAI backfill of variants with no precomputed score (mostly novel indels), folded into the same `vep_SpliceAI_pred_DS_*` fields before Step 3 |
+| 2b | `cohort.sites.annotated.vcf.gz` rewritten in place + `.spliceai_backfill.done` | *(OFF by default; opt in)* live-SpliceAI backfill of variants with no precomputed score (mostly novel indels), folded into the same `vep_SpliceAI_pred_DS_*` fields before Step 3 |
 | 3 | `plausible.sites.vcf.gz` | the target list of loci worth genotyping per trio |
 | 4 | per-trio `*.candidates.annotated.vcf.gz` | real per-trio genotypes (`PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`) at plausible sites, annotation-carrying |
 | 5 | per-trio candidate call tables (with inheritance mode) | diagnostic per-family findings |

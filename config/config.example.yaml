@@ -88,17 +88,17 @@ resources:
     # deliberately run without SpliceAI (dev/quick runs) — then it degrades with a warning as before.
     # Not enforced when resources.vep.annotated_vcf is set (VEP is not invoked at all).
     spliceai_required: true
-    # Step 2b — live SpliceAI backfill, ON by default. The precomputed files above cover every
-    # genome-wide SNV but a FINITE indel set at a narrow window, so some candidates (mostly novel
-    # indels) carry no precomputed score. Step 2b runs the stock Illumina SpliceAI model (bundled in
-    # the image's isolated `spliceai` env — no extra download beyond the reference) over just those
-    # unscored variants and folds the result into the same vep_SpliceAI_pred_DS_* fields.
-    # It is TensorFlow inference (~1 variant/s/CPU, ~7/s GPU), but it runs only on the small unscored
-    # set. AVAILABILITY halts: if enabled and the isolated env is absent (e.g. a bare host rather
-    # than the image), the run STOPS at preflight — set enabled: false to opt out explicitly.
-    # A transient failure mid-scoring still degrades to precomputed-only (the union is left intact).
+    # Step 2b — live SpliceAI backfill. OFF by default: the pipeline currently screens on the
+    # PRECOMPUTED scores alone. The precomputed set covers every genome-wide SNV but only 1 nt
+    # insertions and deletions <= 4 nt, so larger indels carry no score — and a missing score is
+    # NOT evidence of no splice effect (it never drops a variant, it only fails to rescue one).
+    # Turning this on runs the stock Illumina model live over the unscored variants and folds the
+    # result into the same vep_SpliceAI_pred_DS_* fields. It is TensorFlow inference (~1 variant/s
+    # per process) and, unbounded, is measured in days on a WGS cohort — see docs/limitations.md
+    # before enabling. When enabled, an absent isolated `spliceai` env HALTS at preflight rather
+    # than silently skipping; a transient failure mid-scoring degrades to precomputed-only.
     spliceai_backfill:
-      enabled: true         # requires the image (the spliceai env is not on a bare host)
+      enabled: false        # precomputed-only screen; set true to also score the unscored gap
       indels_only: true     # SNVs are precomputed-complete, so backfill only the novel-indel gap
       distance: 500         # SpliceAI -D window (bp). Wider than the precomputed -D 50 to catch
                             #   deep-intronic cryptic sites far from the variant — the class the
