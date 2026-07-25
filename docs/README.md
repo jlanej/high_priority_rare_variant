@@ -29,6 +29,9 @@ the single source of truth; if a document ever disagrees with it, the table wins
 | [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md) | OMIM/PanelApp/ClinGen/COSMIC/ACMG-SF, HPO/Exomiser priors, tiering |
 | [gene_burden.md](gene_burden.md) | Recurrence-based gene consolidation (dominant het + biallelic across individuals); de novo enrichment as secondary |
 | [tooling_and_reproducibility.md](tooling_and_reproducibility.md) | Container/conda-lock, GHCR CI, Apptainer, PHI-safe repo |
+| [resources.md](resources.md) | **How to acquire and prepare the annotation data** (VEP cache, CADD, SpliceAI, kraken2); what `prepare_resources.sh` fetches |
+| [cram_access_phase.md](cram_access_phase.md) | *Idea doc, not scheduled* — bundling the roadmap items that all need re-access to source CRAMs |
+| [pipeline_review_2026-07.md](pipeline_review_2026-07.md) | *Historical findings log (point-in-time), not canonical methods* — a publication-readiness review with a per-finding resolution table |
 
 ---
 
