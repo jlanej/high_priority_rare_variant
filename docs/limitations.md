@@ -112,14 +112,16 @@ interesting one.
 
 **Cost to fix:** free, alongside §2 — `nhomalt_joint` is one of the fields the gnomAD slim keeps.
 
-### 4. CADD is the only functional predictor, on an off-label threshold
+### 4. CADD is the general-purpose predictor, on an off-label threshold
 
-CADD is the sole keep-path for anything VEP rates below MODERATE, which makes
-`cadd_phred_supporting: 25.3` the **entire non-coding screen**. Two honest problems:
+Below MODERATE impact there are two keep-paths: SpliceAI (checked first, and only reaching
+splice-disrupting variants) and CADD. So `cadd_phred_supporting: 25.3` is the **entire non-splice
+non-coding screen** — everything intronic / synonymous / UTR / regulatory without a splice signal
+rests on this one number. Two honest problems:
 
 - **The number is named after a calibration that never applies to it.** 25.3 is Pejaver-2022's
   PP3-*supporting* cutoff, derived on **missense only**. Missense never reaches the CADD rung —
-  it is MODERATE, kept a rung earlier — so in practice 25.3 is applied *exclusively* to the
+  it is MODERATE, kept at rung 1 — so in practice 25.3 is applied *exclusively* to the
   non-coding variants it was not calibrated for. Treat it as a discovery rank (≈ top 0.3%
   genome-wide), **not** as ACMG PP3 evidence.
 - **There is no ClinGen-endorsed non-coding CADD threshold** to replace it with. Lowering it

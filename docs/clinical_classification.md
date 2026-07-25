@@ -7,8 +7,8 @@ How this pipeline uses ClinVar as clinical evidence today (an unstarred P/LP kee
 
 > ### ⚠ Status: almost all of this document is TARGET, not what runs
 >
-> Under the **VEP-only contract** (a VEP 115 GRCh38 cache + the CADD plugin; no ClinVar VCF is
-> downloaded or bind-mounted), the *only* clinical evidence the pipeline reads is the cache's
+> Under the **VEP-only contract** (a VEP 115 GRCh38 cache + the CADD and SpliceAI plugins; no
+> ClinVar VCF is downloaded or bind-mounted), the *only* clinical evidence the pipeline reads is the cache's
 > `CLIN_SIG` string. That has two hard consequences for this document:
 >
 > - **There is no `CLNREVSTAT`, therefore no stars.** The ≥ 2★ auto-promote gate that this
@@ -136,7 +136,7 @@ The 2015 ACMG/AMP framework (Richards et al.) defines 28 criteria (16 pathogenic
 ### Key SVI refinements the tiering step would apply (TARGET)
 
 - **PM2 → Supporting by default** (SVI Recommendation v1.0). Absence/rarity is weak evidence; do not apply PM2 at Moderate. PM2 is ACMG *evidence* and must be kept distinct from the upstream rarity **screening** gate (see [allele_frequency.md](allele_frequency.md)) — passing the rarity filter is not the same as "PM2 met." Two extra cautions specific to this contract: the screening gate reads a **point estimate, not `faf95`**, and the cache reports frequencies only for **dbSNP-accessioned** alleles, so "absent" is weaker evidence here than it looks. PM2 built naively on this field would inherit both flaws.
-- **PP3 / BP4 calibration (Pejaver 2022)**: continuous predictors receive strength-stratified thresholds. Use **one** predictor per variant; do not sum correlated predictors as independent evidence. The **REVEL** primary defaults are restated below and detailed in [functional_annotation.md](functional_annotation.md). AlphaMissense is *not* part of the Pejaver 2022 calibration and lacks an SVI PP3 stratification — treat it only as orthogonal support. **No calibrated predictor is available today** (no REVEL/AlphaMissense/MPC); CADD is present but its 25.3 cutoff is a missense-derived number applied only to non-coding variants, so it is a **discovery rank, not PP3 evidence**.
+- **PP3 / BP4 calibration (Pejaver 2022)**: continuous predictors receive strength-stratified thresholds. Use **one** predictor per variant; do not sum correlated predictors as independent evidence. The **REVEL** primary defaults are restated below and detailed in [functional_annotation.md](functional_annotation.md). AlphaMissense is *not* part of the Pejaver 2022 calibration and lacks an SVI PP3 stratification — treat it only as orthogonal support. **No calibrated MISSENSE predictor is available today** (no REVEL/AlphaMissense/MPC). For SPLICING there is one: SpliceAI is wired, and its `spliceai_ds_min: 0.2` IS the ClinGen SVI PP3-supporting threshold — though the pipeline uses it as a keep-path, not as scored PP3 evidence, because no tiering step exists yet. CADD is present but its 25.3 cutoff is a missense-derived number applied only to non-coding variants, so it is a **discovery rank, not PP3 evidence**.
 - **PVS1 decision tree (Abou Tayoun 2018)**: loss-of-function variants receive graded strength (PVS1 / _Strong / _Moderate / _Supporting) by consequence, NMD escape, exon/region context (last exon, 3′-terminal 50 bp, single-exon), and only when LoF is the disease mechanism and gene–disease validity is **≥ Moderate**. Naive full-strength PVS1 is a major over-calling source. This is **blocked twice over**: no LOFTEE HC/LC confidence and no ClinGen gene–disease validity table. It is also the single strongest argument for restoring LOFTEE, whose value to *selection* is otherwise near zero ([limitations.md](limitations.md) §5). See [functional_annotation.md](functional_annotation.md) and [gene_constraint.md](gene_constraint.md).
 - **PS3 / BS3 functional (Brnich 2020)**: assay-based strength is set via OddsPath from the number of validated controls (≥ 11 controls → Moderate; more → Strong).
 
@@ -167,12 +167,13 @@ ClinGen classifies each gene→disease relationship as **Definitive / Strong / M
 
 ```text
 Per-trio VCF (GRCh38, GATK genotype-refined)
-  └─ VEP 115 cache + CADD plugin  -> split-vep lifts CSQ to INFO   (functional_annotation.md)
+  └─ VEP 115 cache + CADD & SpliceAI plugins -> split-vep lifts CSQ to INFO (functional_annotation.md)
      └─ Step 3 classify (src/hprv/selection.py):
         ├─ AF >= 0.05 (BA1)                        -> DROP (never rescued, P/LP included)
         ├─ CLIN_SIG P/LP, not conflicting          -> KEEP  'clinvar_plp'   (unstarred!)
         ├─ AF >= 1e-2 and not P/LP                 -> DROP 'too_common'
         ├─ IMPACT in {HIGH, MODERATE}              -> KEEP  'impact_high'|'impact_moderate'
+        ├─ SpliceAI max delta >= 0.2               -> KEEP  'spliceai'  (checked BEFORE cadd)
         ├─ CADD_PHRED >= 25.3                      -> KEEP  'cadd'  (non-coding only, in practice)
         └─ otherwise                               -> DROP 'not_functional'
 ```

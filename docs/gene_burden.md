@@ -7,8 +7,8 @@ Finds genes where rare, functional **inherited** variants recur across multiple 
 
 ## Status: what of this doc is live
 
-The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD plugin, nothing
-else downloaded or bind-mounted. That reshapes this doc into three layers, marked throughout:
+The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD and SpliceAI
+plugins, nothing else downloaded or bind-mounted. That reshapes this doc into three layers, marked throughout:
 
 | Layer | What it is | Examples here |
 | --- | --- | --- |
@@ -152,7 +152,7 @@ Plus two overrides: grpmax-proxy AF ≥ 0.05 (ClinGen **BA1**) drops and is neve
 Two consequences a reader must hold onto before interpreting any per-gene tally:
 
 - **The ClinVar override is unstarred.** The cache carries `CLIN_SIG` but no review status, so a 1★ single-submitter P/LP assertion enters the tally indistinguishably from an expert-panel one. It over-retains rather than over-drops.
-- **CADD 25.3 is off-label.** It is Pejaver-2022's PP3-supporting cutoff, calibrated on **missense only** — and missense never reaches rung 2, because every missense is MODERATE and rung 1 returns first. So 25.3 is applied *exclusively* to the non-coding variants it was not calibrated for. It is a discovery rank (≈ top 0.3% genome-wide), **not** ACMG PP3 evidence ([limitations.md §4](limitations.md)).
+- **CADD 25.3 is off-label.** It is Pejaver-2022's PP3-supporting cutoff, calibrated on **missense only** — and missense never reaches rung 3 — the CADD rung — because every missense is MODERATE and rung 1 returns first. So 25.3 is applied *exclusively* to the non-coding variants it was not calibrated for. It is a discovery rank (≈ top 0.3% genome-wide), **not** ACMG PP3 evidence ([limitations.md §4](limitations.md)).
 
 ### Masks (REFERENCE / TARGET — not implemented)
 
@@ -283,7 +283,7 @@ denovolyzeByGene(genes = dnm$gene, classes = dnm$class, nsamples = n_trios)
 | Corroborative signal | **TRAPD** vs gnomAD v4.1 exomes | NOT IMPLEMENTED | `burden.corroborative_trapd` is reserved |
 | Frequency oracle / field | gnomAD **v4.1** point AF via the VEP cache, **grpmax proxy** (max over AFR/AMR/EAS/NFE/SAS) | IMPLEMENTED | **Not `faf95`** — no AC/AN in the cache. Never internal cohort AC/AN; never `MAX_AF` or global AF |
 | Rarity gate (dominant / de novo candidate) | grpmax-proxy AF **< 1e-4** | IMPLEMENTED | `nhomalt` / absent-or-singleton gates are **retired** — no `nhomalt` field exists |
-| Functional ladder | `IMPACT` ∈ {HIGH, MODERATE}, **else** `CADD_PHRED ≥ 25.3` | IMPLEMENTED | Two rungs, whole ladder. 25.3 is off-label on non-coding |
+| Functional ladder | `IMPACT` ∈ {HIGH, MODERATE}, **else** `SpliceAI Δ ≥ 0.2`, **else** `CADD_PHRED ≥ 25.3` | IMPLEMENTED | Three rungs, whole ladder. 25.3 is off-label on non-coding |
 | Masks | **M1** = LOFTEE HC no-flag; **M2** = M1 ∪ (REVEL ≥ 0.5 or AlphaMissense LP or CADD ≥ 20) | REFERENCE | Neither computable: no LOFTEE, no REVEL/AlphaMissense |
 | De novo genotype QC | GQ ≥ 20, DP ≥ 20, het AB 0.25–0.75, parent alt AD ≤ 1 | IMPLEMENTED | `hiConfDeNovo` screen when the tag is present |
 | Exome-wide significance | **P < 2.5e-6** | IMPLEMENTED | ~0.05 / 20,000 genes |

@@ -8,7 +8,7 @@ How this pipeline uses GATK genotype-refinement annotations, per-genotype QC gat
 > ### ⚠ The rarity field in this document is **not** `faf95`
 >
 > The pipeline runs a **VEP-only contract**: annotations come from a VEP 115 GRCh38 cache plus the
-> CADD plugin, and nothing else. The cache carries **no AC/AN**, so `faf95` (a 95% CI lower bound)
+> CADD and SpliceAI plugins, and nothing else. The cache carries **no AC/AN**, so `faf95` (a 95% CI lower bound)
 > **cannot be computed at any price** — it is a **TARGET**, not what runs. Every rarity gate below
 > is applied to the **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the
 > grpmax-eligible groups (`AFR/AMR/EAS/NFE/SAS`), `annotations.frequency()`. The **numbers** are

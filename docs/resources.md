@@ -57,7 +57,7 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 |---|---|---|---|---|
 | GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~1 GB (gz) |
 | VEP indexed cache (r115) | **everything**: consequence/IMPACT, gnomAD v4.1 AFs, ClinVar `CLIN_SIG` | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~24 GB |
-| CADD SNV + indel | CADD plugin — the sole functional predictor, genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
+| CADD SNV + indel | CADD plugin — the general-purpose functional predictor (SpliceAI covers splice), genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
 | VEP plugin **code** (`.pm`) | CADD (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
 | Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) — **optional**, skipped if unset | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
 | Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) — **optional**, skipped if unset | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
