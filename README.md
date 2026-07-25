@@ -38,7 +38,7 @@ for the vetted design and the artifact each step produces):
 | resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
 | 0 | Per-trio QC gate (Mendelian error + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
-| 2 | Annotate the union **once** (VEP 115 cache + CADD plugin; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
+| 2 | Annotate the union **once** (VEP 115 cache + CADD and SpliceAI plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
 | 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
@@ -68,8 +68,8 @@ internal cohort AC/AN would be fiction. The trios' stale embedded annotations (o
 are stripped here and re-computed fresh.
 
 **2. Annotate once.** The cohort site list is annotated a single time (VEP is *never* run per
-trio), from a **single source**: VEP 115 (consequence/IMPACT/SYMBOL/HGVS/MANE) + the **CADD**
-plugin, with gnomAD v4.1 per-population AFs (`--af_gnomade`/`--af_gnomadg`) and ClinVar
+trio), from a **single source**: VEP 115 (consequence/IMPACT/SYMBOL/HGVS/MANE) + the **CADD** and
+**SpliceAI** plugins, with gnomAD v4.1 per-population AFs (`--af_gnomade`/`--af_gnomadg`) and ClinVar
 `CLIN_SIG` (`--check_existing`) coming out of the cache itself. The CSQ fields are lifted to
 INFO with a `vep_` prefix (`bcftools +split-vep`); **nothing is transferred in from an external
 sites VCF**. Already have a VEP 115 VCF? Point `resources.vep.annotated_vcf` at it and Step 2
@@ -92,8 +92,9 @@ an override, and also rescues a variant from the rarity gate. Each kept site is 
 (`hprv_keep_reason`). Gene lists and constraint are **not** applied here (never-drop rule), so
 novel genes survive.
 
-Two caveats a reader must hold onto. **CADD is the entire non-coding screen** — every missense is
-IMPACT=MODERATE and is kept a rung earlier, so 25.3 (Pejaver-2022's PP3-supporting cutoff,
+Two caveats a reader must hold onto. **CADD is the entire NON-SPLICE non-coding screen** (SpliceAI
+covers the splice-disrupting class a rung above it) — every missense is
+IMPACT=MODERATE and is kept at rung 1, so 25.3 (Pejaver-2022's PP3-supporting cutoff,
 calibrated on *missense only*) is applied exclusively to non-coding variants it was never
 calibrated for. Treat it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3
 evidence. And the P/LP override is **unstarred** — the cache has no `CLNREVSTAT`, so the ≥2★ gate

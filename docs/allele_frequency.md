@@ -7,8 +7,8 @@ How this pipeline decides whether a variant is rare enough to be a high-priority
 
 > ### ⚠ Status: what of this document runs
 >
-> The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD plugin, and
-> no other resource file. That determines which half of this document is code and which half is
+> The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD and SpliceAI
+> plugins, and no other resource file. That determines which half of this document is code and which half is
 > reference science:
 >
 > | Section | Status |

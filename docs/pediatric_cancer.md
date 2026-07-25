@@ -9,12 +9,16 @@ How this pipeline recognizes and tiers germline cancer-predisposition-syndrome (
 >
 > The CPS tiering described here (gene-list union, second-hit boost, graded PVS1) is **not wired
 > into the pipeline** — it is the design for a reporting overlay. Two corrections to the rarity
-> statements below, from the **VEP-only contract** (VEP 115 cache + CADD plugin, nothing else):
+> statements below, from the **VEP-only contract** (VEP 115 cache + CADD and SpliceAI plugins,
+> nothing else):
 > the shared rarity gate reads a gnomAD v4.1 **grpmax point-estimate proxy**, **not** `faf95` (the
 > cache has no AC/AN ⇒ faf95 is unrecoverable, a TARGET); and **`nhomalt` does not exist**, so
 > every "absent-or-singleton + low `nhomalt`" condition below is a TARGET, not a live gate.
-> Likewise LOFTEE HC, SpliceAI, REVEL/AlphaMissense and ClinVar **stars** are all unavailable — a
-> "ClinVar P/LP at ≥ 2★" rule is currently **unimplementable**.
+> Likewise LOFTEE HC, REVEL/AlphaMissense and ClinVar **stars** are unavailable — a
+> "ClinVar P/LP at ≥ 2★" rule is currently **unimplementable**. **SpliceAI IS available** (a VEP
+> plugin over the precomputed raw scores, required by default), so splice-disrupting rules below
+> are live rather than TARGET — but only via the precomputed set, which covers all SNVs yet only
+> 1 nt insertions and deletions ≤ 4 nt.
 > Full ledger: **[limitations.md](limitations.md)**.
 
 ## TL;DR

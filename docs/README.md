@@ -81,6 +81,13 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 | Recessive / comp-het | **1e-2** per allele (permissive); **1e-3** high-confidence tier | applied per variant, not per gene |
 | Benign, all modes | drop if AF ≥ **0.05** (ClinGen BA1) | never rescue |
 
+**Where each gate fires** (they are not all Step 3): Step 3 applies only the PERMISSIVE union
+cutoff `recessive_max` **1e-2** plus BA1 **0.05**, so a dominant-range variant is NOT dropped
+there. `dominant_max` **1e-4** and `recessive_strict` **1e-3** are applied at **Step 5**
+(`05_inheritance_screen.py`), the latter tagging a call `high_conf_rarity` rather than dropping
+it. That ordering is deliberate: selection stays inheritance-agnostic, and the mode-specific
+cutoff is only meaningful once a mode has been assigned.
+
 PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity gate itself.
 
 ### Functional / in-silico
