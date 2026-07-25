@@ -379,7 +379,11 @@ else sel="worst"; fi
 case "$sel" in
     all|worst|primary) ;;   # available in every bcftools that ships split-vep (since 1.10)
     *)
-        _bcf_v="$(hprv_run -- bcftools --version 2>/dev/null | head -1 | awk '{print $2}')"
+        # `|| true`: `head -1` can SIGPIPE bcftools (exit 141) which pipefail+set -e would turn
+        # into a silent abort. bcftools' version banner is small enough to usually fit the pipe
+        # buffer, so this is latent rather than firing — but it is the same trap as
+        # scripts/download_spliceai.sh, and the guard below already handles an empty value.
+        _bcf_v="$(hprv_run -- bcftools --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
         _bcf_maj="${_bcf_v%%.*}"; _bcf_rest="${_bcf_v#*.}"; _bcf_min="${_bcf_rest%%.*}"
         if [[ ! "$_bcf_maj" =~ ^[0-9]+$ || ! "$_bcf_min" =~ ^[0-9]+$ ]]; then
             # Unparseable version (odd build): warn rather than block. bcftools' own error is

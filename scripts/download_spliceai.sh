@@ -115,7 +115,10 @@ $(printf '%s\n' "$CONTENTS" | sed 's/^/    /')";;
     "$BS" download file -i "$fid" -o "$DIR" || die "download failed for $name (id $fid)"
     # bs may nest the file in a subdir; normalize to $DIR/$name.
     if [[ ! -f "$out" ]]; then
-        found="$(find "$DIR" -maxdepth 3 -name "$name" -type f 2>/dev/null | head -1)"
+        # `|| true`: same SIGPIPE trap as below — `find` keeps traversing after printing its
+        # first match, so `head -1` closes the pipe under it and it exits 141, which pipefail
+        # + set -e would turn into a silent abort right after a multi-GB download.
+        found="$(find "$DIR" -maxdepth 3 -name "$name" -type f 2>/dev/null | head -1 || true)"
         [[ -n "$found" ]] && mv -f "$found" "$out"
     fi
     _valid "$out" || die "downloaded $name is missing or a corrupt/truncated bgzip — re-run to resume"
@@ -129,11 +132,19 @@ for f in "$DIR/$SNV" "$DIR/$INDEL"; do
 done
 
 # --- verify each is queryable (a tabix fetch returns >=1 record) ----------------------
+# SIGPIPE TRAP — the `|| true` inside each $( ) is load-bearing, do not "clean it up":
+# `head` exits as soon as it has its lines and closes the pipe, so the PRODUCER (tabix) dies of
+# SIGPIPE = exit 141. Under `set -o pipefail` that becomes the pipeline's status, and under
+# `set -e` the assignment aborts the script — silently, before the guard below can report anything.
+# It fires precisely when the file is HEALTHY (a real score file returns far more than 1000
+# records), so without this the script could essentially never reach its success path; it exited
+# 141 with no ERROR: line. Verified: `tabix f.gz 1 | head -1000` gives PIPESTATUS "141 0".
+# The `|| true` swallows ONLY the pipe status — the [[ ]] guards still fail loudly on a broken file.
 for f in "$DIR/$SNV" "$DIR/$INDEL"; do
-    c0="$(tabix -l "$f" 2>/dev/null | head -1)"
+    c0="$(tabix -l "$f" 2>/dev/null | head -1 || true)"
     [[ -n "$c0" ]] || die "no contigs in $(basename "$f") index — the file/index is broken"
-    n="$(tabix "$f" "$c0" 2>/dev/null | head -1000 | wc -l | tr -d ' ')"
-    [[ "$n" -gt 0 ]] || die "tabix query on $(basename "$f") ($c0) returned 0 records — file/index mismatch"
+    n="$(tabix "$f" "$c0" 2>/dev/null | head -1000 | wc -l | tr -d ' ' || true)"
+    [[ "${n:-0}" -gt 0 ]] || die "tabix query on $(basename "$f") ($c0) returned 0 records — file/index mismatch"
 done
 log "verified: both raw hg38 score files present, intact, and queryable."
 
@@ -141,8 +152,18 @@ log "verified: both raw hg38 score files present, intact, and queryable."
 #     'chr'-prefixed, the SpliceAI plugin's tabix queries silently return nothing (exit 0).
 #     Warn loudly (never rewrite) so you catch it before a whole annotation run comes back empty. ---
 if [[ -n "$REF" && -f "$REF.fai" ]]; then
-    ref_chr="$(cut -f1 "$REF.fai" | grep -qx chr1 && echo chr || echo nochr)"
-    sai_chr="$(tabix -l "$DIR/$SNV" 2>/dev/null | grep -qx chr1 && echo chr || echo nochr)"
+    # Same SIGPIPE trap, but this form failed SILENTLY WRONG rather than aborting: `grep -q` exits
+    # at the FIRST match, SIGPIPEs its producer, pipefail makes the pipeline 141, the `&&` is
+    # skipped and the `||` returns "nochr" — so a genuinely chr-prefixed reference was reported as
+    # 'nochr' and this whole mismatch check silently inverted. (Reproduced on a large .fai:
+    # `cut -f1 big.fai | grep -qx chr1` gives PIPESTATUS "141 0" and the expression yields nochr.)
+    # `grep -cx` reads to EOF, so it can never SIGPIPE the producer; `|| true` absorbs grep's
+    # exit 1 on no-match. Counting, not short-circuiting, is what makes this correct.
+    _chr_style() {  # $1 = command output on stdin -> "chr" | "nochr"
+        [[ "$(cat | grep -cx chr1 || true)" -gt 0 ]] && printf chr || printf nochr
+    }
+    ref_chr="$(cut -f1 "$REF.fai" | _chr_style)"
+    sai_chr="$(tabix -l "$DIR/$SNV" 2>/dev/null | _chr_style)"
     if [[ "$ref_chr" != "$sai_chr" ]]; then
         log "WARNING: CONTIG-NAMING MISMATCH — your reference is '${ref_chr}'-style but the SpliceAI VCF is '${sai_chr}'-style."
         log "         VEP maps to the cache's naming internally, so this is usually fine — BUT if Step 2 warns 'no vep_SpliceAI_pred_DS_* lifted',"
