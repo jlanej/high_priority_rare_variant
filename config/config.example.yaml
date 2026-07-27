@@ -322,6 +322,13 @@ outputs:
     # mount — the most expensive operation in the pipeline. The NHF denominator is fixed at
     # CLASSIFY time instead (nonhuman_screen.exclude_flags below), which costs no mount I/O.
     # Set non-zero only if you deliberately want a thinner archive.
+    # CHANGING THIS NEVER RE-SLICES. The cache key is the candidate-REGION key only; the mask is
+    # recorded beside it and a mismatch warns rather than invalidating. Re-slicing re-reads the
+    # source CRAM over a (often flaky, often slow) mount, and a mask change buys nothing
+    # analytically — the classify-time filter is applied to a temp copy either way, so NHF is
+    # identical whether the archive is thin or complete; only what an IGV reviewer sees differs.
+    # To actually re-cut a slice, delete its .cram and .cram.done. A genuine candidate-region
+    # change DOES still invalidate, which is the invalidation that matters.
     exclude_flags: 0
     nonhuman_screen:
       # Reads excluded at CLASSIFY time (samtools -F bitmask), applied to a temporary copy of the

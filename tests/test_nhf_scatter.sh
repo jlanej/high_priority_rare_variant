@@ -222,32 +222,38 @@ chk "changing the classify mask did NOT re-slice the mini-CRAM" \
 chk "changing the classify mask DID recompute NHF (now counts every archived read)" \
     '[[ "$nhf_reads_unfiltered" -eq "$mini_total" ]]'
 
-# --- MIGRATION: which cached mini-CRAMs must be re-sliced off the source mount, and which must not.
-# Re-slicing is the most expensive operation in the pipeline (source CRAM over a flaky FUSE/SBFS
-# mount), so a cache that is ALREADY correct must survive the upgrade untouched.
+# --- MIGRATION: a cached mini-CRAM must NEVER be re-sliced just because the -F mask changed.
+# Re-slicing re-reads the source CRAM over a flaky FUSE/SBFS mount — the most expensive operation
+# in the pipeline — and buys nothing analytically: the classify-time filter is applied to a temp
+# copy regardless, so NHF is identical whether the archive is thin or complete. Only what an IGV
+# reviewer sees differs, which warrants a warning and an explicit rm, not hours of I/O.
 cram="$W/igv/crams/T1/KID1.cram"
 md5_now="$(python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$cram")"
+region_key="$(sed 's/-F[0-9]*$//' "$cram.done")"
 
-# (a) LEGACY cache: sliced before this feature existed, so its .done holds a bare bed key and the
-#     archive is COMPLETE (nothing was filtered). It must be REUSED, not re-fetched.
-legacy_key="$(cksum < "$T/tmp/T1.merged.bed" 2>/dev/null | awk '{print $1"-"$2}')"
-if [[ -n "$legacy_key" ]]; then
-    printf '%s\n' "$legacy_key" > "$cram.done"
-    run8 >/dev/null 2>&1
-    chk "a LEGACY-keyed mini-CRAM (no -F suffix) is reused, not re-sliced" \
-        '[[ "$(python3 -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],\"rb\").read()).hexdigest())" "$cram")" == "$md5_now" \
-            && "$(cat "$cram.done")" == "$legacy_key" ]]'
-else
-    echo "SKIP legacy-key reuse (merged BED not retained in tmp)"
-fi
-
-# (b) A cache sliced under a NON-ZERO mask is genuinely INCOMPLETE (reads were dropped), so it must
-#     be re-sliced under the new archive-everything default.
-printf '%s\n' "deadbeef-1-F1796" > "$cram.done"
+# (a) LEGACY cache (bare region key, written before this feature existed): reused, not re-fetched.
+printf '%s\n' "$region_key" > "$cram.done"
 run8 >/dev/null 2>&1
-chk "a mini-CRAM cached under a non-zero -F mask IS re-sliced (its archive was incomplete)" \
-    '[[ "$(cat "$cram.done")" != "deadbeef-1-F1796" ]]'
-chk "the re-sliced mini-CRAM again archives the duplicates" \
+chk "a LEGACY-keyed mini-CRAM (bare region key) is REUSED, not re-sliced" \
+    '[[ "$(python3 -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],\"rb\").read()).hexdigest())" "$cram")" == "$md5_now" ]]'
+
+# (b) cached under a DIFFERENT mask, same region: reused + warned (this is the case that was
+#     re-downloading an entire cohort's mini-CRAMs for no analytical gain).
+printf '%s\n' "${region_key}-F1796" > "$cram.done"
+run8 > "$T/mig.log" 2>&1
+chk "a mini-CRAM cached under a different -F mask is REUSED, not re-sliced" \
+    '[[ "$(python3 -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],\"rb\").read()).hexdigest())" "$cram")" == "$md5_now" ]]'
+chk "...and the mask change is WARNED about (not silent)" \
+    'grep -q "sliced with --exclude-flags 1796" "$T/mig.log"'
+chk "...and the warning tells the operator how to force a re-slice" \
+    'grep -q "To re-slice, rm" "$T/mig.log"'
+
+# (c) a genuine REGION change still invalidates — that is the invalidation that matters.
+printf '%s\n' "deadbeef-1-F0" > "$cram.done"
+run8 >/dev/null 2>&1
+chk "a mini-CRAM whose REGION key changed IS re-sliced" \
+    '[[ "$(sed "s/-F[0-9]*$//" "$cram.done")" == "$region_key" ]]'
+chk "the re-sliced mini-CRAM archives the duplicates (slice mask still 0)" \
     '[[ "$(samtools view -c -f 1024 "$cram")" -eq "$dups_in_source" ]]'
 
 [[ "$fail" -eq 0 ]] && echo "All Step-8b scatter/gather tests passed." \

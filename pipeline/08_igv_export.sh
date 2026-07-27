@@ -254,19 +254,29 @@ done < <(tail -n +2 "$resolved")
 extract_one() {
     set +e
     local trio="$1" role="$2" sample="$3" src="$4" merged="$5" ocram="$6" attempt
-    # Key includes EXCLUDE_FLAGS: changing the filter changes what the slice CONTAINS, so a cached
-    # mini-CRAM sliced under a different mask must be regenerated, not silently reused.
-    # BUT the suffix is OMITTED when the mask is 0. Migration matters here: re-slicing means
-    # re-reading the source CRAM over a flaky FUSE/SBFS mount, the most expensive thing we do.
-    #   * mask 0 == unfiltered == exactly what a legacy slice (keyed before this feature existed)
-    #     already contains, so it keeps the bare legacy key and is REUSED, not re-fetched.
-    #   * a slice cached under a non-zero mask carries "-F<mask>" and therefore does NOT match the
-    #     default key — correctly re-sliced, because that archive is genuinely incomplete.
-    local donef="${ocram}.done" key; key="$(_bed_key "$merged")"
-    [[ "$EXCLUDE_FLAGS" -gt 0 ]] && key="${key}-F${EXCLUDE_FLAGS}"
+    # The cache key is the REGION key ONLY; the -F mask is RECORDED alongside it but never
+    # invalidates. Re-slicing re-reads the source CRAM over a flaky FUSE/SBFS mount — the single
+    # most expensive operation in the pipeline — and a mask change does not justify paying it:
+    #   * NHF is unaffected either way. The classify-time filter (--nhf-exclude-flags) is applied
+    #     to a temp copy regardless, and filtering an already-filtered slice is a no-op, so the
+    #     numbers are identical whether the archive is thin or complete.
+    #   * The only real difference is what an IGV reviewer can see. That is worth a LOUD WARNING
+    #     and an operator's explicit `rm`, not hours of automatic re-download.
+    #   * A genuine content change (different candidate loci => different merged BED) still
+    #     changes the region key and DOES re-slice, which is the invalidation that matters.
+    # Legacy .done files (written before this feature) hold a bare region key and no mask; they
+    # parse as "mask 0" = unfiltered, which is exactly what they contain.
+    local donef="${ocram}.done" key have have_bed have_mask
+    key="$(_bed_key "$merged")"
+    have="$(cat "$donef" 2>/dev/null || true)"
+    have_bed="${have%%-F*}"
+    if [[ "$have" == "$have_bed" ]]; then have_mask=0; else have_mask="${have##*-F}"; fi
+    if [[ -n "$have_bed" && "$have_bed" == "$key" && "$have_mask" != "$EXCLUDE_FLAGS" ]]; then
+        warn "  [$trio] $role $sample: mini-CRAM was sliced with --exclude-flags $have_mask, now $EXCLUDE_FLAGS. REUSING it (NHF is unaffected — the classify-time filter is applied to a temp copy either way; only what a reviewer sees in IGV differs). To re-slice, rm '$ocram' '$donef' — that re-reads the source CRAM."
+    fi
     # Idempotent skip — LOCAL reads only, NEVER $src (that is the point): a prior slice for the
     # CURRENT region key that is present, indexed, and passes quickcheck. Its .done records the key.
-    if [[ -f "$donef" && -s "$ocram" && -f "$ocram.crai" && "$(cat "$donef" 2>/dev/null)" == "$key" ]] \
+    if [[ -f "$donef" && -s "$ocram" && -f "$ocram.crai" && "$have_bed" == "$key" ]] \
        && hprv_run -- samtools quickcheck "$ocram" 2>/dev/null; then
         return 3
     fi
@@ -277,7 +287,7 @@ extract_one() {
                 --write-index -o "$ocram" "$src" 2>/dev/null \
            && [[ -s "$ocram" && -f "$ocram.crai" ]] \
            && hprv_run -- samtools quickcheck "$ocram" 2>/dev/null; then
-            printf '%s\n' "$key" > "$donef"   # stamp completion with the region key we sliced for
+            printf '%s\n' "${key}-F${EXCLUDE_FLAGS}" > "$donef"   # region key + the mask this slice was cut with
             return 0
         fi
         rm -f "$ocram" "$ocram.crai"
