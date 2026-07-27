@@ -11,7 +11,7 @@
 # submit_slurm.sh) AND by the gather step's own shard-completeness check.
 # =============================================================================
 set -euo pipefail
-PHASE="${1:?phase.sbatch needs a phase: prep|plan|scatter|gather|downstream}"
+PHASE="${1:?phase.sbatch needs a phase: prep|plan|scatter|gather|downstream|nhf-plan|nhf-scatter|nhf-gather}"
 # $HERE is RELIABLE only when this file is run directly (a test, or a manual invocation). Under
 # sbatch it is NOT: SLURM copies the batch script into the job spool dir and runs it as
 # `slurm_script`, so ${BASH_SOURCE[0]} points at /var/spool/slurmd/job<ID>/, not this file on
@@ -96,6 +96,54 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         # otherwise — never a partial call set), concats, then finishes Step 2 (split-vep + guards).
         log "gather shards -> annotated union"
         rp --from 2 --to 2 --annotate-gather
+        ;;
+    nhf-plan)
+        # Step 8b (NHF) as a PER-TRIO array. Requires a COMPLETED Step 8 — the array reads the
+        # mini-CRAMs and per-trio VCFs that Step 8's Pass 1/2 produce, and deliberately does not
+        # rebuild them (concurrent rebuilds would corrupt shared state). Unlike the Step-2 scatter,
+        # 8b touches NO source-CRAM mount, so it is safe on batch compute even where slicing is not.
+        MANIFEST="${WORK:?}/igv/nhf_trios.txt"
+        mkdir -p "$(dirname "$MANIFEST")"
+        rp --from 8 --to 8 --nhf-emit-manifest "$MANIFEST"
+        n=$(grep -cve '^[[:space:]]*$' "$MANIFEST" 2>/dev/null || true); n=${n:-0}
+        if [[ "$n" -eq 0 ]]; then
+            log "no trios need NHF work — nothing to scatter; running gather to refresh variants.tsv"
+            rp --from 8 --to 8 --nhf-gather
+            exit 0
+        fi
+        SELF="$SLURM_DIR/phase.sbatch"
+        [[ -f "$SELF" ]] || { echo "phase.sbatch: cannot find self at '$SELF'" >&2; exit 2; }
+        log "submitting NHF array of $n trio(s) (max ${NHF_CONCURRENCY:-8} concurrent) + gather"
+        arr=$(sbatch --parsable \
+                --cpus-per-task="${NHF_CPUS:-8}" --mem="${NHF_MEM:-32G}" --time="${NHF_TIME:-04:00:00}" \
+                --array=0-$((n - 1))%"${NHF_CONCURRENCY:-8}" \
+                ${SLURM_ACCOUNT:+--account="$SLURM_ACCOUNT"} ${SLURM_PARTITION:+--partition="$SLURM_PARTITION"} \
+                "$SELF" nhf-scatter)
+        sbatch --parsable --dependency=afterany:"$arr" \
+                --cpus-per-task="${NHF_GATHER_CPUS:-2}" --mem="${NHF_GATHER_MEM:-8G}" --time="${NHF_GATHER_TIME:-01:00:00}" \
+                ${SLURM_ACCOUNT:+--account="$SLURM_ACCOUNT"} ${SLURM_PARTITION:+--partition="$SLURM_PARTITION"} \
+                "$SELF" nhf-gather >/dev/null
+        # afterANY, not afterok: a failed trio is a legitimate outcome here (blank NHF columns),
+        # so the join must still run and report what is missing rather than the DAG stalling.
+        ;;
+    nhf-scatter)
+        # One array task -> one trio. $SLURM_ARRAY_TASK_ID indexes the manifest (0-based).
+        MANIFEST="${WORK:?}/igv/nhf_trios.txt"
+        [[ -f "$MANIFEST" ]] || { echo "phase.sbatch: missing $MANIFEST (run nhf-plan first)" >&2; exit 2; }
+        trio=$(awk -v i="$((SLURM_ARRAY_TASK_ID + 1))" 'NR==i{print; exit}' "$MANIFEST")
+        [[ -n "$trio" ]] || { echo "phase.sbatch: no trio at manifest line $((SLURM_ARRAY_TASK_ID + 1))" >&2; exit 2; }
+        # Task-private TMPDIR: 8b writes a carriers list + per-member .err under $HPRV_TMPDIR, and
+        # concurrent tasks sharing one path would read each other's half-written files.
+        export HPRV_TMPDIR="${HPRV_TMPDIR:-/tmp}/nhf.$trio.$$"
+        mkdir -p "$HPRV_TMPDIR"
+        log "NHF trio $trio (array task $SLURM_ARRAY_TASK_ID)"
+        rp --from 8 --to 8 --nhf-trio "$trio"
+        ;;
+    nhf-gather)
+        # Join only: fold whatever NHF results exist into variants.tsv. Never dies on an
+        # unscreened member — that is a legitimate state (see 08_igv_export.sh).
+        log "NHF gather -> variants.tsv"
+        rp --from 8 --to 8 --nhf-gather
         ;;
     downstream)
         # Range is configurable (DOWN_FROM..DOWN_TO, default 3..8). Some sites must stop the

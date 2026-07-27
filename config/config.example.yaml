@@ -331,11 +331,23 @@ outputs:
       min_reads: 5                # denominator floor for the derived nhf_flag: an NHF over fewer than
                                   #   this many ALT reads is too noisy to flag (the raw *_nhf_reads
                                   #   count is ALWAYS emitted beside each *_nhf so the reviewer sees it).
-      memory_mapping: true        # mmap the kraken2 DB instead of loading it into private RAM. Keeps
-                                  #   RAM low AND — because invocations run sequentially on a node —
-                                  #   lets the OS page cache stay warm across trios, collapsing the
-                                  #   per-invocation DB-load cost. Put the DB on LOCAL disk/NVMe, not
-                                  #   a FUSE mount, for this to pay off. See docs/resources.md.
+      memory_mapping: true        # mmap the kraken2 DB instead of loading it into private RAM, so
+                                  #   concurrent tasks share one mapping instead of each faulting in a
+                                  #   private copy. Put the DB on shared NVMe (NOT a FUSE mount, and
+                                  #   NOT staged to node-local scratch — a full DB is hundreds of GB,
+                                  #   larger than typical local disk, and the copy costs more than it
+                                  #   saves). See docs/resources.md.
+      threads: 0                  # nonhuman-screen --threads. 0 => fall back to outputs.igv.extract_jobs.
+                                  #   DECOUPLED on purpose: extract_jobs bounds concurrent CRAM slices
+                                  #   and is kept small because the SOURCE CRAM mount is often a flaky
+                                  #   FUSE/SBFS share; NHF classification reads only the already-sliced
+                                  #   mini-CRAMs, is CPU-bound, and scales with threads. Raise this to
+                                  #   the cores of your Step-8b job.
+                                  # SCALE: classification (not DB load) dominates — ~20 min/trio on WGS.
+                                  #   For a large cohort run Step 8b as a PER-TRIO job array instead of
+                                  #   the serial loop; see pipeline/slurm/README.md (nhf-plan /
+                                  #   nhf-scatter / nhf-gather). It requires a completed Step 8 first,
+                                  #   since the array reads the mini-CRAMs that pass produces.
 
 # --- Honest scope limitations (documented, enforced as warnings) ---
 scope:
