@@ -332,7 +332,7 @@ outputs:
     # confidence exactly where the floor is meant to prevent it.
     # Also applies to the IGV review track (IGV hides duplicates by default anyway). Set 0 to keep
     # every read. Changing this re-slices: the value is part of each mini-CRAM's .done key.
-    exclude_flags: 3844
+    exclude_flags: 1796
     nonhuman_screen:
       enabled: true               # ON by default. ACTIVATES only when resources.kraken2_db is set
                                   #   AND mini-CRAMs exist (needs resources.cram_map); otherwise Step

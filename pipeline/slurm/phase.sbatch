@@ -102,7 +102,7 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         # mini-CRAMs and per-trio VCFs that Step 8's Pass 1/2 produce, and deliberately does not
         # rebuild them (concurrent rebuilds would corrupt shared state). Unlike the Step-2 scatter,
         # 8b touches NO source-CRAM mount, so it is safe on batch compute even where slicing is not.
-        MANIFEST="${WORK:?}/igv/nhf_trios.txt"
+        MANIFEST="$HPRV_WORK/igv/nhf_trios.txt"
         mkdir -p "$(dirname "$MANIFEST")"
         rp --from 8 --to 8 --nhf-emit-manifest "$MANIFEST"
         n=$(grep -cve '^[[:space:]]*$' "$MANIFEST" 2>/dev/null || true); n=${n:-0}
@@ -128,7 +128,7 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         ;;
     nhf-scatter)
         # One array task -> one trio. $SLURM_ARRAY_TASK_ID indexes the manifest (0-based).
-        MANIFEST="${WORK:?}/igv/nhf_trios.txt"
+        MANIFEST="$HPRV_WORK/igv/nhf_trios.txt"
         [[ -f "$MANIFEST" ]] || { echo "phase.sbatch: missing $MANIFEST (run nhf-plan first)" >&2; exit 2; }
         trio=$(awk -v i="$((SLURM_ARRAY_TASK_ID + 1))" 'NR==i{print; exit}' "$MANIFEST")
         [[ -n "$trio" ]] || { echo "phase.sbatch: no trio at manifest line $((SLURM_ARRAY_TASK_ID + 1))" >&2; exit 2; }

@@ -78,3 +78,9 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# stray Step-8b test artifacts (a stub scorer with an empty --out-prefix writes these)
+.summary.json
+.variant_nhf.tsv
+*.variant_nhf.tsv
+*.summary.json
