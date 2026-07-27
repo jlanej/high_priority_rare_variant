@@ -56,18 +56,37 @@ WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}
 # Step 8b (non-human-fraction) options; empty KRAKEN2_DB => 8b disabled. Supplied ONLY via
 # --kraken2-db (run_pipeline.sh passes it only when outputs.igv.nonhuman_screen.enabled AND a DB is
 # set) — deliberately NOT defaulted from $HPRV_KRAKEN2_DB, so the enable gate lives in one place.
-# Reads EXCLUDED when slicing the mini-CRAMs, as a samtools -F bitmask. Default 3844 = 0xF04 =
-# unmapped(0x4) + secondary(0x100) + QC-fail(0x200) + duplicate(0x400) + supplementary(0x800) —
-# the standard pileup mask. This matters for Step 8b: nonhuman-screen fetches reads with NO flag
-# filtering (verified in its source; pysam's fetch() returns duplicates by default), and it
-# de-duplicates only by query_name, which collapses the two mates of ONE pair but NOT PCR/optical
-# duplicates (distinct query names, same fragment). So without this, N copies of one contaminating
-# fragment count as N independent ALT reads — inflating the nhf_reads denominator and letting a
-# locus clear `min_reads` on far fewer real fragments than it appears to have. Filtering at slice
-# time fixes it in one place, keeps the pinned nonhuman-screen commit untouched, and makes the
-# mini-CRAMs smaller/faster to classify. NB it also applies to the IGV review track (IGV hides
-# duplicates by default anyway); set 0 to keep every read.
-EXCLUDE_FLAGS=3844
+# Reads EXCLUDED when slicing the mini-CRAMs, as a samtools -F bitmask.
+# Default 1796 = 0x704 = unmapped(0x4) + secondary(0x100) + QC-fail(0x200) + duplicate(0x400).
+#
+# This set is chosen to MATCH GATK HaplotypeCaller's own default read filters, so the mini-CRAM
+# holds (approximately) the reads that actually produced the call. From
+# HaplotypeCallerEngine.makeStandardHCReadFilters(): MAPPED, NOT_SECONDARY_ALIGNMENT, NOT_DUPLICATE,
+# PASSES_VENDOR_QUALITY_CHECK — exactly the four bits above.
+#
+# NOT 0x800 (supplementary), deliberately. GATK ships NotSupplementaryAlignmentReadFilter but does
+# NOT apply it by default, so HaplotypeCaller DOES use supplementary alignments — they are the
+# chimeric/breakpoint-spanning evidence for larger indels. Excluding them would drop reads that
+# contributed to the variant call. (No double-counting risk: nonhuman-screen keys by query_name,
+# and a supplementary shares its primary's name, so the pair collapses to one sequence.)
+#
+# Why filter at all — Step 8b: nonhuman-screen fetches reads with NO flag filtering (verified in
+# its source; pysam's fetch() returns duplicates by default), and de-duplicates only by query_name,
+# which collapses the two mates of ONE pair but NOT PCR/optical duplicates (distinct names, same
+# fragment). Without this, N copies of one contaminating fragment count as N independent ALT reads,
+# inflating the nhf_reads denominator so a locus clears `min_reads` on far fewer real fragments
+# than it appears to have. Filtering here fixes it in one place, keeps the pinned nonhuman-screen
+# commit untouched, and makes the mini-CRAMs smaller/faster to classify.
+#
+# KNOWN DIVERGENCE (deliberate): HC also filters MAPPING QUALITY < 20; we do not. A `-F` mask
+# cannot express it, but more importantly NHF exists partly to detect MIS-MAPPING, and low-MQ reads
+# at a locus are precisely that signal — filtering them would blind the screen to what it is for.
+# So our read set is intentionally BROADER than the caller's at the low-MQ end. HC's GOOD_CIGAR /
+# NON_ZERO_REFERENCE_LENGTH / Wellformed filters are likewise not expressible as flags.
+#
+# NB this mask also applies to the IGV review track (IGV hides duplicates by default anyway);
+# set 0 to keep every read.
+EXCLUDE_FLAGS=1796
 KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
 # NHF classification threads, DECOUPLED from --jobs. --jobs bounds concurrent CRAM slices and is
 # deliberately small (a flaky FUSE/SBFS mount); NHF classification is CPU-bound, reads only the
