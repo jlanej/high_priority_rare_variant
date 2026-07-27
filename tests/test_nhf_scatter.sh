@@ -20,6 +20,11 @@
 #   5. --nhf-gather with an unscreened member WARNS and still writes variants.tsv —
 #      never dies, never implies completeness (unlike Step 2's --annotate-gather, an
 #      unscreened member here is legitimate: `members: carriers` skips hom-ref parents).
+#   6. PCR/optical DUPLICATES are excluded from the mini-CRAMs (samtools -F 3844), and the
+#      mask is part of the slice .done key so changing it re-slices. nonhuman-screen does
+#      no flag filtering of its own and de-dups only by read NAME (which collapses the two
+#      mates of one pair, NOT duplicates of one fragment), so without this N copies of a
+#      contaminating fragment count as N independent ALT reads and inflate *_nhf_reads.
 #
 # Needs bcftools/samtools/bgzip/tabix + a python3 (stdlib only); self-skips if absent.
 # Run: bash tests/test_nhf_scatter.sh
@@ -51,6 +56,25 @@ mk_cram() {  # $1 = sample id
 }
 # two trios, each kid + carrier mother (so `carriers` screens 2 members per trio)
 for s in KID1 MOM1 DAD1 KID2 MOM2 DAD2; do mk_cram "$s"; done
+
+# KID1 additionally gets 3 PCR-DUPLICATE reads (flag 0x400) over chr1:100. nonhuman-screen does no
+# flag filtering and de-dups only by read NAME, so without the slice-time -F mask these would count
+# as 3 extra independent ALT reads and inflate the *_nhf_reads denominator.
+mk_cram_with_dups() {
+    local s="$1" seq qual
+    seq="$(python3 -c 'print("A"*40)')"; qual="$(python3 -c 'print(chr(73)*40)')"
+    { printf '@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:600\n@RG\tID:%s\tSM:%s\n' "$s" "$s"
+      for p in 90 190; do
+          printf '%s_%s\t0\tchr1\t%s\t60\t40M\t*\t0\t0\t%s\t%s\tRG:Z:%s\n' "$s" "$p" "$p" "$seq" "$qual" "$s"
+      done
+      for d in 1 2 3; do
+          printf '%s_dup%s\t1024\tchr1\t90\t60\t40M\t*\t0\t0\t%s\t%s\tRG:Z:%s\n' "$s" "$d" "$seq" "$qual" "$s"
+      done
+    } > "$s.sam"
+    samtools view -C -T ref.fa -o "$s.cram" "$s.sam"; samtools index "$s.cram"
+}
+mk_cram_with_dups KID1
+dups_in_source=$(samtools view -c -f 1024 KID1.cram)
 : > map.tsv
 for s in KID1 MOM1 DAD1 KID2 MOM2 DAD2; do printf '%s\t%s/%s.cram\n' "$s" "$T" "$s" >> map.tsv; done
 
@@ -157,6 +181,17 @@ run8 --nhf-gather >/dev/null 2>&1
 scatter_md5="$(python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$W/igv/variants.tsv")"
 chk "scattered variants.tsv is BYTE-IDENTICAL to the serial run" \
     '[[ "$serial_md5" == "$scatter_md5" ]]'
+
+# --- duplicate exclusion: the mini-CRAM must carry NO duplicate-flagged reads ---
+chk "fixture really contains duplicate-flagged reads (guards the test itself)" \
+    '[[ "$dups_in_source" -eq 3 ]]'
+chk "sliced mini-CRAM excludes duplicate-flagged reads (samtools -F 3844)" \
+    '[[ "$(samtools view -c -f 1024 "$W/igv/crams/T1/KID1.cram")" -eq 0 ]]'
+chk "sliced mini-CRAM keeps the real (non-duplicate) reads" \
+    '[[ "$(samtools view -c "$W/igv/crams/T1/KID1.cram")" -gt 0 ]]'
+# and the filter must be part of the cache key, or a config change would silently reuse old slices
+chk "mini-CRAM .done key records the exclude-flags mask" \
+    'grep -q -- "-F3844" "$W/igv/crams/T1/KID1.cram.done"'
 
 [[ "$fail" -eq 0 ]] && echo "All Step-8b scatter/gather tests passed." \
     || { echo "test_nhf_scatter FAILED"; exit 1; }
