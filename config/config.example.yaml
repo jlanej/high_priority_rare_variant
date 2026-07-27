@@ -314,6 +314,17 @@ outputs:
     # kraken2 and record the fraction that are NON-human — a contamination / mis-mapping signal a
     # curator uses to DOWN-RANK a call (e.g. a "variant" whose ALT reads are bacterial). Rides
     # entirely on Step 8's existing mini-CRAMs + per-trio VCFs; adds no new CRAM I/O.
+    # Reads EXCLUDED when slicing the mini-CRAMs (samtools -F bitmask).
+    # 3844 = 0xF04 = unmapped + secondary + QC-fail + DUPLICATE + supplementary — the standard
+    # pileup mask. Load-bearing for Step 8b: nonhuman-screen does no flag filtering of its own and
+    # de-duplicates only by read NAME, which collapses the two mates of one pair but NOT PCR /
+    # optical duplicates (distinct names, same original fragment). Leaving them in means N copies
+    # of one contaminating fragment count as N independent ALT reads, inflating *_nhf_reads so a
+    # locus clears `min_reads` on far fewer real fragments than it appears to have — false
+    # confidence exactly where the floor is meant to prevent it.
+    # Also applies to the IGV review track (IGV hides duplicates by default anyway). Set 0 to keep
+    # every read. Changing this re-slices: the value is part of each mini-CRAM's .done key.
+    exclude_flags: 3844
     nonhuman_screen:
       enabled: true               # ON by default. ACTIVATES only when resources.kraken2_db is set
                                   #   AND mini-CRAMs exist (needs resources.cram_map); otherwise Step

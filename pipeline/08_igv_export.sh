@@ -56,6 +56,18 @@ WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}
 # Step 8b (non-human-fraction) options; empty KRAKEN2_DB => 8b disabled. Supplied ONLY via
 # --kraken2-db (run_pipeline.sh passes it only when outputs.igv.nonhuman_screen.enabled AND a DB is
 # set) — deliberately NOT defaulted from $HPRV_KRAKEN2_DB, so the enable gate lives in one place.
+# Reads EXCLUDED when slicing the mini-CRAMs, as a samtools -F bitmask. Default 3844 = 0xF04 =
+# unmapped(0x4) + secondary(0x100) + QC-fail(0x200) + duplicate(0x400) + supplementary(0x800) —
+# the standard pileup mask. This matters for Step 8b: nonhuman-screen fetches reads with NO flag
+# filtering (verified in its source; pysam's fetch() returns duplicates by default), and it
+# de-duplicates only by query_name, which collapses the two mates of ONE pair but NOT PCR/optical
+# duplicates (distinct query names, same fragment). So without this, N copies of one contaminating
+# fragment count as N independent ALT reads — inflating the nhf_reads denominator and letting a
+# locus clear `min_reads` on far fewer real fragments than it appears to have. Filtering at slice
+# time fixes it in one place, keeps the pinned nonhuman-screen commit untouched, and makes the
+# mini-CRAMs smaller/faster to classify. NB it also applies to the IGV review track (IGV hides
+# duplicates by default anyway); set 0 to keep every read.
+EXCLUDE_FLAGS=3844
 KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
 # NHF classification threads, DECOUPLED from --jobs. --jobs bounds concurrent CRAM slices and is
 # deliberately small (a flaky FUSE/SBFS mount); NHF classification is CPU-bound, reads only the
@@ -71,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --padding) PAD="$2"; shift 2;;
         --genome) GENOME="$2"; shift 2;;
         --jobs) JOBS="$2"; shift 2;;
+        --exclude-flags) EXCLUDE_FLAGS="$2"; shift 2;;
         --kraken2-db) KRAKEN2_DB="$2"; shift 2;;
         --nhf-members) NHF_MEMBERS="$2"; shift 2;;
         --nhf-confidence) NHF_CONF="$2"; shift 2;;
@@ -85,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" -ge 1 ]] || die "--jobs must be a positive integer"
+[[ "$EXCLUDE_FLAGS" =~ ^[0-9]+$ ]] || die "--exclude-flags must be a non-negative integer (samtools -F bitmask)"
 NHF_THREADS="${NHF_THREADS:-$JOBS}"
 [[ "$NHF_THREADS" =~ ^[0-9]+$ && "$NHF_THREADS" -ge 1 ]] || die "--nhf-threads must be a positive integer"
 # The three NHF sub-modes are mutually exclusive; any of them means "distributed sub-task", which
@@ -217,7 +231,9 @@ done < <(tail -n +2 "$resolved")
 extract_one() {
     set +e
     local trio="$1" role="$2" sample="$3" src="$4" merged="$5" ocram="$6" attempt
-    local donef="${ocram}.done" key; key="$(_bed_key "$merged")"
+    # Key includes EXCLUDE_FLAGS: changing the filter changes what the slice CONTAINS, so a cached
+    # mini-CRAM sliced under a different mask must be regenerated, not silently reused.
+    local donef="${ocram}.done" key; key="$(_bed_key "$merged")-F${EXCLUDE_FLAGS}"
     # Idempotent skip — LOCAL reads only, NEVER $src (that is the point): a prior slice for the
     # CURRENT region key that is present, indexed, and passes quickcheck. Its .done records the key.
     if [[ -f "$donef" && -s "$ocram" && -f "$ocram.crai" && "$(cat "$donef" 2>/dev/null)" == "$key" ]] \
@@ -227,7 +243,7 @@ extract_one() {
     # Absent / stale (region set changed) / corrupt: clear any partial artifacts and (re)slice.
     rm -f "$ocram" "$ocram.crai" "$donef"
     for attempt in 1 2; do
-        if hprv_run -- samtools view -C -@ "$JOBS" -T "$REF" --regions-file "$merged" \
+        if hprv_run -- samtools view -C -@ "$JOBS" -F "$EXCLUDE_FLAGS" -T "$REF" --regions-file "$merged" \
                 --write-index -o "$ocram" "$src" 2>/dev/null \
            && [[ -s "$ocram" && -f "$ocram.crai" ]] \
            && hprv_run -- samtools quickcheck "$ocram" 2>/dev/null; then
