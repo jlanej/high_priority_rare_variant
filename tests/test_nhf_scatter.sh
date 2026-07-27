@@ -70,11 +70,14 @@ mk_cram_with_dups() {
       for d in 1 2 3; do
           printf '%s_dup%s\t1024\tchr1\t90\t60\t40M\t*\t0\t0\t%s\t%s\tRG:Z:%s\n' "$s" "$d" "$seq" "$qual" "$s"
       done
+      # a SUPPLEMENTARY alignment (0x800): GATK HC uses these, so the slice must KEEP it
+      printf '%s_supp\t2048\tchr1\t90\t60\t40M\t*\t0\t0\t%s\t%s\tRG:Z:%s\n' "$s" "$seq" "$qual" "$s"
     } > "$s.sam"
     samtools view -C -T ref.fa -o "$s.cram" "$s.sam"; samtools index "$s.cram"
 }
 mk_cram_with_dups KID1
 dups_in_source=$(samtools view -c -f 1024 KID1.cram)
+supp_in_source=$(samtools view -c -f 2048 KID1.cram)
 : > map.tsv
 for s in KID1 MOM1 DAD1 KID2 MOM2 DAD2; do printf '%s\t%s/%s.cram\n' "$s" "$T" "$s" >> map.tsv; done
 
@@ -185,13 +188,18 @@ chk "scattered variants.tsv is BYTE-IDENTICAL to the serial run" \
 # --- duplicate exclusion: the mini-CRAM must carry NO duplicate-flagged reads ---
 chk "fixture really contains duplicate-flagged reads (guards the test itself)" \
     '[[ "$dups_in_source" -eq 3 ]]'
-chk "sliced mini-CRAM excludes duplicate-flagged reads (samtools -F 3844)" \
+chk "sliced mini-CRAM excludes duplicate-flagged reads (samtools -F 1796)" \
     '[[ "$(samtools view -c -f 1024 "$W/igv/crams/T1/KID1.cram")" -eq 0 ]]'
 chk "sliced mini-CRAM keeps the real (non-duplicate) reads" \
     '[[ "$(samtools view -c "$W/igv/crams/T1/KID1.cram")" -gt 0 ]]'
 # and the filter must be part of the cache key, or a config change would silently reuse old slices
 chk "mini-CRAM .done key records the exclude-flags mask" \
-    'grep -q -- "-F3844" "$W/igv/crams/T1/KID1.cram.done"'
+    'grep -q -- "-F1796" "$W/igv/crams/T1/KID1.cram.done"'
+# GATK HaplotypeCaller does NOT filter supplementary alignments (no NotSupplementaryAlignmentReadFilter
+# in makeStandardHCReadFilters), so they can carry the chimeric evidence for a called indel. Our mask
+# must keep them, or we would drop reads that contributed to the call.
+chk "supplementary alignments are KEPT (GATK HC does not filter them)" \
+    '[[ "$(samtools view -c -f 2048 "$W/igv/crams/T1/KID1.cram")" -eq "$supp_in_source" ]]'
 
 [[ "$fail" -eq 0 ]] && echo "All Step-8b scatter/gather tests passed." \
     || { echo "test_nhf_scatter FAILED"; exit 1; }

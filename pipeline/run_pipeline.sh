@@ -287,7 +287,7 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     # FUSE/SBFS mount stays healthy; this only sets per-slice compression threads.
     jobs="$(cfg_get outputs.igv.extract_jobs "$(cfg_get runtime.threads 4)")"
     ig=(--work "$W" --ref "$cref" --padding "$pad" --genome "$gen" --jobs "$jobs"
-        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 3844)")
+        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 1796)")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
     # Step 8b (non-human-fraction). Default ON, but activates only when a kraken2 DB is provided;

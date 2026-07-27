@@ -315,8 +315,16 @@ outputs:
     # curator uses to DOWN-RANK a call (e.g. a "variant" whose ALT reads are bacterial). Rides
     # entirely on Step 8's existing mini-CRAMs + per-trio VCFs; adds no new CRAM I/O.
     # Reads EXCLUDED when slicing the mini-CRAMs (samtools -F bitmask).
-    # 3844 = 0xF04 = unmapped + secondary + QC-fail + DUPLICATE + supplementary — the standard
-    # pileup mask. Load-bearing for Step 8b: nonhuman-screen does no flag filtering of its own and
+    # 1796 = 0x704 = unmapped + secondary + QC-fail + DUPLICATE. Chosen to MATCH GATK
+    # HaplotypeCaller's own default read filters (MAPPED, NOT_SECONDARY_ALIGNMENT, NOT_DUPLICATE,
+    # PASSES_VENDOR_QUALITY_CHECK), so the mini-CRAM holds the reads that produced the call.
+    # Deliberately NOT 0x800 (supplementary): GATK ships NotSupplementaryAlignmentReadFilter but
+    # does not apply it by default, so HC DOES use supplementary alignments — they are the
+    # chimeric/breakpoint evidence for larger indels, and excluding them would drop reads that
+    # contributed to the call.
+    # Known deliberate divergence: HC also drops MAPQ < 20; we keep those, because NHF exists partly
+    # to detect MIS-MAPPING and low-MQ reads are exactly that signal.
+    # Load-bearing for Step 8b: nonhuman-screen does no flag filtering of its own and
     # de-duplicates only by read NAME, which collapses the two mates of one pair but NOT PCR /
     # optical duplicates (distinct names, same original fragment). Leaving them in means N copies
     # of one contaminating fragment count as N independent ALT reads, inflating *_nhf_reads so a
