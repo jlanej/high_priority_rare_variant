@@ -56,37 +56,39 @@ WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}
 # Step 8b (non-human-fraction) options; empty KRAKEN2_DB => 8b disabled. Supplied ONLY via
 # --kraken2-db (run_pipeline.sh passes it only when outputs.igv.nonhuman_screen.enabled AND a DB is
 # set) — deliberately NOT defaulted from $HPRV_KRAKEN2_DB, so the enable gate lives in one place.
-# Reads EXCLUDED when slicing the mini-CRAMs, as a samtools -F bitmask.
-# Default 1796 = 0x704 = unmapped(0x4) + secondary(0x100) + QC-fail(0x200) + duplicate(0x400).
+# TWO independent read filters, deliberately split — the mini-CRAM is BOTH an analysis input and
+# the ARCHIVAL IGV review track, and those want different things:
 #
-# This set is chosen to MATCH GATK HaplotypeCaller's own default read filters, so the mini-CRAM
-# holds (approximately) the reads that actually produced the call. From
-# HaplotypeCallerEngine.makeStandardHCReadFilters(): MAPPED, NOT_SECONDARY_ALIGNMENT, NOT_DUPLICATE,
-# PASSES_VENDOR_QUALITY_CHECK — exactly the four bits above.
+#   EXCLUDE_FLAGS      (--exclude-flags, default 0)    slice time. Default keeps EVERYTHING, because
+#     a reviewer investigating a contamination call may specifically want to see the duplicates,
+#     supplementary and QC-fail reads. Dropping them here is PERMANENT (they are absent from the
+#     archive, not merely from a denominator) and, because this mask is part of the mini-CRAM
+#     content key, changing it forces a full RE-SLICE off the source CRAM mount — the single most
+#     expensive operation in the pipeline. Set non-zero only if you deliberately want a thinner
+#     archive.
+#   NHF_EXCLUDE_FLAGS  (--nhf-exclude-flags, default 1796)  classify time. Applied to a temporary
+#     copy of the ALREADY-LOCAL mini-CRAM just before nonhuman-screen sees it, so it costs no mount
+#     I/O and never touches the archive. It is part of nhf_key, so revising it recomputes ONLY the
+#     NHF tables.
 #
-# NOT 0x800 (supplementary), deliberately. GATK ships NotSupplementaryAlignmentReadFilter but does
-# NOT apply it by default, so HaplotypeCaller DOES use supplementary alignments — they are the
-# chimeric/breakpoint-spanning evidence for larger indels. Excluding them would drop reads that
-# contributed to the variant call. (No double-counting risk: nonhuman-screen keys by query_name,
-# and a supplementary shares its primary's name, so the pair collapses to one sequence.)
+# Why the classify-time filter is needed at all: nonhuman-screen fetches reads with NO flag
+# filtering (verified in its source; pysam's fetch() returns duplicates by default) and de-duplicates
+# only by query_name, which collapses the two mates of ONE pair but NOT PCR/optical duplicates
+# (distinct names, same fragment). Without it, N copies of one contaminating fragment count as N
+# independent ALT reads, inflating *_nhf_reads so a locus clears `min_reads` on far fewer real
+# fragments than it appears to have. The filter must be applied upstream of the pinned
+# nonhuman-screen commit either way; doing it here keeps that pin untouched.
 #
-# Why filter at all — Step 8b: nonhuman-screen fetches reads with NO flag filtering (verified in
-# its source; pysam's fetch() returns duplicates by default), and de-duplicates only by query_name,
-# which collapses the two mates of ONE pair but NOT PCR/optical duplicates (distinct names, same
-# fragment). Without this, N copies of one contaminating fragment count as N independent ALT reads,
-# inflating the nhf_reads denominator so a locus clears `min_reads` on far fewer real fragments
-# than it appears to have. Filtering here fixes it in one place, keeps the pinned nonhuman-screen
-# commit untouched, and makes the mini-CRAMs smaller/faster to classify.
-#
-# KNOWN DIVERGENCE (deliberate): HC also filters MAPPING QUALITY < 20; we do not. A `-F` mask
-# cannot express it, but more importantly NHF exists partly to detect MIS-MAPPING, and low-MQ reads
-# at a locus are precisely that signal — filtering them would blind the screen to what it is for.
-# So our read set is intentionally BROADER than the caller's at the low-MQ end. HC's GOOD_CIGAR /
-# NON_ZERO_REFERENCE_LENGTH / Wellformed filters are likewise not expressible as flags.
-#
-# NB this mask also applies to the IGV review track (IGV hides duplicates by default anyway);
-# set 0 to keep every read.
-EXCLUDE_FLAGS=1796
+# 1796 = 0x704 = unmapped(0x4) + secondary(0x100) + QC-fail(0x200) + duplicate(0x400) — exactly the
+# GATK HaplotypeCaller default filters a -F bitmask can express
+# (HaplotypeCallerEngine.makeStandardHCReadFilters: MAPPED, NOT_SECONDARY_ALIGNMENT, NOT_DUPLICATE,
+# PASSES_VENDOR_QUALITY_CHECK). Deliberately NOT 0x800 (supplementary): GATK ships
+# NotSupplementaryAlignmentReadFilter but does not apply it by default, so HC DOES call on
+# supplementary alignments — they are the chimeric/breakpoint evidence for larger indels.
+# KNOWN DIVERGENCE (deliberate): HC also drops MAPQ < 20; we keep those, because NHF exists partly
+# to detect MIS-MAPPING and low-MQ reads are exactly that signal.
+EXCLUDE_FLAGS=0
+NHF_EXCLUDE_FLAGS=1796
 KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
 # NHF classification threads, DECOUPLED from --jobs. --jobs bounds concurrent CRAM slices and is
 # deliberately small (a flaky FUSE/SBFS mount); NHF classification is CPU-bound, reads only the
@@ -103,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --genome) GENOME="$2"; shift 2;;
         --jobs) JOBS="$2"; shift 2;;
         --exclude-flags) EXCLUDE_FLAGS="$2"; shift 2;;
+        --nhf-exclude-flags) NHF_EXCLUDE_FLAGS="$2"; shift 2;;
         --kraken2-db) KRAKEN2_DB="$2"; shift 2;;
         --nhf-members) NHF_MEMBERS="$2"; shift 2;;
         --nhf-confidence) NHF_CONF="$2"; shift 2;;
@@ -118,6 +121,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" -ge 1 ]] || die "--jobs must be a positive integer"
 [[ "$EXCLUDE_FLAGS" =~ ^[0-9]+$ ]] || die "--exclude-flags must be a non-negative integer (samtools -F bitmask)"
+[[ "$NHF_EXCLUDE_FLAGS" =~ ^[0-9]+$ ]] || die "--nhf-exclude-flags must be a non-negative integer (samtools -F bitmask)"
 NHF_THREADS="${NHF_THREADS:-$JOBS}"
 [[ "$NHF_THREADS" =~ ^[0-9]+$ && "$NHF_THREADS" -ge 1 ]] || die "--nhf-threads must be a positive integer"
 # The three NHF sub-modes are mutually exclusive; any of them means "distributed sub-task", which
@@ -252,7 +256,14 @@ extract_one() {
     local trio="$1" role="$2" sample="$3" src="$4" merged="$5" ocram="$6" attempt
     # Key includes EXCLUDE_FLAGS: changing the filter changes what the slice CONTAINS, so a cached
     # mini-CRAM sliced under a different mask must be regenerated, not silently reused.
-    local donef="${ocram}.done" key; key="$(_bed_key "$merged")-F${EXCLUDE_FLAGS}"
+    # BUT the suffix is OMITTED when the mask is 0. Migration matters here: re-slicing means
+    # re-reading the source CRAM over a flaky FUSE/SBFS mount, the most expensive thing we do.
+    #   * mask 0 == unfiltered == exactly what a legacy slice (keyed before this feature existed)
+    #     already contains, so it keeps the bare legacy key and is REUSED, not re-fetched.
+    #   * a slice cached under a non-zero mask carries "-F<mask>" and therefore does NOT match the
+    #     default key — correctly re-sliced, because that archive is genuinely incomplete.
+    local donef="${ocram}.done" key; key="$(_bed_key "$merged")"
+    [[ "$EXCLUDE_FLAGS" -gt 0 ]] && key="${key}-F${EXCLUDE_FLAGS}"
     # Idempotent skip — LOCAL reads only, NEVER $src (that is the point): a prior slice for the
     # CURRENT region key that is present, indexed, and passes quickcheck. Its .done records the key.
     if [[ -f "$donef" && -s "$ocram" && -f "$ocram.crai" && "$(cat "$donef" 2>/dev/null)" == "$key" ]] \
@@ -411,7 +422,9 @@ if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
                     # from a stale table blank out as "NHF disabled", and a stale near-zero-read row
                     # renders nhf_flag=0 ("screened, clean") — an affirmatively wrong down-rank.
                     # Not mtime: $tvcf is cp -f'd every run, so its mtime is always fresh.
-                    nhf_key="$(_bed_key "$cram")-$(_bed_key "$tvcf")"
+                    # The CLASSIFY-time mask is part of the key: changing it must recompute NHF,
+                    # and must NOT invalidate the mini-CRAM (whose own key carries EXCLUDE_FLAGS).
+                    nhf_key="$(_bed_key "$cram")-$(_bed_key "$tvcf")-F${NHF_EXCLUDE_FLAGS}"
                     if [[ -f "$out_tsv" && "$(cat "${out_tsv}.done" 2>/dev/null)" == "$nhf_key" ]]; then n_nhf=$((n_nhf+1)); continue; fi
                     # Manifest mode: this (trio,member) has outstanding work. Record the TRIO
                     # and move on without classifying — the manifest lists only what is left,
@@ -421,9 +434,28 @@ if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
                     fi
                     mkdir -p "$nhf_dir/$trio"
                     errf="$HPRV_TMPDIR/nhf.${trio}.${sample}.err"
+                    # CLASSIFY-TIME read filter. Derive a filtered temporary BAM from the mini-CRAM
+                    # and hand THAT to nonhuman-screen, leaving the archived mini-CRAM complete.
+                    # Reads only $DATA (already local — no source-CRAM mount access), so it is cheap
+                    # even in a per-trio array. BAM not CRAM: no reference needed to re-read it.
+                    # A failure here degrades to the unfiltered mini-CRAM with a warning rather than
+                    # dropping the member — a missing NHF row is a worse outcome than an unfiltered
+                    # one, and the row still carries its own read count for the reviewer.
+                    nhf_bam="$cram"
+                    if [[ "$NHF_EXCLUDE_FLAGS" -gt 0 ]]; then
+                        _fb="$HPRV_TMPDIR/nhf.${trio}.${sample}.filt.bam"
+                        if hprv_run -- samtools view -b -F "$NHF_EXCLUDE_FLAGS" -T "$REF" \
+                                -o "$_fb" "$cram" 2>/dev/null \
+                           && hprv_run -- samtools index "$_fb" 2>/dev/null; then
+                            nhf_bam="$_fb"
+                        else
+                            warn "  [$trio] could not apply --nhf-exclude-flags to $role $sample; classifying the UNFILTERED mini-CRAM (duplicates may inflate its *_nhf_reads)"
+                            rm -f "$_fb" "$_fb.bai"
+                        fi
+                    fi
                     # shellcheck disable=SC2086  # $NHF_MMAP is an intentional word (empty or --memory-mapping)
                     if hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen classify \
-                            --bam "$cram" --variants "$tvcf" --ref-fasta "$REF" \
+                            --bam "$nhf_bam" --variants "$tvcf" --ref-fasta "$REF" \
                             --kraken2-db "$KRAKEN2_DB" --confidence "$NHF_CONF" \
                             --threads "$NHF_THREADS" $NHF_MMAP --out-prefix "$outp" 2>"$errf" \
                        && [[ -f "$out_tsv" ]]; then
@@ -432,7 +464,8 @@ if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
                         warn "  [$trio] NHF screen failed for $role $sample (kraken2 missing, or a read/DB error): $(tail -n1 "$errf" 2>/dev/null); leaving its NHF blank"
                         rm -f "$out_tsv" "${outp}.summary.json"
                     fi
-                    rm -f "$errf"
+                    rm -f "$errf" "$HPRV_TMPDIR/nhf.${trio}.${sample}.filt.bam" \
+                          "$HPRV_TMPDIR/nhf.${trio}.${sample}.filt.bam.bai"
                 done
             done < <(tail -n +2 "$resolved")
             if [[ -n "$NHF_EMIT_MANIFEST" ]]; then

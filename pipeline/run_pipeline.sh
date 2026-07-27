@@ -287,7 +287,7 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     # FUSE/SBFS mount stays healthy; this only sets per-slice compression threads.
     jobs="$(cfg_get outputs.igv.extract_jobs "$(cfg_get runtime.threads 4)")"
     ig=(--work "$W" --ref "$cref" --padding "$pad" --genome "$gen" --jobs "$jobs"
-        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 1796)")
+        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 0)")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
     # Step 8b (non-human-fraction). Default ON, but activates only when a kraken2 DB is provided;
@@ -299,7 +299,8 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
             ig+=(--kraken2-db "$kdb"
                  --nhf-members    "$(cfg_get outputs.igv.nonhuman_screen.members carriers)"
                  --nhf-confidence "$(cfg_get outputs.igv.nonhuman_screen.confidence 0.05)"
-                 --nhf-min-reads  "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)")
+                 --nhf-min-reads  "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)"
+                 --nhf-exclude-flags "$(cfg_get outputs.igv.nonhuman_screen.exclude_flags 1796)")
             # threads: 0 => fall back to extract_jobs (08 does that), so only pass a real value.
             _nthr="$(cfg_get outputs.igv.nonhuman_screen.threads 0)"
             [[ "$_nthr" =~ ^[0-9]+$ && "$_nthr" -ge 1 ]] && ig+=(--nhf-threads "$_nthr")

@@ -73,7 +73,9 @@ mk_cram_with_dups() {
       # a SUPPLEMENTARY alignment (0x800): GATK HC uses these, so the slice must KEEP it
       printf '%s_supp\t2048\tchr1\t90\t60\t40M\t*\t0\t0\t%s\t%s\tRG:Z:%s\n' "$s" "$seq" "$qual" "$s"
     } > "$s.sam"
-    samtools view -C -T ref.fa -o "$s.cram" "$s.sam"; samtools index "$s.cram"
+    # sort: the dup/supp records above are emitted at pos 90 AFTER the pos-190 read, and an
+    # unsorted BAM/CRAM cannot be indexed ("Unsorted positions on sequence #1").
+    samtools sort -O cram --reference ref.fa -o "$s.cram" "$s.sam"; samtools index "$s.cram"
 }
 mk_cram_with_dups KID1
 dups_in_source=$(samtools view -c -f 1024 KID1.cram)
@@ -113,16 +115,19 @@ cat > bin/nonhuman-screen <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == "--version" ]] && { echo "nonhuman-screen 0.0.0-stub"; exit 0; }
-vcf="" outp=""
+vcf="" outp="" bam=""
 while [[ $# -gt 0 ]]; do case "$1" in
-  classify) shift;; --bam) shift 2;; --variants) vcf="$2"; shift 2;;
+  classify) shift;; --bam) bam="$2"; shift 2;; --variants) vcf="$2"; shift 2;;
   --out-prefix) outp="$2"; shift 2;; --memory-mapping) shift;;
   --ref-fasta|--kraken2-db|--confidence|--threads) shift 2;; *) shift;; esac; done
 # slow enough that two concurrent tasks genuinely overlap (the point of test 3)
 sleep 1
+# report the ACTUAL read count of the file we were handed, so the test can prove the
+# classify-time filter reached nonhuman-screen (a fixed number could not).
+nreads=$(samtools view -c "$bam" 2>/dev/null || echo 0)
 printf 'variant_key\tsupporting_reads\tnonhuman_fraction\n' > "$outp.variant_nhf.tsv"
 bcftools query -f '%CHROM:%POS0:%REF:%ALT\n' "$vcf" | grep -vE '[*<]' | \
-  while IFS= read -r k; do printf '%s\t7\t0.50\n' "$k" >> "$outp.variant_nhf.tsv"; done
+  while IFS= read -r k; do printf '%s\t%s\t0.50\n' "$k" "$nreads" >> "$outp.variant_nhf.tsv"; done
 echo '{}' > "$outp.summary.json"
 STUB
 chmod +x bin/nonhuman-screen
@@ -186,20 +191,64 @@ chk "scattered variants.tsv is BYTE-IDENTICAL to the serial run" \
     '[[ "$serial_md5" == "$scatter_md5" ]]'
 
 # --- duplicate exclusion: the mini-CRAM must carry NO duplicate-flagged reads ---
+# --- the two masks are INDEPENDENT: archive complete, NHF denominator filtered ---
 chk "fixture really contains duplicate-flagged reads (guards the test itself)" \
     '[[ "$dups_in_source" -eq 3 ]]'
-chk "sliced mini-CRAM excludes duplicate-flagged reads (samtools -F 1796)" \
-    '[[ "$(samtools view -c -f 1024 "$W/igv/crams/T1/KID1.cram")" -eq 0 ]]'
-chk "sliced mini-CRAM keeps the real (non-duplicate) reads" \
-    '[[ "$(samtools view -c "$W/igv/crams/T1/KID1.cram")" -gt 0 ]]'
-# and the filter must be part of the cache key, or a config change would silently reuse old slices
-chk "mini-CRAM .done key records the exclude-flags mask" \
-    'grep -q -- "-F1796" "$W/igv/crams/T1/KID1.cram.done"'
-# GATK HaplotypeCaller does NOT filter supplementary alignments (no NotSupplementaryAlignmentReadFilter
-# in makeStandardHCReadFilters), so they can carry the chimeric evidence for a called indel. Our mask
-# must keep them, or we would drop reads that contributed to the call.
-chk "supplementary alignments are KEPT (GATK HC does not filter them)" \
+# The mini-CRAM is the ARCHIVAL review track: the classify-time mask must not touch it.
+chk "mini-CRAM ARCHIVES duplicate-flagged reads (slice default 0 = keep everything)" \
+    '[[ "$(samtools view -c -f 1024 "$W/igv/crams/T1/KID1.cram")" -eq "$dups_in_source" ]]'
+chk "mini-CRAM archives supplementary alignments (GATK HC calls on them)" \
     '[[ "$(samtools view -c -f 2048 "$W/igv/crams/T1/KID1.cram")" -eq "$supp_in_source" ]]'
+mini_total="$(samtools view -c "$W/igv/crams/T1/KID1.cram")"
+# ...but the NHF denominator must reflect the CLASSIFY-time filter, i.e. fewer reads than the archive.
+nhf_reads="$(awk -F'\t' 'NR==2{print $2}' "$W/igv/nhf/T1/KID1.variant_nhf.tsv")"
+chk "NHF read count is LOWER than the archived mini-CRAM (duplicates filtered at classify time)" \
+    '[[ "$nhf_reads" -lt "$mini_total" ]]'
+chk "NHF read count equals the archive minus the duplicates (supplementary kept)" \
+    '[[ "$nhf_reads" -eq "$(( mini_total - dups_in_source ))" ]]'
+# Keys: the classify mask belongs to nhf_key, NOT to the mini-CRAM key — so revising it must
+# recompute NHF without forcing a re-slice off the (expensive, flaky) source CRAM mount.
+chk "mini-CRAM .done key does NOT carry the classify-time mask" \
+    '! grep -q -- "-F1796" "$W/igv/crams/T1/KID1.cram.done"'
+chk "NHF .done key DOES carry the classify-time mask" \
+    'grep -q -- "-F1796" "$W/igv/nhf/T1/KID1.variant_nhf.tsv.done"'
+# changing the classify mask recomputes NHF and leaves the mini-CRAM byte-identical
+cram_md5_before="$(python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$W/igv/crams/T1/KID1.cram")"
+run8 --nhf-exclude-flags 0 >/dev/null 2>&1
+cram_md5_after="$(python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$W/igv/crams/T1/KID1.cram")"
+nhf_reads_unfiltered="$(awk -F'\t' 'NR==2{print $2}' "$W/igv/nhf/T1/KID1.variant_nhf.tsv")"
+chk "changing the classify mask did NOT re-slice the mini-CRAM" \
+    '[[ "$cram_md5_before" == "$cram_md5_after" ]]'
+chk "changing the classify mask DID recompute NHF (now counts every archived read)" \
+    '[[ "$nhf_reads_unfiltered" -eq "$mini_total" ]]'
+
+# --- MIGRATION: which cached mini-CRAMs must be re-sliced off the source mount, and which must not.
+# Re-slicing is the most expensive operation in the pipeline (source CRAM over a flaky FUSE/SBFS
+# mount), so a cache that is ALREADY correct must survive the upgrade untouched.
+cram="$W/igv/crams/T1/KID1.cram"
+md5_now="$(python3 -c 'import hashlib,sys;print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$cram")"
+
+# (a) LEGACY cache: sliced before this feature existed, so its .done holds a bare bed key and the
+#     archive is COMPLETE (nothing was filtered). It must be REUSED, not re-fetched.
+legacy_key="$(cksum < "$T/tmp/T1.merged.bed" 2>/dev/null | awk '{print $1"-"$2}')"
+if [[ -n "$legacy_key" ]]; then
+    printf '%s\n' "$legacy_key" > "$cram.done"
+    run8 >/dev/null 2>&1
+    chk "a LEGACY-keyed mini-CRAM (no -F suffix) is reused, not re-sliced" \
+        '[[ "$(python3 -c "import hashlib,sys;print(hashlib.md5(open(sys.argv[1],\"rb\").read()).hexdigest())" "$cram")" == "$md5_now" \
+            && "$(cat "$cram.done")" == "$legacy_key" ]]'
+else
+    echo "SKIP legacy-key reuse (merged BED not retained in tmp)"
+fi
+
+# (b) A cache sliced under a NON-ZERO mask is genuinely INCOMPLETE (reads were dropped), so it must
+#     be re-sliced under the new archive-everything default.
+printf '%s\n' "deadbeef-1-F1796" > "$cram.done"
+run8 >/dev/null 2>&1
+chk "a mini-CRAM cached under a non-zero -F mask IS re-sliced (its archive was incomplete)" \
+    '[[ "$(cat "$cram.done")" != "deadbeef-1-F1796" ]]'
+chk "the re-sliced mini-CRAM again archives the duplicates" \
+    '[[ "$(samtools view -c -f 1024 "$cram")" -eq "$dups_in_source" ]]'
 
 [[ "$fail" -eq 0 ]] && echo "All Step-8b scatter/gather tests passed." \
     || { echo "test_nhf_scatter FAILED"; exit 1; }

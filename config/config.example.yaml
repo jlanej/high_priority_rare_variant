@@ -314,26 +314,29 @@ outputs:
     # kraken2 and record the fraction that are NON-human — a contamination / mis-mapping signal a
     # curator uses to DOWN-RANK a call (e.g. a "variant" whose ALT reads are bacterial). Rides
     # entirely on Step 8's existing mini-CRAMs + per-trio VCFs; adds no new CRAM I/O.
-    # Reads EXCLUDED when slicing the mini-CRAMs (samtools -F bitmask).
-    # 1796 = 0x704 = unmapped + secondary + QC-fail + DUPLICATE. Chosen to MATCH GATK
-    # HaplotypeCaller's own default read filters (MAPPED, NOT_SECONDARY_ALIGNMENT, NOT_DUPLICATE,
-    # PASSES_VENDOR_QUALITY_CHECK), so the mini-CRAM holds the reads that produced the call.
-    # Deliberately NOT 0x800 (supplementary): GATK ships NotSupplementaryAlignmentReadFilter but
-    # does not apply it by default, so HC DOES use supplementary alignments — they are the
-    # chimeric/breakpoint evidence for larger indels, and excluding them would drop reads that
-    # contributed to the call.
-    # Known deliberate divergence: HC also drops MAPQ < 20; we keep those, because NHF exists partly
-    # to detect MIS-MAPPING and low-MQ reads are exactly that signal.
-    # Load-bearing for Step 8b: nonhuman-screen does no flag filtering of its own and
-    # de-duplicates only by read NAME, which collapses the two mates of one pair but NOT PCR /
-    # optical duplicates (distinct names, same original fragment). Leaving them in means N copies
-    # of one contaminating fragment count as N independent ALT reads, inflating *_nhf_reads so a
-    # locus clears `min_reads` on far fewer real fragments than it appears to have — false
-    # confidence exactly where the floor is meant to prevent it.
-    # Also applies to the IGV review track (IGV hides duplicates by default anyway). Set 0 to keep
-    # every read. Changing this re-slices: the value is part of each mini-CRAM's .done key.
-    exclude_flags: 1796
+    # Reads EXCLUDED when SLICING the mini-CRAMs (samtools -F bitmask). Default 0 = archive
+    # everything. The mini-CRAM is not just an analysis input, it is the ARCHIVAL IGV review track:
+    # a reviewer investigating a contamination call may specifically want to see the duplicates,
+    # supplementary and QC-fail reads. Dropping them here is PERMANENT, and because this mask is
+    # part of the mini-CRAM content key, changing it forces a full RE-SLICE off the source CRAM
+    # mount — the most expensive operation in the pipeline. The NHF denominator is fixed at
+    # CLASSIFY time instead (nonhuman_screen.exclude_flags below), which costs no mount I/O.
+    # Set non-zero only if you deliberately want a thinner archive.
+    exclude_flags: 0
     nonhuman_screen:
+      # Reads excluded at CLASSIFY time (samtools -F bitmask), applied to a temporary copy of the
+      # already-local mini-CRAM — the archive is untouched and no source mount is read. Part of the
+      # NHF cache key, so changing it recomputes only the NHF tables, never a re-slice.
+      # 1796 = 0x704 = unmapped + secondary + QC-fail + DUPLICATE: exactly the GATK HaplotypeCaller
+      # default filters a -F mask can express. Deliberately NOT 0x800 (supplementary) — GATK does
+      # not filter those by default, so HC calls on them (chimeric/breakpoint evidence for indels).
+      # Load-bearing: nonhuman-screen does no flag filtering of its own and de-duplicates only by
+      # read NAME, which collapses the two mates of one pair but NOT PCR/optical duplicates. Without
+      # this, N copies of one contaminating fragment count as N independent ALT reads and inflate
+      # *_nhf_reads, so a locus clears min_reads on far fewer real fragments than it appears to have.
+      # Known deliberate divergence from HC: MAPQ < 20 reads are KEPT, because NHF exists partly to
+      # detect mis-mapping and low-MQ reads are exactly that signal.
+      exclude_flags: 1796
       enabled: true               # ON by default. ACTIVATES only when resources.kraken2_db is set
                                   #   AND mini-CRAMs exist (needs resources.cram_map); otherwise Step
                                   #   8b warns and skips, leaving the NHF columns blank. So "on" is
