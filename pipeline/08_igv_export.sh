@@ -22,10 +22,24 @@
 # variants.tsv (child_/mother_/father_nhf + nhf_flag). A contamination / mis-mapping down-rank
 # signal; rides on the mini-CRAMs already sliced above.
 #
+# Step 8b is the dominant cost on a real cohort (classification, not DB load, dominates: ~20 min
+# per trio on WGS), so it can also be run DISTRIBUTED — one job per trio. Three sub-modes, mirroring
+# Step 2's --annotate-* contract:
+#   --nhf-emit-manifest F : write the trio IDs that still need NHF work (one per line) to F, then
+#                           exit. Already-complete trios are omitted, so a resubmit shrinks.
+#   --nhf-trio TRIO       : screen ONLY that trio's members, then exit. One array task = one trio.
+#   --nhf-gather          : skip screening; just re-assemble variants.tsv from whatever NHF exists.
+# Sub-tasks deliberately skip Pass 1 + Pass 2: those rebuild SHARED state (the per-trio VCF copy,
+# the candidate BEDs, the extract task list) that concurrent tasks would corrupt. That also means
+# the array REQUIRES a completed serial Step 8 first — the mini-CRAMs and per-trio VCFs must
+# already exist. 8b itself reads only $WORK/igv/{crams,vcfs}/, never the source CRAM mount, so it
+# is safe to run on batch compute even where Step 8's slicing is not.
+#
 # Usage:
 #   08_igv_export.sh --work WORKDIR --ref GRCh38.fa [--cram-map map.tsv] [--padding 1000]
 #       [--kraken2-db DB [--nhf-members carriers|child_only|all] [--nhf-confidence 0.05]
-#        [--nhf-min-reads 5] [--nhf-memory-mapping]]
+#        [--nhf-min-reads 5] [--nhf-memory-mapping] [--nhf-threads N]]
+#       [--nhf-emit-manifest FILE | --nhf-trio TRIO_ID | --nhf-gather]
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +57,12 @@ WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}
 # --kraken2-db (run_pipeline.sh passes it only when outputs.igv.nonhuman_screen.enabled AND a DB is
 # set) — deliberately NOT defaulted from $HPRV_KRAKEN2_DB, so the enable gate lives in one place.
 KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
+# NHF classification threads, DECOUPLED from --jobs. --jobs bounds concurrent CRAM slices and is
+# deliberately small (a flaky FUSE/SBFS mount); NHF classification is CPU-bound, reads only the
+# already-sliced mini-CRAMs, and scales with threads. Empty => fall back to --jobs (old behavior).
+NHF_THREADS=""
+# Distributed Step-8b sub-modes (see the header). Default (none set) = the self-contained run.
+NHF_EMIT_MANIFEST="" NHF_TRIO="" NHF_GATHER=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --work) WORK="$2"; shift 2;;
@@ -56,11 +76,25 @@ while [[ $# -gt 0 ]]; do
         --nhf-confidence) NHF_CONF="$2"; shift 2;;
         --nhf-min-reads) NHF_MIN_READS="$2"; shift 2;;
         --nhf-memory-mapping) NHF_MMAP="--memory-mapping"; shift;;
+        --nhf-threads) NHF_THREADS="$2"; shift 2;;
+        --nhf-emit-manifest) NHF_EMIT_MANIFEST="$2"; shift 2;;
+        --nhf-trio) NHF_TRIO="$2"; shift 2;;
+        --nhf-gather) NHF_GATHER=1; shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
 done
 [[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" -ge 1 ]] || die "--jobs must be a positive integer"
+NHF_THREADS="${NHF_THREADS:-$JOBS}"
+[[ "$NHF_THREADS" =~ ^[0-9]+$ && "$NHF_THREADS" -ge 1 ]] || die "--nhf-threads must be a positive integer"
+# The three NHF sub-modes are mutually exclusive; any of them means "distributed sub-task", which
+# skips Pass 1 + Pass 2 (see the header: they rebuild shared state concurrent tasks would corrupt).
+_nsub=0
+[[ -n "$NHF_EMIT_MANIFEST" ]] && _nsub=$((_nsub + 1))
+[[ -n "$NHF_TRIO" ]]          && _nsub=$((_nsub + 1))
+[[ "$NHF_GATHER" -eq 1 ]]     && _nsub=$((_nsub + 1))
+[[ "$_nsub" -le 1 ]] || die "--nhf-emit-manifest / --nhf-trio / --nhf-gather are mutually exclusive"
+NHF_SUBTASK="$_nsub"
 [[ "$NHF_MIN_READS" =~ ^[0-9]+$ ]] || die "--nhf-min-reads must be a non-negative integer"
 [[ -n "$WORK" ]] || die "need --work"
 calls="$WORK/candidates.calls.tsv"; resolved="$WORK/trios.resolved.tsv"
@@ -87,6 +121,19 @@ else
 fi
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
 
+# Content key helper. Defined OUTSIDE the Pass 1/2 guard below: Step 8b uses it to key its
+# .done markers, and an NHF sub-task skips Pass 1/2 entirely — leaving it inside would make
+# every scatter task die with "_bed_key: command not found".
+_bed_key() { cksum < "$1" 2>/dev/null | awk '{print $1"-"$2}'; }
+
+# --- Pass 1 + Pass 2 (skipped entirely in an NHF sub-task) -----------------------------------
+# EVERYTHING between here and the matching `fi` rebuilds state SHARED across trios: the per-trio
+# VCF copy (which 8b's content key hashes), the candidate BEDs, the extract task list. Running it
+# concurrently from array tasks would mean torn reads and unstable keys, so a distributed 8b
+# sub-task skips it and relies on a completed serial Step 8 having produced these already.
+# (Deliberately not re-indented: the guard is a wrapper, and re-indenting ~110 lines would bury
+#  the real change in whitespace.)
+if [[ "$NHF_SUBTASK" -eq 0 ]]; then
 # --- pre-group per-trio inputs in ONE pass each (was O(trios x calls) re-scanning) ---
 mkdir -p "$HPRV_TMPDIR"
 # 1) candidate loci -> one padded BED per trio. Tag each call with its trio, sort so a
@@ -161,7 +208,6 @@ done < <(tail -n +2 "$resolved")
 # (present on the host and in the image) and reads a small LOCAL file. A plain "file exists +
 # quickcheck" guard would instead serve a STALE mini-CRAM after a re-run whose candidate set changed
 # (curation re-ran): content-keying skips an unchanged set and re-slices a changed one.
-_bed_key() { cksum < "$1" 2>/dev/null | awk '{print $1"-"$2}'; }
 
 # Slice one candidate-region set from one source CRAM. Runs in a SUBSHELL (see the loop) so its
 # `set +e` is local: we must handle samtools exit codes ourselves and retry/skip a transiently-bad
@@ -218,6 +264,9 @@ if [[ "$n_tasks" -gt 0 ]]; then
     done < "$tasks"
     [[ "$n_cached" -gt 0 ]] && log "Step 8: reused $n_cached valid cached mini-CRAM(s) (idempotent resume — no source-CRAM reads); sliced $n_sliced"
 fi
+fi   # end Pass 1 + Pass 2 (NHF_SUBTASK guard)
+mkdir -p "$HPRV_TMPDIR"
+n_extracted="${n_extracted:-0}"
 
 # --- Step 8b: non-human-fraction (NHF) annotation of ALT-supporting reads --------------------
 # For each screened (trio, member): classify the mini-CRAM's ALT reads with kraken2 (via
@@ -229,23 +278,45 @@ fi
 # runtime (it lives only in the image, so a bare host / CI warns and skips). All failures degrade
 # to "leave the NHF columns blank", never abort the export.
 #
-# Perf: invocations run SERIALLY so that with --memory-mapping the OS page cache stays warm across
-# trios and the (dominant) kraken2 DB-load is paid ~once per node, not once per invocation. Put the
-# DB on local disk/NVMe. See docs/resources.md.
+# Perf — CORRECTED (the previous note here claimed DB-load dominates and that serial execution
+# amortises it via the --memory-mapping page cache; measurement says otherwise):
+#   * CLASSIFICATION dominates, not DB load — ~20 min per trio on WGS, and a full kraken2 DB is
+#     hundreds of GB, far too large to hold in page cache, so every classify does random reads
+#     whatever the ordering. There is no serial-ordering amortisation to preserve.
+#   * So per-trio parallelism scales ~linearly: use --nhf-trio in a job array (pipeline/slurm/)
+#     when the cohort is large. On 221 trios the serial loop is ~74 h; the array is bounded by
+#     the slowest trio plus queue time.
+#   * Do NOT stage the DB to node-local scratch: it exceeds typical node-local disk and the copy
+#     costs more than it saves. Put it on shared NVMe and bound array width instead — N tasks
+#     doing random reads over one DB is real shared-storage load (SCATTER-style %K limit).
+#   * --memory-mapping is still worth setting: it avoids each process faulting in its own copy.
+# Threads come from --nhf-threads (NOT --jobs, which bounds FUSE-gentle CRAM slicing).
+# See docs/resources.md.
 nhf_dir="$DATA/nhf"
-if is_set "$KRAKEN2_DB"; then
+# --nhf-gather does ONLY the join: skip screening and fall through to the assembly below.
+# In a SUB-TASK the "skip NHF" branches below must DIE, not warn: the operator explicitly asked to
+# plan/run distributed NHF, so silently falling through would write no manifest (making the array
+# plan a no-op that reports "0 trios need work") or complete a scatter task having screened nothing.
+# In the normal serial run they stay warnings — 8b is an optional enrichment there.
+_nhf_unavailable() {
+    if [[ "$NHF_SUBTASK" -eq 1 ]]; then
+        die "Step 8b sub-task requested but NHF cannot run: $1"
+    fi
+    warn "Step 8b: $1 — skipping NHF screening"
+}
+if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
     if [[ ! -d "$KRAKEN2_DB" ]]; then
-        warn "Step 8b: kraken2 DB '$KRAKEN2_DB' is not a directory — skipping NHF screening"
+        _nhf_unavailable "kraken2 DB '$KRAKEN2_DB' is not a directory"
     elif [[ "$HAVE_MAP" -ne 1 ]]; then
-        warn "Step 8b: no mini-CRAMs (no --cram-map) — skipping NHF screening"
+        _nhf_unavailable "no mini-CRAMs (no --cram-map)"
     elif ! ( is_set "$REF" && [[ -f "$REF" ]] ); then
-        warn "Step 8b: CRAM reference '$REF' missing — skipping NHF screening"
+        _nhf_unavailable "CRAM reference '$REF' missing"
     elif ! hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen --version >/dev/null 2>&1; then
-        warn "Step 8b: 'nonhuman-screen' not available in the runtime (it ships only in the image) — skipping NHF screening"
+        _nhf_unavailable "'nonhuman-screen' not available in the runtime (it ships only in the image)"
     else
         db_ok=1
         for f in hash.k2d opts.k2d taxo.k2d; do
-            [[ -f "$KRAKEN2_DB/$f" ]] || { warn "Step 8b: kraken2 DB missing $f — skipping NHF screening"; db_ok=0; break; }
+            [[ -f "$KRAKEN2_DB/$f" ]] || { _nhf_unavailable "kraken2 DB missing $f"; db_ok=0; break; }
         done
         # Taxonomy dumps are not strictly required by kraken2, but WITHOUT them classification
         # degrades to exact-taxid matching and the NHF signal is unreliable in both directions.
@@ -265,7 +336,11 @@ if is_set "$KRAKEN2_DB"; then
             # GT token equals the row's `alt` base (rows are biallelic post `norm -m-`, so `alt` is
             # a single allele string). Testing for a digit here would NEVER match and silently
             # degrade `carriers` to `child_only` (regression guarded by tests/test_nhf_carriers.sh).
-            carriers_list="$HPRV_TMPDIR/nhf_carriers.tsv"
+            # TASK-PRIVATE in a sub-task: this is written with `sort -u > file`, which TRUNCATES.
+            # Concurrent array tasks sharing one path means a reader can see a half-written list,
+            # so a real carrier parent reads as non-carrier and `carriers` silently degrades to
+            # `child_only` — the exact regression tests/test_nhf_carriers.sh guards.
+            carriers_list="$HPRV_TMPDIR/nhf_carriers${NHF_TRIO:+.$NHF_TRIO}.tsv"
             awk -F'\t' '
                 NR==1{for(i=1;i<=NF;i++)h[$i]=i; next}
                 h["alt"]{
@@ -276,8 +351,11 @@ if is_set "$KRAKEN2_DB"; then
             is_carrier() { awk -F'\t' -v t="$1" -v r="$2" '$1==t&&$2==r{f=1} END{exit f?0:1}' "$carriers_list"; }
 
             n_nhf=0
+            n_todo=0; _nhf_todo="$HPRV_TMPDIR/nhf_todo.$$"; : > "$_nhf_todo"
             while IFS=$'\t' read -r trio _ _ samples; do   # cols: trio_id vcf ped samples
                 [[ "$trio" == "trio_id" || -z "$trio" ]] && continue
+                # one array task = one trio
+                [[ -n "$NHF_TRIO" && "$trio" != "$NHF_TRIO" ]] && continue
                 IFS=',' read -r kid dad mom <<< "$samples"
                 tvcf="$DATA/vcfs/${trio}.vcf.gz"
                 [[ -f "$tvcf" ]] || continue
@@ -300,13 +378,19 @@ if is_set "$KRAKEN2_DB"; then
                     # Not mtime: $tvcf is cp -f'd every run, so its mtime is always fresh.
                     nhf_key="$(_bed_key "$cram")-$(_bed_key "$tvcf")"
                     if [[ -f "$out_tsv" && "$(cat "${out_tsv}.done" 2>/dev/null)" == "$nhf_key" ]]; then n_nhf=$((n_nhf+1)); continue; fi
+                    # Manifest mode: this (trio,member) has outstanding work. Record the TRIO
+                    # and move on without classifying — the manifest lists only what is left,
+                    # so a resubmit after a partial run schedules a smaller array.
+                    if [[ -n "$NHF_EMIT_MANIFEST" ]]; then
+                        printf '%s\n' "$trio" >> "$_nhf_todo"; n_todo=$((n_todo+1)); continue
+                    fi
                     mkdir -p "$nhf_dir/$trio"
                     errf="$HPRV_TMPDIR/nhf.${trio}.${sample}.err"
                     # shellcheck disable=SC2086  # $NHF_MMAP is an intentional word (empty or --memory-mapping)
                     if hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen classify \
                             --bam "$cram" --variants "$tvcf" --ref-fasta "$REF" \
                             --kraken2-db "$KRAKEN2_DB" --confidence "$NHF_CONF" \
-                            --threads "$JOBS" $NHF_MMAP --out-prefix "$outp" 2>"$errf" \
+                            --threads "$NHF_THREADS" $NHF_MMAP --out-prefix "$outp" 2>"$errf" \
                        && [[ -f "$out_tsv" ]]; then
                         printf '%s\n' "$nhf_key" > "${out_tsv}.done"; n_nhf=$((n_nhf+1))
                     else
@@ -316,10 +400,24 @@ if is_set "$KRAKEN2_DB"; then
                     rm -f "$errf"
                 done
             done < <(tail -n +2 "$resolved")
-            log "Step 8b: NHF-screened $n_nhf (trio,member) mini-CRAM(s) (members=$NHF_MEMBERS, confidence=$NHF_CONF, memmap=${NHF_MMAP:-off})"
+            if [[ -n "$NHF_EMIT_MANIFEST" ]]; then
+                sort -u "$_nhf_todo" > "$NHF_EMIT_MANIFEST"; rm -f "$_nhf_todo"
+                _n="$(grep -cve '^[[:space:]]*$' "$NHF_EMIT_MANIFEST" 2>/dev/null || true)"
+                log "Step 8b: $((_n + 0)) trio(s) need NHF work ($n_todo member-task(s)); $n_nhf already complete -> $NHF_EMIT_MANIFEST"
+                exit 0
+            fi
+            rm -f "$_nhf_todo"
+            log "Step 8b: NHF-screened $n_nhf (trio,member) mini-CRAM(s) (members=$NHF_MEMBERS, confidence=$NHF_CONF, memmap=${NHF_MMAP:-off}, threads=$NHF_THREADS)"
             audit 08_igv nhf_screened "$n_nhf"
         fi
     fi
+fi
+
+# A scatter task ends here. Rebuilding variants.tsv from N concurrent tasks would be a write race
+# on one file, and each task only knows its own trio — the join is the gather's job.
+if [[ -n "$NHF_TRIO" ]]; then
+    log "Step 8b: trio '$NHF_TRIO' done (array task). Run --nhf-gather to fold NHF into variants.tsv."
+    exit 0
 fi
 
 # --- assemble variants.tsv + sample_qc.tsv + trios.tsv + curation.json ---
@@ -343,4 +441,21 @@ printf '{"genome": "%s"}\n' "$GENOME" > "$DATA/config.json"   # server --genome 
 
 audit 08_igv variants "$(($(grep -cve '^[[:space:]]*$' "$DATA/variants.tsv") - 1))"
 audit 08_igv minicrams "$n_extracted"
+# Gather reporting. UNLIKE Step 2's --annotate-gather, an unscreened member here is LEGITIMATE,
+# not a broken run: `members: carriers` deliberately skips hom-ref parents, a member may have no
+# mini-CRAM, and a failed classify is designed to degrade to blank NHF columns (which
+# build_variants_tsv renders as empty — distinct from a real 0.0). So: report counts, never die,
+# and never imply completeness.
+if [[ "$NHF_GATHER" -eq 1 ]]; then
+    _scr=$(find "$nhf_dir" -name '*.variant_nhf.tsv' 2>/dev/null | wc -l | tr -d ' ')
+    _exp=$(find "$DATA/crams" -name '*.cram' 2>/dev/null | wc -l | tr -d ' ')
+    log "Step 8b gather: $_scr member(s) have NHF results; $_exp mini-CRAM(s) exist."
+    if [[ "$_scr" -lt "$_exp" ]]; then
+        log "         $(( _exp - _scr )) member(s) have no NHF row. EXPECTED when members=$NHF_MEMBERS"
+        log "         (hom-ref parents are skipped by design); also covers failed/not-yet-run tasks."
+        log "         Those render as BLANK nhf columns, which is NOT the same as 0.0 (screened, clean)."
+        log "         Re-run --nhf-emit-manifest to see what is genuinely outstanding."
+    fi
+    audit 08_igv nhf_gather_screened "$_scr"
+fi
 log "Step 8 complete: igv review export -> $DATA (variants.tsv, crams/, vcfs/, trios.tsv, curation.json)"

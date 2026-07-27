@@ -102,3 +102,41 @@ Steps 0/1/4 (per-trio, currently serial) are the next candidates for trio-arrays
 WGS, Step 1 (the union build) becomes the tall pole once Step 2 is scattered. The `.done`
 idempotency they already carry makes that the natural next increment; see
 [docs/limitations.md](../../docs/limitations.md).
+
+---
+
+## Optional: Step 8b (NHF) as a per-trio array
+
+Step 8b is the dominant cost after Step 2 on a large cohort — **classification, not kraken2 DB
+load, dominates** (~20 min/trio on WGS), so 221 trios is ~74 h serial. It parallelises per trio
+almost linearly.
+
+```bash
+# AFTER a completed Step 8 (the array reads the mini-CRAMs + per-trio VCFs that Step 8 produces)
+sbatch phase.sbatch nhf-plan
+```
+
+`nhf-plan` writes `$WORK/igv/nhf_trios.txt` (only trios with outstanding work, so a resubmit
+schedules a smaller array), submits `nhf-scatter` as a job array (one task = one trio), then a
+dependent `nhf-gather` that folds the results into `variants.tsv`.
+
+Knobs live in `cluster.env`: `NHF_CPUS` / `NHF_MEM` / `NHF_TIME`, `NHF_CONCURRENCY`, and
+`NHF_GATHER_*`. Set `outputs.igv.nonhuman_screen.threads` to match `NHF_CPUS` — it is **decoupled**
+from `outputs.igv.extract_jobs`, which bounds FUSE-gentle CRAM slicing and is deliberately small.
+
+Three things that differ from the Step-2 scatter:
+
+- **It needs Step 8 to have run.** Sub-tasks deliberately skip Pass 1/2, which rebuild state shared
+  across trios (the per-trio VCF copy that 8b's content key hashes, the candidate BEDs, the extract
+  task list). Concurrent rebuilds would mean torn reads and unstable keys.
+- **No source-CRAM mount is touched.** 8b reads only `$WORK/igv/{crams,vcfs}/`, so it is safe on
+  batch compute even at sites where Step 8's slicing must run on an interactive node
+  (`DOWN_TO=7` + Step 8 elsewhere).
+- **Gather depends `afterany`, not `afterok`, and never dies.** An unscreened member is legitimate
+  here — `members: carriers` skips hom-ref parents by design, and a failed classify degrades to
+  blank NHF columns (distinct from a real `0.0`). Gather reports counts and writes `variants.tsv`
+  regardless; re-run `nhf-plan` to see what is genuinely outstanding.
+
+Keep `NHF_CONCURRENCY` modest: every task does random reads over one shared kraken2 DB (hundreds of
+GB, far too large to page-cache), so a wide array is real shared-storage load. Do **not** stage the
+DB to node-local scratch — it exceeds typical local disk and the copy costs more than it saves.

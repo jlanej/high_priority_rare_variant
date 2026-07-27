@@ -27,6 +27,8 @@ CFG="" FROM=0 TO=8
 # only change how Step 2 runs and are forwarded verbatim to 02_annotate_sites.sh; every other step
 # is unaffected. Typically paired with `--from 2 --to 2` so one job does one Step-2 sub-task.
 S2_PASSTHRU=()
+# Distributed Step-8b (NHF) pass-throughs — see pipeline/slurm/ and 08_igv_export.sh.
+S8_PASSTHRU=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) CFG="$2"; shift 2;;
@@ -35,6 +37,9 @@ while [[ $# -gt 0 ]]; do
         --annotate-emit-manifest) S2_PASSTHRU+=(--emit-shard-manifest "$2"); shift 2;;
         --annotate-shard-contig)  S2_PASSTHRU+=(--shard-contig "$2"); shift 2;;
         --annotate-gather)        S2_PASSTHRU+=(--gather); shift;;
+        --nhf-emit-manifest)      S8_PASSTHRU+=(--nhf-emit-manifest "$2"); shift 2;;
+        --nhf-trio)               S8_PASSTHRU+=(--nhf-trio "$2"); shift 2;;
+        --nhf-gather)             S8_PASSTHRU+=(--nhf-gather); shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
@@ -294,13 +299,18 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
                  --nhf-members    "$(cfg_get outputs.igv.nonhuman_screen.members carriers)"
                  --nhf-confidence "$(cfg_get outputs.igv.nonhuman_screen.confidence 0.05)"
                  --nhf-min-reads  "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)")
+            # threads: 0 => fall back to extract_jobs (08 does that), so only pass a real value.
+            _nthr="$(cfg_get outputs.igv.nonhuman_screen.threads 0)"
+            [[ "$_nthr" =~ ^[0-9]+$ && "$_nthr" -ge 1 ]] && ig+=(--nhf-threads "$_nthr")
             [[ "$(cfg_get outputs.igv.nonhuman_screen.memory_mapping true)" != "false" ]] \
                 && ig+=(--nhf-memory-mapping)
         else
             warn "outputs.igv.nonhuman_screen.enabled but resources.kraken2_db is unset/not a dir ('$kdb') — skipping NHF annotation (variants.tsv NHF columns will be blank)"
         fi
     fi
-    bash "$HERE/08_igv_export.sh" "${ig[@]}"
+    # Distributed Step-8b pass-throughs (pipeline/slurm/): forwarded verbatim. They only change
+    # HOW 8b runs; Steps 0-7 are unaffected. Typically paired with `--from 8 --to 8`.
+    bash "$HERE/08_igv_export.sh" "${ig[@]}" ${S8_PASSTHRU[@]+"${S8_PASSTHRU[@]}"}
 fi
 
 # Assemble the run audit summary (what went where, and why).
