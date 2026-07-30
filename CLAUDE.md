@@ -151,7 +151,17 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   NHF columns blank. **The join is on the 0-based key (`pos-1`)** — nonhuman-screen keys variants
   0-based (`{chrom}:{pos0}:{ref}:{alt}`) while `variants.tsv` `pos` is 1-based; `igv._load_nhf_tsv` +
   the `pos-1` join in `build_variants_tsv` is the single load-bearing off-by-one.
-- **Step 9 output**: `variants.prioritized.tsv` + `genes.prioritized.tsv` (`src/hprv/prioritize.py`
+- **Step 9 output**: `variants.prioritized.tsv` + `genes.prioritized.tsv`, plus — when the input was
+  Step 8's table — **`igv/variants.prioritized.tsv`** (`--out-igv-variants`), the table a reviewer
+  actually opens: every input column verbatim in its original order **plus** every prioritization
+  column appended. It exists because `variants.prioritized.tsv` is NOT a drop-in for
+  `igv/variants.tsv` — it sits outside `igv/` and its column set omits the `*_file`/`*_index`/
+  `*_vcf*` track paths, which are RELATIVE to the `igv/` data dir, so the review server would
+  render a sortable list with no mini-CRAMs and no VCF tracks. The appended set is the strict
+  COMPLEMENT of the input header (input values are never overwritten), rows are carried by
+  POSITION rather than re-joined on `chrom/pos/ref/alt/trio_id` (ambiguous for two ALTs of one
+  multiallelic site in one trio), never-drop is asserted a second time on this file, and it is
+  sorted by `rank_agnostic` so it opens honest with an overlay loaded. (`src/hprv/prioritize.py`
   = ALL pure logic, no I/O; `09_prioritize.py` = the CLI). **Input precedence: `igv/variants.tsv`
   (Step 8) when it exists, else `candidates.calls.tsv` (Step 5)** — Step 8's table is the only one
   carrying the NHF columns the quality term reads, and with Step 5's table every call correctly

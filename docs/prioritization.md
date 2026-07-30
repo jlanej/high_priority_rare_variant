@@ -883,6 +883,54 @@ at a GWAS locus", not "rare coding variants here matter". And T2 is not uniform 
 
 ---
 
+### 14. The igv.js review table — where the triage actually gets used
+
+The point of the two layers above is to stop a reviewer curating thousands of variants by hand.
+That only happens if the tiers reach the tool the reviewing is done in, and
+`variants.prioritized.tsv` **cannot** serve that role for two independent reasons:
+
+1. It is written to the work-dir root, while the igv.js server's data dir is `igv/`.
+2. Its column set omits `child_/mother_/father_file`, `*_index` and the `*_vcf*` columns — the
+   per-member mini-CRAM and VCF track paths, which are **relative to `igv/`**. Pointing the server
+   at it would give a sortable list with no read-level view at all, which is the one thing Step 8
+   exists to provide.
+
+So Step 9 takes `--out-igv-variants` and writes a third table, **`igv/variants.prioritized.tsv`**:
+every column of the input verbatim and in its original order, plus every prioritization column
+appended. `run_pipeline.sh` passes it only when the input actually was `igv/variants.tsv` — built
+from Step 5's calls there would be no tracks to point at, and putting a track-less table inside
+`igv/` would merely be misleading.
+
+Three properties make it a drop-in replacement for the reviewer's variants file:
+
+- **Input columns are never overwritten.** The appended set is the strict complement of the input
+  header, so Step 8's table stays authoritative for everything it already reports and this file
+  only ever ADDS. Asserted byte-for-byte in
+  `tests/test_pure.py:test_prioritize_igv_review_table_preserves_track_paths`.
+- **Rows are carried by position, not re-joined.** A `chrom/pos/ref/alt/trio_id` join is ambiguous
+  for two ALTs of one multiallelic site in one trio; positional identity cannot go wrong. The test
+  fixture contains exactly that decoy pair.
+- **Never-drop is asserted again here.** A silently shortened review list is the failure mode
+  nobody notices, so row-count conservation is re-checked on this file rather than inferred from
+  the loop that built it.
+
+It is sorted by **`rank_agnostic`**, so the file opens honest even when a `--gene-prior` overlay is
+loaded; `rank_prior` and `rank_delta` are columns the reviewer sorts on in the UI, which keeps the
+"what did the phenotype list change?" question one click away instead of a separate run.
+
+Everything past the required `chrom/pos/ref/alt` is filterable in igv.js, so the useful review
+columns are: `variant_tier`, `priority_points_agnostic`, `rank_agnostic`, `rank_prior`,
+`rank_delta`, `gene_tier`, `downweight_reason`, `review_flag`, `excess_ratio`, `q_nb`,
+`nhf_status`, `moi_coherence`, `clinvar_strength`, and the overlay provenance
+(`gene_list_prior_member` / `_tier` / `_weight` / `_evidence_class` /
+`_excluded_non_germline` / `_set_applied`) alongside Step 8's own `gene`, `consequence`, `impact`,
+`grpmax_af`, `max_af_pops`, `cadd`, `spliceai_ds`, `clin_sig` and the NHF columns.
+
+Because a filter in igv.js is a **view**, not a deletion, filtering here does not violate
+never-drop: the file on disk still carries every candidate, and the reviewer can always widen back
+out. That is the whole reason the down-weight sets a tier and a reported penalty rather than
+removing a row — the decision of what not to look at stays with the reviewer, and stays reversible.
+
 ## Recommended defaults (this pipeline)
 
 | Parameter | Default | Status | Source / notes |
