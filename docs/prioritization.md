@@ -1013,6 +1013,58 @@ never-drop: the file on disk still carries every candidate, and the reviewer can
 out. That is the whole reason the down-weight sets a tier and a reported penalty rather than
 removing a row — the decision of what not to look at stays with the reviewer, and stays reversible.
 
+## Raw source pass-through — nothing is hidden behind the merge
+
+Every external table Step 9 merges is **also emitted verbatim**, one prefixed column per source
+column, in all three output files. This is on by default; `--no-source-columns` suppresses it.
+
+| prefix | source |
+|---|---|
+| `src_mutrate_` | `--mutrate` — the gnomAD v2.1.1 constraint table (76 columns) |
+| `src_constraint_` | `--constraint` — optional LOEUF/pLI/s_het/pHaplo table |
+| `src_segdup_` | `--segdup` — segmental-duplication fractions |
+| `src_moi_` | `--gene-moi` — canonical mode-of-inheritance table |
+| `src_burden_` | `--genes` — Step 6 `genes.ranked.tsv` |
+| `src_prior_` | `--gene-prior` — the optional phenotype overlay (only when one is supplied) |
+
+Three reasons this is a correctness feature and not just convenience:
+
+1. **Reproducibility without re-running the join.** `E = C·μ` is re-derivable from
+   `src_mutrate_mu_mis/mu_syn/mu_lof` on the emitted row alone. On the study cohort, *OR4Q3*'s
+   raw cells give μ_tot = 9.825e-06 and an implied C = 40,529.2, reproducing the emitted
+   `excess_ratio` exactly. A collaborator can audit any number without the source files.
+2. **Filters this step does not anticipate.** `pLI`, `mis_z`, `oe_lof_upper_bin`, the
+   per-ancestry `classic_caf_*` columns and `brain_expression` all ride through untouched, so a
+   collaborator can slice on them directly. Nothing forces a re-merge.
+3. **Curated and raw are deliberately both present, and are NOT interchangeable.** The bare
+   columns (`pLI`, `oe_syn`, `oe_lof_upper`, …) are what the **scoring** read — possibly imputed,
+   unit-normalised, or chosen between two supplied tables. The `src_*` columns are the untouched
+   source cells. **A disagreement between them is meaningful** (it means a fallback or an
+   imputation fired) and stays visible rather than being silently reconciled.
+
+**The `--gene-prior` overlay is included, and that one matters most for interpretation.**
+`gene_list_prior_tier` and `..._weight` say *that* a gene carries a prior; they cannot say *why*,
+and the weight is uncalibrated. The overlay's own columns are what let a reviewer judge whether a
+phenotype prior transfers to their cohort. Carried verbatim from the GCT resource, that is
+`site_specificity`, `anatomical_transfer`, `replication`, `pmids`, `curated_cpg_standing`,
+`evidence_class`, `gene_sets`, `moi` and `notes` — so a *BAK1* call arrives with
+`COMMON_VARIANT_LOCUS__weak_evidence_that_rare_coding_variants_in_this_gene_are_causal` and its
+three PMIDs attached, and a *CHEK2* call with `replicated_independently_x2` and
+`gonadal_tgct_adult_onset__intracranial_transfer_untested`. A reviewer can then discount a
+GWAS-locus prior on the row itself rather than being told only that a T3 prior fired. A gene
+contributed by **set membership alone** has no source row, so its `src_prior_*` cells are blank
+while `gene_list_prior_set_applied` still names the set that supplied the prior.
+
+Three contracts the implementation holds, asserted in `tests/test_pure.py`
+(`test_prioritize_emits_raw_source_columns`, `test_prioritize_emits_raw_gene_prior_columns`): a
+gene **absent** from a source yields `''`
+(MISSING), never `0.0` — the same blank-is-not-zero rule as NHF; and the **per-source** prefixes
+keep same-named columns from two tables distinct (gnomAD's `pLI` and a LOEUF-only table's `pLI`
+land as `src_mutrate_pli` and `src_constraint_pli`), so neither can shadow the other. Source
+columns are appended **after** the curated set, so leading columns are unchanged. The audit log
+records `source_columns_emitted` and a per-source gene/column tally, and `--no-source-columns`
+participates in the idempotency key so toggling it re-runs rather than serving a stale file.
+
 ## Recommended defaults (this pipeline)
 
 | Parameter | Default | Status | Source / notes |

@@ -162,7 +162,21 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   POSITION rather than re-joined on `chrom/pos/ref/alt/trio_id` (ambiguous for two ALTs of one
   multiallelic site in one trio), never-drop is asserted a second time on this file, and it is
   sorted by `rank_agnostic` so it opens honest with an overlay loaded. (`src/hprv/prioritize.py`
-  = ALL pure logic, no I/O; `09_prioritize.py` = the CLI). **Input precedence: `igv/variants.tsv`
+  = ALL pure logic, no I/O; `09_prioritize.py` = the CLI). **Every merged source table is ALSO
+  emitted verbatim** — one `src_<source>_<column>` per source column (`src_mutrate_` = the 76
+  gnomAD constraint columns, plus `src_constraint_`/`src_segdup_`/`src_moi_`/`src_burden_`/
+  `src_prior_`) —
+  appended AFTER the curated set so leading columns are unchanged. Two load-bearing rules: the
+  prefix is **per source**, because two tables legitimately carry the same column name (gnomAD's
+  `pLI` and a LOEUF-only table's `pLI`) and one shared `src_` would silently drop one; and a gene
+  ABSENT from a source yields `''` (MISSING), never `0.0`. The bare curated columns are what the
+  SCORING read (possibly imputed or chosen between tables) and are NOT interchangeable with their
+  `src_*` counterparts — a disagreement means a fallback fired and must stay visible.
+  `--no-source-columns` suppresses the block and is part of the idempotency key. For
+  `src_prior_` specifically: overlay entries are keyed UPPER-cased internally so the pass-through
+  registers each gene under both casings (a case-only mismatch would otherwise blank the raw
+  cells while the scoring join still fired), and a gene contributed by SET membership alone has
+  no source row — blank `src_prior_*`, with `gene_list_prior_set_applied` naming the set. **Input precedence: `igv/variants.tsv`
   (Step 8) when it exists, else `candidates.calls.tsv` (Step 5)** — Step 8's table is the only one
   carrying the NHF columns the quality term reads, and with Step 5's table every call correctly
   reads `nhf_status=not_screened`. Optional inputs each degrade with a loud WARN exactly as Step 6

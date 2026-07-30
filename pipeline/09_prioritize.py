@@ -137,8 +137,8 @@ def _run_key(args) -> str:
             with open(path, "rb") as fh:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
-    # scalar args that change the arithmetic
-    for v in (args.n_trios, args.min_control_genes):
+    # scalar args that change the arithmetic OR the emitted column set
+    for v in (args.n_trios, args.min_control_genes, args.no_source_columns):
         h.update(b"\x00" + str(v).encode())
     return h.hexdigest()
 
@@ -195,6 +195,56 @@ def _find(cols, *names):
     return None
 
 
+# --- raw-source pass-through -------------------------------------------------------------
+# Every external table this step merges is ALSO emitted verbatim, one prefixed column per source
+# column, so a collaborator can reproduce and re-derive any number without re-running the join —
+# and can filter on a source field this step never interprets (pLI, mis_z, oe_lof_upper_bin, the
+# per-ancestry classic_caf_* columns, ...). The curated columns above stay where they are: they
+# are the ones the SCORING reads, and they are computed (unit-normalised, imputed, or chosen
+# between two tables), so they are NOT interchangeable with their raw counterparts. When both are
+# present the prefixed one is the untouched source value and the bare one is what the score used;
+# a disagreement between them is meaningful and must stay visible.
+#
+# Per-source prefixes, not one shared `src_`: two tables legitimately carry the same column name
+# (gnomAD's constraint file and a LOEUF-only table both have `pLI`), and collapsing them would
+# silently drop one. The gene KEY column is skipped — it is already `gene`.
+SOURCE_PREFIX = {
+    "mutrate": "src_mutrate_",
+    "constraint": "src_constraint_",
+    "segdup": "src_segdup_",
+    "gene_moi": "src_moi_",
+    "gene_prior": "src_prior_",
+    "genes_ranked": "src_burden_",
+}
+
+
+def _source_columns(sources):
+    """-> ([column, ...], {column: (label, raw_name)}). Deterministic order: source, then file order."""
+    cols, origin = [], {}
+    for label, (_by_gene, raw_cols, _path) in sources.items():
+        pfx = SOURCE_PREFIX.get(label, f"src_{label}_")
+        for c in raw_cols:
+            if not c or c.lower().lstrip("#").strip() in GENE_KEYS:
+                continue                      # the key is already emitted as `gene`
+            name = pfx + c.lstrip("#").strip()
+            if name in origin:                # same source, duplicate header cell
+                continue
+            cols.append(name)
+            origin[name] = (label, c)
+    return cols, origin
+
+
+def _source_values(gene, sources, source_cols, origin):
+    """Raw source cells for one gene. A gene absent from a source yields '' for that source's
+    columns — MISSING, never 0.0, matching `_fmt`'s contract everywhere else in this step."""
+    out = {}
+    for name in source_cols:
+        label, raw = origin[name]
+        row = sources[label][0].get(gene)
+        out[name] = (row or {}).get(raw, "")
+    return out
+
+
 def _read_gene_prior_overlay(path, cfg):
     """Read the optional Class-B overlay -> ``{GENE: entry}`` via ``prioritize.parse_gene_prior_overlay``.
 
@@ -249,6 +299,11 @@ def _read_gene_prior_overlay(path, cfg):
         except (ValueError, OSError) as e:
             sys.stderr.write(f"WARN: could not read gene_sets from {sidecar} ({e}); "
                              "gene-level priors only\n")
+    # The overlay's OWN column order, for the raw pass-through. Taken from the parsed header
+    # rather than from an entry's keys, because parse_gene_prior_overlay adds derived keys
+    # (points_scale, prior_weight_raw, germline_excluded, source) that are not source data, and
+    # because a bare symbol list has no columns at all.
+    prior_cols = [c for c in (rows[0].keys() if (rows and isinstance(rows[0], dict)) else [])]
     overlay = P.parse_gene_prior_overlay(rows, gene_sets=gene_sets, cfg=cfg)
     n_excl = sum(1 for e in overlay.values() if e.get("germline_excluded"))
     n_set = sum(1 for e in overlay.values() if e.get("source") == "gene_set")
@@ -264,7 +319,7 @@ def _read_gene_prior_overlay(path, cfg):
         sys.stderr.write(
             "  NOTE: prior_weight is UNCALIBRATED — an ordering default, NOT a likelihood ratio. "
             "It scales the configured maximum prior; never report it as an odds ratio.\n")
-    return overlay
+    return overlay, prior_cols
 
 
 def _read_gene_set(path, label):
@@ -325,6 +380,13 @@ def main(argv=None) -> int:
     ap.add_argument("--min-control-genes", type=int, default=-1,
                     help="halt if the established-gene union has fewer than this many genes "
                          "(default from prioritization.gene_downweight.min_control_genes)")
+    ap.add_argument("--no-source-columns", action="store_true",
+                    help="omit the src_*_ raw pass-through columns. Default is to EMIT them: every "
+                         "merged source column is written verbatim alongside the derived value so "
+                         "a collaborator can reproduce any number and filter on fields this step "
+                         "does not interpret (pLI, mis_z, per-ancestry classic_caf_*). Use this "
+                         "only when a narrow file is required — it makes the output "
+                         "non-self-describing.")
     ap.add_argument("--force", action="store_true", help="ignore the .done marker and re-run")
     args = ap.parse_args(argv)
 
@@ -536,7 +598,8 @@ def main(argv=None) -> int:
             "actionability) to enable it.\n")
 
     try:
-        prior_overlay = _read_gene_prior_overlay(prior_path, cfg) if prior_path else {}
+        prior_overlay, prior_cols = (_read_gene_prior_overlay(prior_path, cfg) if prior_path
+                                     else ({}, []))
     except ValueError as e:
         # A malformed overlay is a hard stop, NOT a degrade-with-a-warning. Every other optional
         # resource degrades because its absence is honestly reportable (no excess statistic, no
@@ -566,6 +629,43 @@ def main(argv=None) -> int:
     if args.genes and not ranked:
         sys.stderr.write("WARN: no usable rows from --genes; the recurrence term will be 0 for "
                          "every variant (Step 6 output missing or unkeyed)\n")
+
+    # Raw source pass-through. Registered AFTER every table is read so the emitted set reflects
+    # what actually resolved: an absent optional resource contributes no columns rather than a
+    # block of empties. Suppressed with --no-source-columns for a narrow file.
+    sources = {}
+    if not args.no_source_columns:
+        for label, by_gene, raw_cols, path in (
+                ("mutrate", mut, mcols, args.mutrate),
+                ("constraint", con, ccols, args.constraint),
+                ("segdup", seg, scols, args.segdup),
+                ("gene_moi", moi, moicols, args.gene_moi),
+                ("genes_ranked", ranked, rcols, args.genes)):
+            if by_gene and raw_cols:
+                sources[label] = (by_gene, raw_cols, path)
+        # The --gene-prior overlay rides through too, so the FULL evidence record travels with the
+        # call: tier and weight alone do not tell a reviewer WHY a gene carries a prior. For the
+        # GCT resource that means pmids, site_specificity, anatomical_transfer, replication,
+        # curated_cpg_standing, gene_sets and notes — the columns that let someone judge whether a
+        # phenotype prior transfers to THEIR cohort (e.g. that CHEK2's evidence is gonadal-TGCT and
+        # its intracranial transfer is untested). Two overlay-specific wrinkles handled here:
+        # entries are keyed UPPER-cased, and a gene present only via SET membership has no source
+        # row, so its raw columns are blank while `gene_list_prior_set_applied` still names the set.
+        if prior_overlay and prior_cols:
+            gene_row = {}
+            for _k, _e in prior_overlay.items():
+                if _e.get("source") != "gene_row":
+                    continue
+                # Keyed under BOTH the overlay's own casing and the upper-cased form the overlay
+                # dict uses, because the candidate list's symbol casing is not guaranteed to match
+                # the resource's. The scoring join is already case-insensitive; this keeps the raw
+                # pass-through from silently blanking on a case difference alone.
+                _sym = P._s(_e.get("gene")) or _k
+                gene_row[_sym] = _e
+                gene_row.setdefault(_sym.upper(), _e)
+            if gene_row:
+                sources["gene_prior"] = (gene_row, prior_cols, args.gene_prior)
+    source_cols, source_origin = _source_columns(sources)
 
     gene_rows = {}
     e_source_tally = {"gnomad_mu": 0, "cds_fallback": 0, "none": 0}
@@ -630,6 +730,10 @@ def main(argv=None) -> int:
         for c in ("n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
                   "recurrent", "recurrence_kind", "p_recurrence", "q_recurrence"):
             row[c] = (ranked.get(g) or {}).get(c, "")
+        # Raw merged-source cells, verbatim. Written last so a source column can never overwrite
+        # a computed one (the prefixes make a collision impossible, but the ordering makes that
+        # independent of the prefix scheme holding).
+        row.update(_source_values(g, sources, source_cols, source_origin))
         gene_rows[g] = row
 
     # BH-FDR across the FULL universe (including the zero-count genes, whose p is 1) — not
@@ -725,6 +829,11 @@ def main(argv=None) -> int:
                   "n_carriers", "n_dominant", "n_biallelic", "n_xlinked",
                   "p_recurrence", "q_recurrence", "gene_list_prior_member"):
             row[c] = grow.get(c, "")
+        # The gene's raw source cells ride onto every variant in that gene, so the per-variant
+        # file is self-contained: a collaborator can filter on pLI or re-derive the excess ratio
+        # without also loading genes.prioritized.tsv and joining.
+        for c in source_cols:
+            row[c] = grow.get(c, "")
         # Index back into `variants` so the igv.js merge can reproduce the INPUT row byte-for-byte
         # instead of re-joining on chrom/pos/ref/alt/trio_id — a key join is ambiguous for two ALTs
         # of one multiallelic site in one trio, and positional identity cannot go wrong. Not in
@@ -749,10 +858,14 @@ def main(argv=None) -> int:
     n_promoted = sum(1 for r in out_rows if r["rank_delta"] < 0)
 
     # --- write ---
-    for path, cols, rows in ((args.out_genes, GENE_COLUMNS,
+    # Raw source columns are appended AFTER the curated set in both files, so the leading columns
+    # a reviewer sees are unchanged and every downstream reader keyed on position still works.
+    gene_out_cols = GENE_COLUMNS + source_cols
+    variant_out_cols = VARIANT_COLUMNS + source_cols
+    for path, cols, rows in ((args.out_genes, gene_out_cols,
                               sorted(gene_rows.values(),
                                      key=lambda r: (-(r["excess_ratio"] or 0.0), r["gene"]))),
-                             (args.out_variants, VARIANT_COLUMNS,
+                             (args.out_variants, variant_out_cols,
                               sorted(out_rows, key=lambda r: r["rank_agnostic"]))):
         with open(path, "w", newline="") as out:
             out.write("\t".join(cols) + "\n")
@@ -802,6 +915,13 @@ def main(argv=None) -> int:
     A("n_trios", n_trios)
     A("gene_universe_size", n_universe)
     A("gene_universe_zero_count", n_zero)
+    # Provenance of the raw pass-through: which sources were merged, and how many of their
+    # columns rode through verbatim. Reproducing an output means reproducing this set.
+    A("source_columns_emitted", len(source_cols))
+    for _lbl, (_bg, _rc, _p) in sorted(sources.items()):
+        A(f"source_table.{_lbl}.genes", len(_bg))
+        A(f"source_table.{_lbl}.columns",
+          sum(1 for c in source_cols if source_origin[c][0] == _lbl))
     if fit:
         A("null_model", null_model)
         A("null_C", f"{C:.6g}")
