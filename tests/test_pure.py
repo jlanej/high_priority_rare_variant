@@ -442,7 +442,38 @@ def test_igv_nhf_disabled_is_blank():
 # =============================================================================
 # Step 9 — prioritization (src/hprv/prioritize.py + pipeline/09_prioritize.py)
 # =============================================================================
+class _Skip(Exception):
+    """A test could not run because an optional dependency is absent. See `_requires`."""
+
+
+def _requires(*mods):
+    """Raise `_Skip` if any of `mods` cannot be imported.
+
+    This file is contracted to run on a BARE HOST with no heavy dependencies (CLAUDE.md, Testing:
+    "Host, no heavy deps ... python3 tests/test_pure.py"). The Step-9 tests that drive
+    `09_prioritize.py:main()` break that contract transitively: main() reads the config through
+    `hprv.config.load_config`, which does `import yaml`. Without a guard the whole suite dies with
+    a ModuleNotFoundError partway through — which is what CI did.
+
+    Skipping is the lesser evil, but ONLY if it is loud: `_run_all` refuses to print a clean bill
+    of health when anything was skipped, because a partial run that reads as a full one is exactly
+    the silent coverage loss this repo guards against everywhere else. CI installs pyyaml, so
+    these tests DO execute there rather than being permanently skipped.
+    """
+    missing = []
+    for m in mods:
+        try:
+            importlib.import_module(m)
+        except ImportError:
+            missing.append(m)
+    if missing:
+        raise _Skip(", ".join(missing))
+
+
 def _load_p9():
+    # The single chokepoint for every test that drives the Step-9 CLI, so the dependency those
+    # tests need transitively is declared once, here, rather than in each of them.
+    _requires("yaml")
     spec = importlib.util.spec_from_file_location(
         "p9", os.path.join(os.path.dirname(__file__), "..", "pipeline", "09_prioritize.py"))
     m = importlib.util.module_from_spec(spec)
@@ -1867,10 +1898,25 @@ def _run_all():
     import inspect
     fns = [f for n, f in sorted(globals().items())
            if n.startswith("test_") and inspect.isfunction(f)]
+    skipped = []
     for f in fns:
-        f()
+        try:
+            f()
+        except _Skip as e:
+            skipped.append((f.__name__, str(e)))
+            print(f"SKIP {f.__name__} — needs {e}")
+            continue
         print(f"PASS {f.__name__}")
-    print(f"\nAll {len(fns)} pure-logic tests passed.")
+    if skipped:
+        # Deliberately NOT "all tests passed". A partial run must not read like a full one; the
+        # skipped set here contains the never-drop and cache-invalidation guards.
+        need = sorted({m for _, m in skipped})
+        print(f"\n{len(fns) - len(skipped)} passed, {len(skipped)} SKIPPED for missing "
+              f"dependencies ({', '.join(need)}) — this is NOT full coverage. Run "
+              f"`pip install {' '.join(need).replace('yaml', 'pyyaml')}` to exercise the whole "
+              f"suite (CI does).")
+    else:
+        print(f"\nAll {len(fns)} pure-logic tests passed.")
 
 
 if __name__ == "__main__":

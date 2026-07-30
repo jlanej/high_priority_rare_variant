@@ -370,7 +370,16 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
   fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
   both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
-  code equals `config.example.yaml`'s value). **52 tests, no network and no VCF.**
+  code equals `config.example.yaml`'s value). **54 tests, no network and no VCF.**
+  **One documented exception to "no heavy deps":** the 6 tests that drive `09_prioritize.py:main()`
+  need `yaml` transitively (`load_config` does `import yaml`). They declare it at the `_load_p9()`
+  chokepoint and **SKIP** without it — and `_run_all` then refuses to print "All N passed", instead
+  reporting `48 passed, 6 SKIPPED ... NOT full coverage`, because the skipped set holds the
+  never-drop and cache-invalidation guards. **CI `pip install pyyaml`s** so they actually execute
+  there rather than being permanently green-by-skipping. Before calling this suite green, run it the
+  way CI does — a BARE `python3`, not an env that happens to carry the container's packages. (This
+  bit us: the Step-9 CLI tests were reported passing from a local env with pyyaml, and CI died with
+  `ModuleNotFoundError: No module named 'yaml'` partway through the run.)
 - **End-to-end integration** (`tests/integration/`): `run_integration.sh` generates a tiny
   self-consistent mock genome + trios (`make_mock_data.py`) engineered to exercise every mode
   and filter path, runs resolve + Steps 0,1,3,4,5,6,8,9 with REAL bcftools + the python steps (only
