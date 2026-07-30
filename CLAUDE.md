@@ -254,6 +254,16 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `composite.gene_list_prior.non_germline_classes` contributes **0.0** and carries
   `gene_list_prior_excluded_non_germline` — reported, never silently dropped. And `prior_weight` is
   **UNCALIBRATED** everywhere: an ordering default, never a likelihood ratio or an odds ratio.
+- **The `--gene-prior` overlay reader must sniff COMMA as well as tab.** A phenotype panel handed
+  over by a collaborator is usually a spreadsheet export, and a tab-only gate routed it to the
+  bare-symbol-list branch: every line became one "symbol" (`BRCA1,0.9,GREEN`) that can never match
+  a gene, while the reader still announced `3 genes from panel.csv` and the run went fully
+  phenotype-agnostic. A plausible gene COUNT over a list that matched NOTHING is the failure nobody
+  catches — the reviewer ships an un-prioritised list believing their panel applied. So: comma is
+  accepted, and a HEADERLESS table is a **hard stop** (`return 1`), deliberately unlike every other
+  optional resource, which degrades with a WARN because its absence is honestly reportable. Guard:
+  `test_prioritize_gene_prior_overlay_accepts_csv_and_rejects_headerless_table`. Activation recipe:
+  [docs/prioritization.md#13b](docs/prioritization.md).
 - **A literal `gene` header row will be read as a gene symbol if you let it.** The validation
   cohort's own per-gene counts file has one, CARRYING n=1 — which is why the true totals are
   **25,389 variants / 10,799 symbols**, not the 25,390 / 10,800 raw line count. `GENE_KEYS_LOWER`
