@@ -45,7 +45,7 @@ for the vetted design and the artifact each step produces):
 | 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint | `genes.ranked.tsv` |
 | 7 | Consolidated **.xlsx** supplemental-table summary (documented: gene consolidation, calls, resolution, QC, audit) | `hprv_summary.xlsx` |
 | 8 | **igv.js** trio variant-review export: `variants.tsv` + mini-CRAM slices (child/mother/father) + per-trio VCF tracks | `igv/` |
-| 9 | **Prioritization**: gene excess over its mutational target (NB2, trimmed fit, mid-p calibration) + a six-signal artifact panel + a graded gene down-weight, then per-variant tiering and an additive `priority_points` composite — **a re-rank, never a drop** | `variants.prioritized.tsv`, `genes.prioritized.tsv` |
+| 9 | **Prioritization**: gene excess over its mutational target (NB2, trimmed fit, mid-p calibration) + a six-signal artifact panel + a graded gene down-weight, then per-variant tiering and an additive `priority_points` composite — **a re-rank, never a drop** | `variants.prioritized.tsv`, `genes.prioritized.tsv`, `igv/variants.prioritized.tsv` (the igv.js review table: Step 8's columns + every triage column, so filtering/sorting happens in the review tool) |
 
 Every step records input/output counts and funnel tallies to `audit/counts.tsv`, assembled into
 `audit/summary.md` — a global + per-trio "what went where and why" (see [Auditing](#auditing)).

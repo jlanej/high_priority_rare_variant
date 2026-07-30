@@ -330,6 +330,13 @@ if run_step 9 && [[ "$(cfg_get prioritization.enabled true)" != "false" ]]; then
     pargs=(--variants "$p_in" --config "$CFG" --n-trios "$n_trios"
            --out-variants "$W/variants.prioritized.tsv"
            --out-genes "$W/genes.prioritized.tsv")
+    # The igv.js review table is written INSIDE igv/ (the server's data dir) and ONLY when the
+    # input was Step 8's own table — its *_file/*_index/*_vcf* track paths are relative to that
+    # dir, so a merge built from Step 5's calls would have no tracks to point at and putting it
+    # in igv/ would just be misleading.
+    if [[ "$p_in" == "$W/igv/variants.tsv" ]]; then
+        pargs+=(--out-igv-variants "$W/igv/variants.prioritized.tsv")
+    fi
     [[ -s "$W/genes.ranked.tsv" ]] && pargs+=(--genes "$W/genes.ranked.tsv")
     # Optional resources: each degrades with a WARN inside the step (same contract as Step 6's
     # --constraint), so only pass a path that actually resolves and exists.

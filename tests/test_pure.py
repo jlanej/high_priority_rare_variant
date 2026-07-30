@@ -999,6 +999,104 @@ def test_prioritize_gene_prior_off_by_default_and_gated():
     assert [r["rank_agnostic"] for r in again] == [r["rank_agnostic"] for r in rows]
 
 
+def test_prioritize_igv_review_table_preserves_track_paths():
+    """--out-igv-variants must ADD triage columns without disturbing ANY input column.
+
+    The review table is what a reviewer opens in igv.js, and `variants.prioritized.tsv` cannot
+    serve that role: it lives outside igv/ and its column set omits the *_file/*_index/*_vcf*
+    track paths, which are RELATIVE to the igv/ data dir. Dropping them yields a sortable list
+    with no mini-CRAMs and no VCF tracks — the read-level view Step 8 exists to provide. So this
+    asserts the three things that make it a drop-in: every input column present, in its original
+    order, byte-identical; the prioritization columns appended; and row-count conserved.
+
+    Also pins the phenotype-overlay columns into the review table, since a --gene-prior run is
+    useless for review if the reviewer cannot see WHICH prior fired and what it was worth.
+    """
+    p9 = _load_p9()
+    d = tempfile.mkdtemp(prefix="_hprv_p9igv_")
+    try:
+        # A Step-8-shaped table: annotations, then the relative track paths that must survive.
+        cols = ["chrom", "pos", "ref", "alt", "trio_id", "gene", "consequence", "impact",
+                "inheritance", "grpmax_af", "cadd", "spliceai_ds", "clin_sig", "child_gt",
+                "child_GQ", "child_DP", "child_AB", "nhf_flag",
+                "child_file", "child_index", "child_vcf", "child_vcf_index", "child_vcf_id"]
+
+        def row(pos, gene, **kw):
+            r = {"chrom": "chr1", "pos": str(pos), "ref": "A", "alt": "T", "trio_id": "T1",
+                 "gene": gene, "consequence": "stop_gained", "impact": "HIGH",
+                 "inheritance": "dominant", "grpmax_af": "2e-6", "cadd": "38",
+                 "spliceai_ds": "0.9", "clin_sig": "", "child_gt": "0/1", "child_GQ": "99",
+                 "child_DP": "40", "child_AB": "0.5", "nhf_flag": "0",
+                 "child_file": "crams/T1/kid.cram", "child_index": "crams/T1/kid.cram.crai",
+                 "child_vcf": "vcfs/T1.vcf.gz", "child_vcf_index": "vcfs/T1.vcf.gz.tbi",
+                 "child_vcf_id": "kid"}
+            r.update(kw)
+            return r
+        # Two ALTs of one multiallelic site in one trio: a chrom/pos/ref/alt/trio_id join is
+        # ambiguous here, which is why the merge carries rows by position instead.
+        rows = [row(1000, "PHENO1"), row(1000, "PHENO1", alt="G"),
+                row(2000, "OTHER", impact="MODIFIER", consequence="intron_variant",
+                    cadd="2", spliceai_ds="0.01")]
+        vin = os.path.join(d, "variants.tsv")
+        _write_tsv(vin, cols, rows)
+        pheno = os.path.join(d, "pheno.tsv")
+        with open(pheno, "w") as fh:
+            fh.write("gene\tprior_weight\ttier\tevidence_class\n"
+                     "PHENO1\t0.9\tGREEN\tgermline_predisposition\n")
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("project: {name: t}\nprioritization:\n"
+                     "  gene_downweight: {min_control_genes: 1}\n"
+                     "  composite: {gene_list_prior: {enabled: true}}\n")
+        outv, outg = os.path.join(d, "vp.tsv"), os.path.join(d, "gp.tsv")
+        outi = os.path.join(d, "variants.prioritized.tsv")
+        rc = p9.main(["--variants", vin, "--config", cfgp, "--gene-prior", pheno,
+                      "--n-trios", "1", "--out-variants", outv, "--out-genes", outg,
+                      "--out-igv-variants", outi])
+        assert rc == 0, f"Step 9 exited {rc}"
+
+        import csv
+        with open(outi) as fh:
+            header = fh.readline().rstrip("\n").split("\t")
+            got = list(csv.DictReader(fh, fieldnames=header, delimiter="\t"))
+        # (1) input columns kept, in order, at the FRONT — the merge only ever appends
+        assert header[:len(cols)] == cols, f"input columns disturbed: {header[:len(cols)]}"
+        # (2) the triage columns a reviewer sorts on, including the overlay provenance
+        for c in ("variant_tier", "priority_points_agnostic", "rank_agnostic", "rank_prior",
+                  "rank_delta", "gene_tier", "downweight_reason", "review_flag", "nhf_status",
+                  "gene_list_prior_member", "gene_list_prior_tier", "gene_list_prior_weight",
+                  "pts_gene_list_prior"):
+            assert c in header, f"review table is missing {c}"
+        assert len(header) == len(set(header)), "duplicate column in the review table"
+        # (3) never-drop, and every input value byte-identical
+        assert len(got) == len(rows), f"{len(rows)} in, {len(got)} out"
+        by_alt = {}
+        for r in got:
+            by_alt.setdefault((r["pos"], r["alt"]), r)
+        for src in rows:
+            m = by_alt[(src["pos"], src["alt"])]
+            for c in cols:
+                assert m[c] == src[c], f"input column {c} altered: {m[c]!r} != {src[c]!r}"
+        # the overlay is visible per-variant, and only for its own gene
+        assert by_alt[("1000", "T")]["gene_list_prior_member"] == "1"
+        assert by_alt[("1000", "T")]["gene_list_prior_tier"] == "GREEN"
+        assert by_alt[("2000", "T")]["gene_list_prior_member"] == "0"
+        # sorted by rank_agnostic so the file opens already prioritized
+        ranks = [int(r["rank_agnostic"]) for r in got]
+        assert ranks == sorted(ranks), f"review table not sorted by rank_agnostic: {ranks}"
+
+        # adding --out-igv-variants to an ALREADY-CACHED run must still produce the file
+        os.remove(outi)
+        assert p9.main(["--variants", vin, "--config", cfgp, "--gene-prior", pheno,
+                        "--n-trios", "1", "--out-variants", outv, "--out-genes", outg,
+                        "--out-igv-variants", outi]) == 0
+        assert os.path.exists(outi) and os.path.getsize(outi) > 0, \
+            "cache hit skipped a requested output"
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_prioritize_cache_invalidates_on_config_and_resource_change():
     """Step 9's idempotency marker must be CONTENT-keyed over inputs + config + resources.
 

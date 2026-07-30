@@ -277,6 +277,12 @@ def main(argv=None) -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--out-variants", required=True)
     ap.add_argument("--out-genes", required=True)
+    ap.add_argument("--out-igv-variants", default="",
+                    help="ALSO write a merged table for the igv.js review server: every column of "
+                         "--variants verbatim in its original order (so Step 8's *_file/*_index "
+                         "and *_vcf* track paths, which are RELATIVE to the igv/ data dir, "
+                         "survive) plus every prioritization column appended. Write it INSIDE "
+                         "igv/ or the relative track paths will not resolve.")
     ap.add_argument("--mutrate", default="",
                     help="per-gene mutational-target table (gnomAD v2.1.1 constraint: "
                          "mu_mis/mu_syn/mu_lof + oe_syn/pLI/classic_caf/constraint_flag). "
@@ -317,9 +323,15 @@ def main(argv=None) -> int:
     # the same silent-staleness class the Step-1/2/4/8b caches were content-keyed to avoid.
     marker = args.out_variants + ".done"
     run_key = _run_key(args)   # NB distinct name: `key` is reused as a loop variable below
+    # EVERY requested output must already exist for the cache to hit. Adding --out-igv-variants to
+    # a previously-cached run changes no input, so a key-only test would report "cached" and never
+    # produce the review table — the same staleness trap the content key exists to close.
     if not args.force and os.path.exists(marker) \
             and os.path.getsize(args.out_variants or os.devnull) > 0 \
-            and os.path.exists(args.out_genes) and os.path.getsize(args.out_genes) > 0:
+            and os.path.exists(args.out_genes) and os.path.getsize(args.out_genes) > 0 \
+            and (not args.out_igv_variants
+                 or (os.path.exists(args.out_igv_variants)
+                     and os.path.getsize(args.out_igv_variants) > 0)):
         try:
             with open(marker) as fh:
                 cached = fh.read().strip()
@@ -660,7 +672,7 @@ def main(argv=None) -> int:
     out_rows = []
     tier_v_tally = {t: 0 for t in P.VARIANT_TIERS}
     cap_tally, nhf_tally = {}, {}
-    for r in variants:
+    for src_idx, r in enumerate(variants):
         g = (r.get(gene_c) or "").strip()
         grow = gene_rows.get(g, {})
         norm = dict(r)
@@ -687,6 +699,11 @@ def main(argv=None) -> int:
                   "n_carriers", "n_dominant", "n_biallelic", "n_xlinked",
                   "p_recurrence", "q_recurrence", "gene_list_prior_member"):
             row[c] = grow.get(c, "")
+        # Index back into `variants` so the igv.js merge can reproduce the INPUT row byte-for-byte
+        # instead of re-joining on chrom/pos/ref/alt/trio_id — a key join is ambiguous for two ALTs
+        # of one multiallelic site in one trio, and positional identity cannot go wrong. Not in
+        # VARIANT_COLUMNS, and every writer iterates an explicit column list, so it never leaks.
+        row["_src_idx"] = src_idx
         out_rows.append(row)
         tier_v_tally[sc["variant_tier"]] = tier_v_tally.get(sc["variant_tier"], 0) + 1
         cap_tally[sc["cap_applied"]] = cap_tally.get(sc["cap_applied"], 0) + 1
@@ -715,6 +732,40 @@ def main(argv=None) -> int:
             out.write("\t".join(cols) + "\n")
             for r in rows:
                 out.write("\t".join(_fmt(r.get(c)) for c in cols) + "\n")
+
+    # --- the igv.js review table: Step 8's columns verbatim + the triage columns appended ---
+    # This is what a reviewer actually opens. It exists because variants.prioritized.tsv is NOT a
+    # drop-in for igv/variants.tsv: it lives one directory up and its column set omits the
+    # *_file/*_index/*_vcf* track paths, which are RELATIVE to the igv/ data dir. Pointing the
+    # server at it would yield a sortable list with no mini-CRAMs and no VCF tracks — losing the
+    # read-level view Step 8 exists to provide.
+    #
+    # Input columns are copied verbatim and NEVER overwritten (the appended set is the complement
+    # of the input header), so Step 8's table stays authoritative for everything it already
+    # reports and this file only ever ADDS. Sorted by rank_agnostic — the phenotype-agnostic
+    # ranking — so the file opens honest even when a --gene-prior overlay is in play; rank_prior
+    # and rank_delta are columns the reviewer can sort on in the UI.
+    n_igv = 0
+    if args.out_igv_variants:
+        extra_cols = [c for c in VARIANT_COLUMNS if c not in set(vcols)]
+        igv_cols = list(vcols) + extra_cols
+        igv_rows = []
+        for row in sorted(out_rows, key=lambda r: r["rank_agnostic"]):
+            merged = dict(variants[row["_src_idx"]])
+            for c in extra_cols:
+                merged[c] = row.get(c)
+            igv_rows.append(merged)
+        # Never-drop again, on the file the reviewer opens. A short review list is the one failure
+        # mode nobody notices, so it is asserted here too rather than inferred from the loop.
+        if len(igv_rows) != n_in:
+            sys.stderr.write(f"ERROR: never-drop invariant VIOLATED building the igv.js table — "
+                             f"{n_in} input rows produced {len(igv_rows)} output rows.\n")
+            return 1
+        with open(args.out_igv_variants, "w", newline="") as out:
+            out.write("\t".join(igv_cols) + "\n")
+            for r in igv_rows:
+                out.write("\t".join(_fmt(r.get(c)) for c in igv_cols) + "\n")
+        n_igv = len(igv_rows)
 
     # --- audit: every funnel tally, so the run is answerable ---
     A = lambda m, v: audit.record("09_prioritize", m, v)          # noqa: E731
@@ -765,6 +816,8 @@ def main(argv=None) -> int:
         A(f"nhf_status.{k}", v)
     A("gene_prior_overlay_genes", len(prior_genes))
     A("variants_promoted_by_prior", n_promoted)
+    if args.out_igv_variants:
+        A("igv_review_variants", n_igv)
 
     # Stamp the CONTENT key (not a bare touch): the next run compares inputs+config+resources
     # against this, so a threshold change or a newly-supplied resource re-prioritizes.
@@ -774,6 +827,10 @@ def main(argv=None) -> int:
     sys.stderr.write(
         f"Step 9 complete: {len(out_rows)} variants / {len(gene_rows)} genes -> "
         f"{args.out_variants}, {args.out_genes}\n")
+    if args.out_igv_variants:
+        sys.stderr.write(
+            f"  igv.js review table: {n_igv} variants, {len(vcols)} input + {len(extra_cols)} "
+            f"prioritization columns -> {args.out_igv_variants}\n")
     if fit:
         sys.stderr.write(
             f"  null: {null_model} C={C:.6g} alpha={alpha:.4g} (theta={fit['theta']:.4g}) over "
