@@ -151,9 +151,109 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   NHF columns blank. **The join is on the 0-based key (`pos-1`)** — nonhuman-screen keys variants
   0-based (`{chrom}:{pos0}:{ref}:{alt}`) while `variants.tsv` `pos` is 1-based; `igv._load_nhf_tsv` +
   the `pos-1` join in `build_variants_tsv` is the single load-bearing off-by-one.
+- **Step 9 output**: `variants.prioritized.tsv` + `genes.prioritized.tsv` (`src/hprv/prioritize.py`
+  = ALL pure logic, no I/O; `09_prioritize.py` = the CLI). **Input precedence: `igv/variants.tsv`
+  (Step 8) when it exists, else `candidates.calls.tsv` (Step 5)** — Step 8's table is the only one
+  carrying the NHF columns the quality term reads, and with Step 5's table every call correctly
+  reads `nhf_status=not_screened`. Optional inputs each degrade with a loud WARN exactly as Step 6
+  does for `--constraint`: `--mutrate` (no excess statistic → every gene reads `T0`, the variant
+  layer still runs), `--constraint`, `--segdup`, `--established-genes`, `--gene-moi`, `--gene-prior`.
+  Idempotent via `variants.prioritized.tsv.done`; `--force` re-runs.
+  **NEVER-DROP IS AN ASSERTED INVARIANT HERE**: `09_prioritize.py` checks row-count conservation
+  before writing, and the down-weight sets a tier + a separately-reported additive penalty + a
+  human-readable `downweight_reason` (plus `review_flag`), never a filter. The maximum penalty (−3.0) is sized so it
+  cannot alone demote a variant with strong molecular evidence in a constrained gene.
+  Two rankings always ship — `rank_agnostic` (no gene-list prior of any kind), `rank_prior`, and
+  `rank_delta`. `prioritization.composite.gene_list_prior.enabled` defaults **false** and a config
+  overlay path is inert while it is false, so hprv stays phenotype-agnostic by default.
 
 ## Gotchas that WILL bite you
 
+- **Step 9's mutational-target table is NOT `resources.constraint.gnomad_v2_constraint`, and it
+  arrives BGZIPPED.** Same gnomAD v2.1.1 download, two different prepared artifacts:
+  `join_constraint.py` projects the file down to `gene/oe_lof_upper/pli/s_het/phaplo`, which DROPS
+  every column the excess statistic needs (`mu_mis`/`mu_syn`/`mu_lof` = the offset itself, plus
+  `oe_syn`/`classic_caf`/`constraint_flag` = three of the six artifact signals, plus `cds_length` =
+  the fallback offset). So `prioritization.resources.mutational_target` points at the **unjoined**
+  `constraint/mutational_target.by_gene.txt.bgz`. Because that path is `.bgz`, any reader in Step 9
+  must go through `_open_text()` (the gzip branch) — a plain `open()` there dies with
+  `UnicodeDecodeError` on byte 2, and the integration mock uses a plain `.tsv` so it would never
+  notice. `tests/test_pure.py:test_prioritize_reads_bgzipped_tables` is the regression guard.
+- **gnomAD v2.1.1 constraint coordinates are GRCh37/hg19** (verified: `BRCA1`
+  chr17:41,196,312–41,277,500), even though the rest of this pipeline is GRCh38-only. Any
+  interval overlap against that table — the segdup signal above all — must use an hg19 track or
+  lift over first. **Mixing builds yields ~0 overlap SILENTLY**, so the signal simply never fires
+  and the corroboration count is quietly measured on five signals instead of six.
+- **Symbol reconciliation against the constraint table must go through Ensembl gene IDs, never
+  symbol aliases.** Alias matching produced demonstrably wrong joins on the real data: `ACOD1` →
+  `CAD`, `DRC3` → `EPS8L1`, `EMSY` → `TNRC6A`, `TRDC` → `BCL11B`. Join on the versionless Ensembl
+  gene ID and discard any mapping whose target symbol already carries its own count, or you
+  double-count.
+- **The excess statistic's `C` must be fit over the FULL gene universe, zero-count genes included.**
+  The candidate list is a *zero-truncated* sample: fitting on matched genes only multiplies `C` by
+  `n_universe / n_matched` and divides every excess ratio by the same factor — the direction that
+  HIDES artifact loci. 9,266 of 19,643 genes had zero counts on the validation cohort. Likewise the
+  BH-FDR runs over the full universe (zeros at p = 1); correcting over called genes only makes `q`
+  anti-conservative.
+- **The NB tail must be the regularized incomplete beta, not a `1 - cdf` complement sum.** The
+  artifact tail reaches ~1e-241 (`OR4Q3`: n = 229 against E = 0.42). A complement sum returns
+  ~1.1e-16 there — the machine epsilon left over from summing to 1.0, wrong by 224 orders of
+  magnitude — collapsing every extreme locus into one indistinguishable bin.
+- **A high `excess_ratio` is a QUALITY signal, never a biology signal.** It means "this gene emits
+  more candidate rows than its mutational target predicts" — mismapping, paralogue collapse, a
+  founder allele, a callability defect, an ancestry-uneven rarity gate — and **not** "this gene is
+  disease-associated". 13 established predisposition genes were extreme excess outliers on the
+  validation cohort (`CTSA` at 148×). A gene can be both; the response is read-level review, not
+  discarding the gene. Never phrase an excess result as evidence for or against a gene being real.
+- **`sig_caf_low`'s direction is counter-intuitive and it is not a frequency signal.** High-excess
+  genes have far LOWER cumulative pLoF allele frequency, and the *high* decile is actually depleted.
+  A near-zero `classic_caf` means gnomAD reports essentially no pLoF alleles there, which makes both
+  `mu_g` (our denominator) and the grpmax rarity oracle (our numerator's filter) unreliable. It is a
+  **low-information-locus** flag. Do not "fix" it by inverting the comparison.
+- **A RATIO rule without a count floor is not a rule.** `excess.min_n_for_ratio_rule` (default **3**)
+  guards T2 and both RATIO limbs of T3 — never the FDR limb, which needs no guard because no gene
+  with n<5 reached q_nb<0.05. Phase 1 specified this guard and then never applied it: without it,
+  136 of 228 triaged genes had n<3 and carried just 7.6% of triaged volume, and 8 of the 13
+  ceiling-exempted control genes had **q_nb = 1** — no statistical evidence of excess at all (SMPX,
+  HMGA2, HAMP, PET100 were each ONE variant against E≈0.16). They needed a count floor, not an
+  exemption. Set to 1 to reproduce the original tier table; both are in the docs.
+- **The trim loop belongs to WHICHEVER null is being fit.** `calibrate_null` gives the Poisson arm
+  its own `fit_poisson_null` and reports the C it used as `calibration.C_poisson`. Evaluating the
+  Poisson at the NB's trimmed C measures a hybrid nobody would deploy — and it changes the headline
+  figure (2.41× anti-conservative trimmed vs **1.82×** untrimmed). Never quote the Poisson
+  anti-conservatism without saying which reading produced it. Also: report the **converged** trim
+  count (77 genes / 0.392%), not an intermediate iteration's (69 / 0.35%) — the trim fraction feeds
+  a hard HALT guard.
+- **THE OVERLAY JOIN IS ON GENE SYMBOL ONLY — never route it by MOI.** A gene's prior must be
+  expressible independently of its canonical mode of inheritance, because a prior can encode a
+  hypothesis about a *different* genetic model than the gene is curated under. The concrete case:
+  the FA/HR genes (FANCA, FANCD2, SLX4, FANCE, BRCA2) carry germ-cell-tumour evidence about
+  **HETEROZYGOUS carriers** (PMID 40906985, five-gene combined OR 10.17) while their canonical model
+  — and their PanelApp green status — is biallelic Fanconi anemia. An MOI-routed lookup consults
+  those rows under a recessive model and silently misses the het observations the evidence is about.
+  Symmetrically, an observed-mode-vs-canonical mismatch emits
+  `moi_caveat = moi_mismatch_het_in_recessive_gene` and charges **NO penalty** — never-drop applied
+  to the coherence layer.
+- **Never SUM a gene-level and a set-level overlay prior — take the MAX.** A curated overlay can
+  carry per-gene rows AND a pathway-collapsed set entry derived from the SAME study (the GCT
+  resource's `FA_HR_PATHWAY_23`, pooled OR 4.14, and its per-gene FA rows are both PMID 40906985);
+  summing double-counts one study. Enforced in `parse_gene_prior_overlay`, asserted in a test.
+- **A `prior_weight` of 0.15 on a somatic driver is NOT weak germline support.** Curated overlays
+  list somatic drivers (KRAS, NRAS, CBL, MTOR, AKT1, BCORL1) deliberately, so a reader can see they
+  were considered and excluded. Any row whose `evidence_class` is in
+  `composite.gene_list_prior.non_germline_classes` contributes **0.0** and carries
+  `gene_list_prior_excluded_non_germline` — reported, never silently dropped. And `prior_weight` is
+  **UNCALIBRATED** everywhere: an ordering default, never a likelihood ratio or an odds ratio.
+- **A literal `gene` header row will be read as a gene symbol if you let it.** The validation
+  cohort's own per-gene counts file has one, CARRYING n=1 — which is why the true totals are
+  **25,389 variants / 10,799 symbols**, not the 25,390 / 10,800 raw line count. `GENE_KEYS_LOWER`
+  guards every symbol-reading path. A phantom gene with a real count survives review because every
+  individual number still looks plausible.
+- **`priority_points` is NOT an ACMG score.** Never read a total against Tavtigian's P ≥ 10 /
+  LP 6–9 / VUS 0–5 bands and never emit a P/LP/VUS label from it: the criteria are not ACMG criteria
+  (a CADD-based term is not PP3), no phenotype/segregation/functional evidence exists at all, the
+  ClinVar term has no review-status gate, and the artifact-penalty terms have no ACMG analogue. The
+  column is named `priority_points`, never `acmg_points`.
 - **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
   field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
   populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and
@@ -247,12 +347,20 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 - **Host, no heavy deps:** `python3 -m py_compile` all scripts; `bash -n` all shell;
   `python3 tests/test_pure.py` (pure-logic: config, ped, trios-file parsing, annotation getters,
-  genotype QC, selection funnel, Step-6 helpers).
+  genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
+  fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
+  both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
+  code equals `config.example.yaml`'s value). **52 tests, no network and no VCF.**
 - **End-to-end integration** (`tests/integration/`): `run_integration.sh` generates a tiny
   self-consistent mock genome + trios (`make_mock_data.py`) engineered to exercise every mode
-  and filter path, runs resolve + Steps 0,1,3,4,5,6 with REAL bcftools + the python steps (only
+  and filter path, runs resolve + Steps 0,1,3,4,5,6,8,9 with REAL bcftools + the python steps (only
   Step 2's VEP call is mocked via `mock_annotate.py`), and asserts the resolution, funnel, and
-  calls (`assert_integration.py`). Runs in CI on host bcftools — no image build needed. To run
+  calls (`assert_integration.py`). The Step-9 fixtures are engineered so the artifact locus and the
+  established-gene positive control have the **same** extreme excess shape — the only thing
+  separating them is the control ceiling, which is exactly what the assertion tests. Two mock-scale
+  config deviations are deliberate and commented in `make_mock_data.py`: `min_control_genes` 1000→3
+  and `max_downweight_fraction` 0.20→1.0, both because the mock has a handful of genes rather than
+  an exome. Runs in CI on host bcftools — no image build needed. To run
   locally you need bcftools/samtools/bgzip/tabix + a python with cyvcf2/pysam/scipy/pyyaml on PATH.
 - **Validation (TODO):** GIAB/CMRG truth sets + a positive-control variant panel to measure
   sensitivity/precision of the inheritance-model and recurrence logic on real data.

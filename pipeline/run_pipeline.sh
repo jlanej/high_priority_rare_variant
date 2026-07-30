@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline.sh  —  end-to-end orchestrator (resolve + Steps 0-8)
+# run_pipeline.sh  —  end-to-end orchestrator (resolve + Steps 0-9)
 #
 # Runs the whole screen from a single config. Designed to run INSIDE the container
 # (tools + python env native on PATH):
@@ -22,7 +22,7 @@ source "$HERE/lib/common.sh"
 # prepend our src; avoid a leading ':' (which would put CWD on the import path) when unset
 export PYTHONPATH="${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src${PYTHONPATH:+:$PYTHONPATH}"
 
-CFG="" FROM=0 TO=8
+CFG="" FROM=0 TO=9
 # Distributed Step-2 pass-throughs (used by the SLURM orchestration in pipeline/slurm/). These
 # only change how Step 2 runs and are forwarded verbatim to 02_annotate_sites.sh; every other step
 # is unaffected. Typically paired with `--from 2 --to 2` so one job does one Step-2 sub-task.
@@ -315,6 +315,49 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     bash "$HERE/08_igv_export.sh" "${ig[@]}" ${S8_PASSTHRU[@]+"${S8_PASSTHRU[@]}"}
 fi
 
+if run_step 9 && [[ "$(cfg_get prioritization.enabled true)" != "false" ]]; then
+    log "== Step 9: prioritization (gene excess + artifact panel + variant tiering) =="
+    # INPUT PRECEDENCE: igv/variants.tsv (Step 8) when it exists, else candidates.calls.tsv
+    # (Step 5). Step 8's table is preferred because it is the ONLY one carrying the NHF columns
+    # the quality term reads — and NHF's blank-vs-zero distinction is load-bearing (blank = NOT
+    # SCREENED, never "clean"). Falling back to Step 5's calls keeps Step 9 runnable on a
+    # --from 9 re-run of a pipeline whose IGV export is disabled; the NHF columns are then
+    # absent, so every call reads nhf_status=not_screened, which is exactly the right answer
+    # (nobody looked) and scores 0 rather than a penalty or credit.
+    p_in="$W/igv/variants.tsv"
+    [[ -s "$p_in" ]] || p_in="$W/candidates.calls.tsv"
+    [[ -s "$p_in" ]] || die "Step 9 needs igv/variants.tsv (Step 8) or candidates.calls.tsv (Step 5) in $W — run the earlier steps first, or use --from/--to to skip Step 9."
+    pargs=(--variants "$p_in" --config "$CFG" --n-trios "$n_trios"
+           --out-variants "$W/variants.prioritized.tsv"
+           --out-genes "$W/genes.prioritized.tsv")
+    [[ -s "$W/genes.ranked.tsv" ]] && pargs+=(--genes "$W/genes.ranked.tsv")
+    # Optional resources: each degrades with a WARN inside the step (same contract as Step 6's
+    # --constraint), so only pass a path that actually resolves and exists.
+    mt="$(cfg_get prioritization.resources.mutational_target)"
+    is_set "$mt" && [[ -e "$mt" ]] && pargs+=(--mutrate "$mt")
+    pcon="$(cfg_get resources.constraint.gnomad_v2_constraint)"
+    is_set "$pcon" && [[ -e "$pcon" ]] && pargs+=(--constraint "$pcon")
+    sd="$(cfg_get prioritization.signals.segdup.table)"
+    is_set "$sd" && [[ -e "$sd" ]] && pargs+=(--segdup "$sd")
+    eg="$(cfg_get prioritization.gene_downweight.established_genes)"
+    is_set "$eg" && [[ -e "$eg" ]] && pargs+=(--established-genes "$eg")
+    gm="$(cfg_get prioritization.resources.gene_moi)"
+    is_set "$gm" && [[ -e "$gm" ]] && pargs+=(--gene-moi "$gm")
+    # The Class-B phenotype overlay. OFF by default — with no overlay, rank_prior is identical
+    # to rank_agnostic and hprv stays phenotype-agnostic. It is passed only when the config both
+    # ENABLES it and points at a file that exists, so an accidental stale path cannot silently
+    # start promoting genes.
+    if [[ "$(cfg_get prioritization.composite.gene_list_prior.enabled false)" == "true" ]]; then
+        gp="$(cfg_get prioritization.composite.gene_list_prior.path)"
+        if is_set "$gp" && [[ -e "$gp" ]]; then
+            pargs+=(--gene-prior "$gp")
+        else
+            warn "prioritization.composite.gene_list_prior.enabled is true but its path is unset/missing ('$gp') — running fully phenotype-agnostic (rank_prior == rank_agnostic)"
+        fi
+    fi
+    python3 "$HERE/09_prioritize.py" "${pargs[@]}"
+fi
+
 # Assemble the run audit summary (what went where, and why).
 python3 -m hprv.audit --dir "$HPRV_AUDIT_DIR" --out "$HPRV_AUDIT_DIR/summary.md" >/dev/null || true
 
@@ -322,4 +365,5 @@ log "Pipeline complete. Key outputs in $W:"
 log "  trios.resolved.tsv  trio_resolution.tsv  qc_report.tsv"
 log "  candidates.calls.tsv  genes.ranked.tsv  hprv_summary.xlsx"
 log "  igv/variants.tsv (+ crams/ vcfs/ trios.tsv curation.json)"
+log "  variants.prioritized.tsv  genes.prioritized.tsv"
 log "  audit/summary.md  audit/counts.tsv"

@@ -30,7 +30,7 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 
 ## What it does
 
-A resolve preflight + nine-step flow (Steps 0–8; see **[docs/pipeline_design.md](docs/pipeline_design.md)**
+A resolve preflight + ten-step flow (Steps 0–9; see **[docs/pipeline_design.md](docs/pipeline_design.md)**
 for the vetted design and the artifact each step produces):
 
 | Step | What | Output |
@@ -45,6 +45,7 @@ for the vetted design and the artifact each step produces):
 | 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint | `genes.ranked.tsv` |
 | 7 | Consolidated **.xlsx** supplemental-table summary (documented: gene consolidation, calls, resolution, QC, audit) | `hprv_summary.xlsx` |
 | 8 | **igv.js** trio variant-review export: `variants.tsv` + mini-CRAM slices (child/mother/father) + per-trio VCF tracks | `igv/` |
+| 9 | **Prioritization**: gene excess over its mutational target (NB2, trimmed fit, mid-p calibration) + a six-signal artifact panel + a graded gene down-weight, then per-variant tiering and an additive `priority_points` composite — **a re-rank, never a drop** | `variants.prioritized.tsv`, `genes.prioritized.tsv` |
 
 Every step records input/output counts and funnel tallies to `audit/counts.tsv`, assembled into
 `audit/summary.md` — a global + per-trio "what went where and why" (see [Auditing](#auditing)).
@@ -126,6 +127,42 @@ a Samocha mutation model is reported as a secondary column when a mutation-rate 
 (±1 kb) for child/mother/father around each candidate locus (from a `sample→CRAM` map) and per-trio
 VCF tracks — ready to serve with the [jlanej/igv.js](https://github.com/jlanej/igv.js) trio
 variant-review server.
+
+**9. Prioritization — a re-rank, never a drop.** Steps 6–8 leave the reviewer a flat list. Step 9
+orders it, in two layers ([docs/prioritization.md](docs/prioritization.md)):
+
+- **Gene layer — excess over the gene's mutational target.** `E_g = C·μ_g` from gnomAD v2.1.1's
+  per-gene Samocha targets, with a **negative-binomial** null whose `(C, α)` are re-fit per cohort
+  on an iteratively **trimmed** bulk, so the artifact tail cannot calibrate its own null. The NB is
+  not an assumption: dispersion measured **φ = 18.7** raw and **1.29** trimmed, and in a two-fold
+  cross-fit the Poisson tail was **2.51× anti-conservative** at α = 1e-3 while the NB was
+  conservative — the correct direction of error under the never-drop rule. A **mid-p calibration
+  diagnostic** for both nulls lands in the audit on every run (this is the `SCIENCE_AUDIT.md` **A-3**
+  calibration gap). `C` is fit over the **full** gene universe including zero-count genes, because
+  the candidate list is a zero-truncated sample.
+- **Six orthogonal artifact signals** → an integer corroboration count: cohort saturation (**195×**
+  enriched), segdup overlap (10.1×), artifact-prone gene family (6.5×), synonymous o/e departure
+  (5.2×), gnomAD's own constraint flag (4.0×), low cumulative allele frequency (3.9×). The
+  statistic says a gene is *anomalous*; the panel is the **independent second witness** required
+  before any penalty.
+- **A four-tier graded down-weight**, with an **auditable established-gene ceiling** (a
+  control-union gene never enters T2/T3, and is flagged `established_gene_high_excess` instead) and
+  a CDS-fallback ceiling. Measured: **228 genes / 2,565 variants (10.4%) triaged at 100%
+  established-gene retention.** The maximum penalty (−3.0) **cannot by itself** demote a variant
+  carrying strong molecular evidence in a constrained gene — it is a re-rank, not a veto.
+- **Variant layer** — a V0–V5 tier under ACMG/ClinGen **SVI mechanism gating** (gene constraint
+  counts only when the variant has a credible molecular effect; a molecularly-benign prediction
+  caps the total regardless of the gene), plus an additive Tavtigian-style **`priority_points`**
+  composite in which **every term is its own reported column**, so a reviewer reads
+  `spliceai=+4, rarity=+2, constraint=+1, gene_artifact=−3` rather than one opaque number.
+- **Two rankings always ship**: fully agnostic, and prior-informed with an optional phenotype
+  overlay that **defaults OFF** (so hprv stays phenotype-agnostic). `rank_delta` exposes exactly
+  which calls a gene list promoted — the set to scrutinise for confirmation bias.
+
+Three honest limits carried in the output rather than papered over: **no pLoF reaches V5** (the
+NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CADD route is labelled
+`cadd_offlabel` and claims no graded strength (REVEL is ClinGen's calibrated choice), and
+**`priority_points` is not an ACMG score** — never read against Tavtigian's P/LP/VUS bands.
 
 ## Design principles
 
@@ -221,8 +258,8 @@ docs/            source-cited methods reference + vetted pipeline design
 config/          config.example.yaml (the contract; every tunable, no real paths)
 env/             environment.yml (pinned conda toolchain layered onto the VEP image)
 Dockerfile       one image: Ensembl VEP 115 base + bcftools/slivar/somalier/python...
-pipeline/        resolve_trios.py + step scripts (00..08) + run_pipeline.sh + lib/common.sh
-src/hprv/        shared python: config, annotations, genotype QC, ped, selection, audit, report, igv
+pipeline/        resolve_trios.py + step scripts (00..09) + run_pipeline.sh + lib/common.sh
+src/hprv/        shared python: config, annotations, genotype QC, ped, selection, prioritize, audit, report, igv
 .github/workflows build + publish to GHCR on every commit (provenance + SBOM)
 ```
 

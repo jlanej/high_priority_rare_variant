@@ -2,7 +2,7 @@
 # =============================================================================
 # run_integration.sh — end-to-end pipeline test over generated mock data.
 #
-# Exercises resolve + Steps 0-8 for real (bcftools + the python steps). ONLY the `vep`
+# Exercises resolve + Steps 0-9 for real (bcftools + the python steps). ONLY the `vep`
 # binary itself is mocked (its cache is 24 GB — too heavy for CI): mock_vep.py writes a
 # VEP-shaped CSQ, and Step 2 then runs for real via its --vep-vcf ingest path, so the
 # build checks, the split-vep lift, the transcript selector and the frequency guard are
@@ -43,9 +43,11 @@ python3 "$HERE/mock_vep.py" --in "$WORK/cohort.sites.vcf.gz" \
     --lookup "$W/annot.tsv" --out "$W/cohort.sites.vep.vcf"
 bgzip -f "$W/cohort.sites.vep.vcf"; tabix -f -p vcf "$W/cohort.sites.vep.vcf.gz"
 
-# --- Steps 2-8 for real. Step 2 ingests the VEP VCF above (resources.vep.annotated_vcf in the
-#     mock config), so its build checks + split-vep + selector + frequency guard all execute. ---
-bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 2 --to 8
+# --- Steps 2-9 for real. Step 2 ingests the VEP VCF above (resources.vep.annotated_vcf in the
+#     mock config), so its build checks + split-vep + selector + frequency guard all execute.
+#     Step 9 (prioritization) runs on Step 8's variants.tsv, which is the only table carrying the
+#     NHF columns its quality term reads. ---
+bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 2 --to 9
 
 # --- Step 2 by-contig sharding must equal a single pass (feeds the published call set) ---
 # Exercises Step 2's REAL vep path (a `vep` shim) over the same multi-contig union, sharded vs not.

@@ -225,6 +225,230 @@ def main(argv=None) -> int:
         check(any(str(k).startswith("vep_") for v in VCF(trio_vcfs["CH_A"]) for k, _ in v.INFO),
               "vep_* annotations still transfer into the per-trio VCF")
 
+    # --- Step 9: prioritization (gene excess + artifact panel + variant tiering) ---
+    vpath9 = os.path.join(W, "variants.prioritized.tsv")
+    gpath9 = os.path.join(W, "genes.prioritized.tsv")
+    if check(os.path.exists(vpath9), "variants.prioritized.tsv written") and \
+            check(os.path.exists(gpath9), "genes.prioritized.tsv written"):
+        pv = rows(vpath9)
+        pg = {r["gene"]: r for r in rows(gpath9)}
+        src = rows(os.path.join(W, "igv", "variants.tsv"))
+
+        # THE NEVER-DROP INVARIANT. Step 9 re-ranks; it must never remove a call. If this
+        # regresses a reviewer silently receives a shortened list with no counter recording it.
+        check(len(pv) == len(src),
+              f"never-drop: prioritized rows == input rows ({len(src)}; got {len(pv)})")
+        check({(r["chrom"], r["pos"], r["ref"], r["alt"], r["trio_id"]) for r in pv} ==
+              {(r["chrom"], r["pos"], r["ref"], r["alt"], r["trio_id"]) for r in src},
+              "never-drop: the prioritized set is exactly the input set (no substitutions)")
+
+        # EVERY scoring term ships as its own column — the transparency requirement, so a
+        # reviewer can read WHY a call ranked where it did rather than trusting one number.
+        for col in ("pts_molecular", "pts_rarity", "pts_gene_constraint", "pts_recurrence",
+                    "pts_quality", "pts_clinical", "pts_moi", "pts_gene_artifact",
+                    "pts_gene_list_prior", "priority_points_agnostic", "rank_agnostic",
+                    "priority_points_prior", "rank_prior", "rank_delta", "cap_applied",
+                    "variant_tier", "variant_tier_reason", "nhf_status", "gene_tier",
+                    "downweight_reason", "excess_ratio", "corroboration_count"):
+            check(col in pv[0], f"variants.prioritized.tsv has '{col}' column")
+        # ...and the terms must SUM to the reported total, or the columns are decoration
+        terms = ("pts_molecular", "pts_rarity", "pts_gene_constraint", "pts_recurrence",
+                 "pts_quality", "pts_clinical", "pts_moi", "pts_gene_artifact")
+        bad_sum = [r for r in pv
+                   if r["cap_applied"] == "none"
+                   and abs(sum(float(r[t] or 0) for t in terms)
+                           - float(r["priority_points_agnostic"])) > 1e-6]
+        check(not bad_sum, f"per-term columns sum to priority_points_agnostic ({len(bad_sum)} bad)")
+
+        # Ranks are a permutation of 1..N in BOTH rankings
+        check(sorted(int(r["rank_agnostic"]) for r in pv) == list(range(1, len(pv) + 1)),
+              "rank_agnostic is a permutation of 1..N")
+        # THE PHENOTYPE-AGNOSTIC CONTRACT: with the Class-B overlay disabled (the mock ships the
+        # file but leaves enabled: false) the two rankings must be IDENTICAL. This is what keeps
+        # hprv phenotype-agnostic by default, so it is asserted rather than assumed.
+        check(all(r["rank_prior"] == r["rank_agnostic"] for r in pv),
+              "overlay OFF: rank_prior == rank_agnostic for every row")
+        check(all(float(r["pts_gene_list_prior"] or 0) == 0.0 for r in pv),
+              "overlay OFF: the gene-list prior contributes 0 to every row")
+        check(all(r["rank_delta"] == "0" for r in pv), "overlay OFF: rank_delta is 0 everywhere")
+
+        # --- The ARTIFACT LOCUS is down-weighted, with a reason string naming the mechanisms.
+        # OR4Q3 carries a tiny mutational target against 4 candidate rows plus every corroborating
+        # signal, so it must reach a down-weight tier — and its penalty must be a real negative
+        # number, not a flag nobody scores. ---
+        art = pg.get("OR4Q3", {})
+        check(art.get("gene_tier") in ("T2_downweight", "T3_strong_downweight"),
+              f"artifact locus OR4Q3 down-weighted (got {art.get('gene_tier')})")
+        check(float(art.get("gene_artifact_penalty") or 0) < 0.0,
+              "OR4Q3 carries a negative artifact penalty")
+        check(int(art.get("corroboration_count") or 0) >= 2,
+              f"OR4Q3 has >=2 corroborating signals (got {art.get('corroboration_count')})")
+        for frag in ("excess_ratio=", "artifact_gene_family", "oe_syn=",
+                     "gnomad_constraint_flag=mis_too_many"):
+            check(frag in (art.get("downweight_reason") or ""),
+                  f"OR4Q3 reason string reports '{frag}'")
+        # ...and NONE of its variants vanished — a down-weight is a re-rank, not a veto
+        check(len([r for r in pv if r["gene"] == "OR4Q3"]) ==
+              len([r for r in src if r["gene"] == "OR4Q3"]),
+              "every OR4Q3 variant survives the down-weight")
+
+        # --- THE POSITIVE-CONTROL GUARD. GENE1 has the SAME extreme excess shape and the same
+        # corroborating signals as OR4Q3 — on the statistics alone it earns T3 — but it is in the
+        # established-gene union, so the AUDITABLE ceiling must cap it at T1_watch and flag it for
+        # review instead. This is the single most important assertion in Step 9: if it regresses,
+        # real predisposition genes get their variants silently penalised. ---
+        ctl = pg.get("GENE1", {})
+        check(ctl.get("gene_tier") in ("T0_no_downweight", "T1_watch"),
+              f"POSITIVE CONTROL: established gene GENE1 never reaches T2/T3 "
+              f"(got {ctl.get('gene_tier')})")
+        check(ctl.get("established_gene_control") == "1", "GENE1 is in the control union")
+        check(ctl.get("control_ceiling_applied") == "1",
+              "GENE1's tier was capped BY THE CEILING (so the ceiling, not a weak rule, "
+              "is what protected it)")
+        check(ctl.get("review_flag") == "established_gene_high_excess",
+              "GENE1 flagged established_gene_high_excess — the exemption protects it from a "
+              "score penalty, it does NOT mean its calls are correct")
+        check(float(ctl.get("gene_artifact_penalty") or 0) >= -0.5,
+              "GENE1's penalty is capped at the T1_watch magnitude")
+
+        # --- CDS-FALLBACK offset + its ceiling: a gene with no gnomAD mu gets the CDS-length
+        # regression, says so, and never reaches T3 (a +/-30% offset cannot support that claim). ---
+        nomu = pg.get("GENENOMU", {})
+        check(nomu.get("E_source") == "cds_fallback",
+              f"GENENOMU uses the CDS-length fallback offset (got {nomu.get('E_source')})")
+        check(nomu.get("gene_tier") != "T3_strong_downweight",
+              "a CDS-fallback gene never reaches the strong down-weight tier")
+        check("cds_length_fallback" in (nomu.get("downweight_reason") or ""),
+              "GENENOMU's reason string discloses that its offset is a fallback")
+        # every gene that produced a call is in the gene table, including the no-offset ones
+        check({r["gene"] for r in pv} == set(pg), "genes.prioritized.tsv covers every called gene")
+
+        # --- MECHANISM GATING: a molecularly-benign PREDICTION in a highly constrained gene
+        # (GENE1: pLI 0.98, LOEUF 0.20) carrying a ClinVar P/LP assertion must still be CAPPED.
+        # Even +4 of clinical evidence and a constrained gene cannot lift a V0 — that is the SVI
+        # principle, and it is how a gene-list prior is prevented from becoming confirmation bias. ---
+        # NB the fixture is emitted under MORE THAN ONE mode: the extra GENE1 rows give the
+        # proband a second sub-1e-2 functional het in the same gene, so Step 5 emits the locus
+        # both as `dominant` and as a `compound_het` leg (audit A-6's single-gene-keyed mode
+        # assignment). Assert over ALL of them, and pick the DOMINANT one for the constraint
+        # check — a recessive mode zeroes constraint on its own, which would let the V0 gate
+        # pass for the wrong reason.
+        v0 = [r for r in pv if r["chrom"] == "chr2" and r["pos"] == "18800"]
+        if check(len(v0) >= 1, f"the V0 benign-prediction fixture reached Step 9 ({len(v0)} rows)"):
+            check(all(r["variant_tier"] == "V0" for r in v0),
+                  f"benign prediction scored V0 ({[r['variant_tier'] for r in v0]})")
+            check(all(r["cap_applied"] == "V0_benign" for r in v0),
+                  f"V0 cap applied ({[r['cap_applied'] for r in v0]})")
+            check(all(float(r["priority_points_agnostic"]) <= 0.0 for r in v0),
+                  "the V0 cap holds the total at <=0 even with ClinVar P/LP (+4) and a "
+                  f"constrained gene ({[r['priority_points_agnostic'] for r in v0]})")
+            check(all(float(r["pts_clinical"]) == 4.0 for r in v0),
+                  "the ClinVar term still SCORES +4 — the cap works on the total, so the "
+                  "evidence stays visible in its own column rather than being erased")
+            dom0 = [r for r in v0 if r["inheritance"] == "dominant"]
+            if check(bool(dom0), "the V0 fixture has a dominant-mode row (constraint not "
+                                 "already zeroed by a recessive mode)"):
+                check(float(dom0[0]["pts_gene_constraint"]) == 0.0,
+                      "constraint is ZEROED for a V0 BY THE MECHANISM GATE — a constrained "
+                      "gene cannot rescue a benign prediction")
+                check(float(dom0[0]["constraint_gate"]) == 0.0,
+                      "the V0 mechanism gate itself reads 0.0")
+        # ...while a genuine pLoF in the same gene DOES earn the constraint term
+        hi = [r for r in pv if r["gene"] == "GENE1" and r["impact"] == "HIGH"]
+        check(hi and all(r["variant_tier"] == "V4" for r in hi),
+              "a HIGH-impact pLoF scores V4 (V5 is unreachable — no NMD annotation)")
+        check(hi and any(float(r["pts_gene_constraint"]) > 0.0 for r in hi),
+              "the same constrained gene DOES earn the constraint term for a credible effect")
+        check(all(r["nmd_status"] == "INDETERMINATE" for r in pv if r["impact"] == "HIGH"),
+              "every pLoF carries nmd_status=INDETERMINATE (no exon/CDS columns exist)")
+        check(all(r["variant_tier"] != "V5" for r in pv),
+              "no variant reaches V5 — unreachable until variants.tsv carries EXON/CDS_position")
+        check(all(r["plof_confidence"] == "UNAVAILABLE" for r in pv),
+              "plof_confidence is UNAVAILABLE everywhere (no LOFTEE under this contract)")
+
+        # --- BLANK NHF IS NOT 0.0. This mock has no kraken2 DB, so Step 8b never ran and every
+        # NHF cell is blank — which must read as NOT SCREENED, scoring neither a penalty nor
+        # credit. Reading blank as "clean" would silently promote exactly the calls nobody
+        # examined, and it is the same off-by-a-semantic trap as the Step-8b pos-1 join. ---
+        check(all(r["nhf_status"] == "not_screened" for r in pv),
+              "no kraken2 DB => every call reads nhf_status=not_screened (blank != clean)")
+        # An unscreened call must not be penalised FOR BEING UNSCREENED. Scoped to rows with no
+        # OTHER quality term in play: a comp-het legitimately carries -0.5 for
+        # partner_leg_quality_unknown (parental GQ/DP/AB are absent from variants.tsv), and a
+        # QC-failing call carries -2. Conflating those with the NHF term would make this
+        # assertion pass or fail for the wrong reason.
+        no_other = [r for r in pv if r["gt_qc_pass"] == "1"
+                    and r["partner_leg_quality_unknown"] != "1"]
+        check(bool(no_other), "some rows have no competing quality term")
+        check(all(float(r["pts_quality"] or 0) == 0.0 for r in no_other),
+              "an unscreened call is not PENALISED for being unscreened (nhf_not_screened = 0)")
+        # ...and the comp-het rows DO carry the partner term, so its absence above is scoping,
+        # not a term that silently never fires
+        comphet = [r for r in pv if r["partner_leg_quality_unknown"] == "1"]
+        check(comphet and all(abs(float(r["pts_quality"]) + 0.5) < 1e-9 for r in comphet),
+              "a comp-het carries -0.5 for the unassessable trans leg (parental GQ/DP/AB absent)")
+        check(all(r["nhf_max_fraction"] == "" for r in pv),
+              "an unscreened call reports a BLANK max NHF fraction, never 0.0")
+
+        # --- The SpliceAI-kept deep-intronic variant must be tiered on its delta score, and the
+        # off-label CADD missense route must be labelled as such wherever it fires. ---
+        sai9 = [r for r in pv if r["gene"] == "GENESAI"]
+        check(sai9 and all(r["variant_tier"] in ("V3", "V4") for r in sai9),
+              "the SpliceAI-kept variant (DS 0.55) is tiered on its splice evidence")
+        check(sai9 and all(r["spliceai_status"] == "scored" for r in sai9),
+              "a scored SpliceAI variant reports spliceai_status=scored")
+        unscored = [r for r in pv if r["spliceai_ds"] == ""]
+        check(all(r["spliceai_status"] == "not_covered" for r in unscored),
+              "an UNSCORED SpliceAI variant reports not_covered — absence is not 'no effect'")
+        cadd_mis = [r for r in pv if r["missense_evidence_source"] == "cadd_offlabel"]
+        check(all("off-label" in r["variant_tier_reason"] for r in cadd_mis),
+              "a CADD-based missense tier is labelled off-label (never presentable as PP3)")
+
+        # --- MOI coherence: curated genes get a verdict, UNCURATED genes are EXACTLY neutral.
+        # Any penalty on moi_unknown converts the score into a known-gene filter and destroys
+        # novel-gene discovery. ---
+        unk = [r for r in pv if r["moi_coherence"] == "unknown"]
+        check(unk, "some genes are uncurated (moi_unknown) — the novel-gene case exists here")
+        check(all(float(r["pts_moi"] or 0) == 0.0 for r in unk),
+              "moi_unknown scores EXACTLY 0 — never a penalty (that would filter novel genes)")
+        gened = [r for r in pv if r["gene"] == "GENED"]
+        check(gened and all(r["moi_coherence"] == "coherent" for r in gened),
+              "GENED (curated AD, dominant calls) reads moi_coherent")
+
+        # --- Recurrence scores on the CARRIER COUNT, not on the saturating case-only p-value,
+        # and same-variant recurrence gets strictly less credit than distinct-variant. ---
+        gd = [r for r in pv if r["gene"] == "GENED"]        # same-variant across 2 trios
+        gdd = [r for r in pv if r["gene"] == "GENEDD"]      # distinct variants across 2 trios
+        check(gd and all(float(r["pts_recurrence"]) == 0.5 for r in gd),
+              "same-variant recurrence earns the reduced credit (+0.5)")
+        check(gdd and all(float(r["pts_recurrence"]) == 1.0 for r in gdd),
+              "distinct-variant recurrence earns full 2-carrier credit (+1.0)")
+
+        # --- The CALIBRATION DIAGNOSTIC (the A-3 gap) is recorded, and it is recorded for BOTH
+        # nulls so the NB-vs-Poisson choice is auditable rather than asserted. ---
+        acount = {(r["step"], r["metric"]): r["value"]
+                  for r in rows(os.path.join(W, "audit", "counts.tsv"))}
+        for m in ("variants_in", "variants_out", "null_model", "null_C", "null_alpha",
+                  "null_trim_iterations", "null_phi_bulk", "null_phi_all_genes",
+                  "calibration.nb_mean_midp", "calibration.poisson_mean_midp",
+                  "genes_downweighted_T2_T3", "variants_downweighted_T2_T3",
+                  "control_ceiling_applied", "gene_tier.T0_no_downweight"):
+            check(("09_prioritize", m) in acount, f"audit records 09_prioritize/{m}")
+        check(acount.get(("09_prioritize", "variants_in")) ==
+              acount.get(("09_prioritize", "variants_out")),
+              "the audit itself records never-drop (variants_in == variants_out)")
+        check(int(acount.get(("09_prioritize", "control_ceiling_applied")) or 0) >= 1,
+              "audit records that the established-gene ceiling actually fired")
+        check(acount.get(("09_prioritize", "null_model")) == "negative_binomial",
+              "the null is the negative binomial (Poisson is 2.5x anti-conservative)")
+        # phi_all >> phi_bulk is the signature that justifies BOTH the NB and the trim
+        check(float(acount.get(("09_prioritize", "null_phi_all_genes")) or 0) >
+              float(acount.get(("09_prioritize", "null_phi_bulk")) or 0),
+              "raw dispersion exceeds the trimmed bulk dispersion (overdispersion is in the tail)")
+
+        # --- IDEMPOTENCY: the .done marker means a re-run is a no-op. ---
+        check(os.path.exists(vpath9 + ".done"), "Step 9 wrote its .done marker (idempotent)")
+
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")
     counts = rows(os.path.join(W, "audit", "counts.tsv"))
