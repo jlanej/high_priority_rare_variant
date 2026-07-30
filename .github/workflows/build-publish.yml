@@ -48,6 +48,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # The suite is contracted to run on a bare host, and it does — but the Step-9 tests that
+      # drive 09_prioritize.py:main() need yaml transitively (load_config -> `import yaml`) and
+      # SKIP without it. Those are the never-drop and cache-invalidation guards, so CI installs
+      # pyyaml to actually EXERCISE them instead of reporting a green run that skipped them.
+      # pyyaml only: everything else here stays dependency-free by design.
+      - name: Install the one dependency the Step-9 CLI tests need
+        run: python -m pip install --disable-pip-version-check --quiet pyyaml
       - name: Pure-logic tests
         run: python tests/test_pure.py
 
