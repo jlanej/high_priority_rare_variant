@@ -217,11 +217,29 @@ def _read_gene_prior_overlay(path, cfg):
     rows = []
     with _open_text(path) as fh:
         head = fh.readline()
-    if "\t" in head and any(k in head.lower() for k in ("gene", "symbol")):
+    # The delimiter sniff MUST accept a comma as well as a tab. A phenotype panel handed over by a
+    # collaborator is very often a spreadsheet export, i.e. a CSV, and a tab-only test routed it to
+    # the bare-symbol-list branch below — where every line became one "symbol"
+    # ("GENE1,0.9,GREEN") that can never match a gene, while this reader still announced
+    # "3 genes from pheno.csv" and the run proceeded fully phenotype-agnostic. A silent no-op on
+    # the user's own gene list is the worst available outcome: the review looks prioritised and is
+    # not. (`_read_tsv` already sniffs both delimiters; only this gate was tab-only.)
+    if any(k in head.lower() for k in ("gene", "symbol")) and ("\t" in head or "," in head):
         rows = _read_tsv(path)
     else:
         rows = [ln.strip() for ln in _open_text(path)
                 if ln.strip() and not ln.startswith("#")]
+        # A gene symbol never contains a delimiter. If one does, this is a table whose header this
+        # reader failed to recognise — not a symbol list. Fail loudly rather than invent phantom
+        # symbols: a wrong-but-plausible gene count is exactly the failure nobody catches in review.
+        bad = [r for r in rows if "\t" in r or "," in r]
+        if bad:
+            raise ValueError(
+                f"{path} looks like a TABLE, not a bare symbol list: {len(bad)} of {len(rows)} "
+                f"lines contain a tab or comma (first: {bad[0][:60]!r}). A gene symbol never "
+                "does. Give it a header row naming a `gene` (or `symbol`) column, or strip it "
+                "down to one symbol per line — otherwise every line would be read as a gene "
+                "symbol that can never match, and the run would silently ignore your gene list.")
     gene_sets = {}
     sidecar = re.sub(r"\.(tsv|txt|csv)(\.b?gz)?$", "", path) + ".json"
     if os.path.exists(sidecar):
@@ -517,7 +535,15 @@ def main(argv=None) -> int:
             "phenotype-agnostic gene-validity union (ClinGen Definitive/Strong + dosage HI3 + "
             "actionability) to enable it.\n")
 
-    prior_overlay = _read_gene_prior_overlay(prior_path, cfg) if prior_path else {}
+    try:
+        prior_overlay = _read_gene_prior_overlay(prior_path, cfg) if prior_path else {}
+    except ValueError as e:
+        # A malformed overlay is a hard stop, NOT a degrade-with-a-warning. Every other optional
+        # resource degrades because its absence is honestly reportable (no excess statistic, no
+        # ceiling). This one cannot: the reviewer would get an un-prioritised list that looks
+        # prioritised and ship it believing their panel was applied.
+        sys.stderr.write(f"ERROR: unusable --gene-prior overlay. {e}\n")
+        return 1
     prior_genes = set(prior_overlay)
     if args.gene_prior and not prior_enabled:
         sys.stderr.write(

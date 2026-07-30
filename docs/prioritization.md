@@ -883,6 +883,88 @@ at a GWAS locus", not "rare coding variants here matter". And T2 is not uniform 
 
 ---
 
+### 13b. Activating the gene-list prior (a phenotype panel)
+
+The overlay is **off by default and stays off unless you turn it on**, so this is the recipe. Three
+steps, none of which need a rebuild.
+
+**1. Write the list.** Three accepted shapes, all matched on **gene symbol only**:
+
+A bare symbol list (`#` comments and blank lines are skipped):
+
+```
+# my pediatric-cancer panel, v2026-07
+BRCA1
+SDHB
+TP53
+```
+
+Or a table with a header naming a `gene` (or `symbol` / `gene_symbol`) column — **tab or
+comma delimited**, so a spreadsheet export works as-is. Every column below is optional, and
+**unknown columns pass through untouched** so your list can carry its own provenance:
+
+```
+gene	prior_weight	tier	evidence_class	moi	pmids	replication
+BRCA1	0.9	GREEN	germline_predisposition	AD	12345678	replicated
+SDHB	0.6	AMBER	germline_predisposition	AD	23456789	single_study
+KRAS	0.15	RED	somatic_driver_not_germline	NA	34567890	na
+```
+
+Optionally, a **sibling `.json`** (same path with the extension swapped: `panel.tsv` →
+`panel.json`) adds set-level priors, which are combined with gene-level ones by **MAX, never SUM**:
+
+```json
+{"gene_sets": {"FA_HR_PATHWAY": {"prior_weight": 0.6,
+                                 "members": ["FANCA", "FANCD2", "SLX4", "FANCE", "BRCA2"]}}}
+```
+
+**2. Point the config at it and enable it.** Both are required — a path alone is inert:
+
+```yaml
+prioritization:
+  composite:
+    gene_list_prior:
+      enabled: true
+      path: ${GENE_PRIOR_OVERLAY}      # or a literal path; export the var, or hardcode it
+```
+
+`prepare_resources.sh emit-env` emits a commented `GENE_PRIOR_OVERLAY` line for you to fill in;
+the overlay itself is **not** a fetched resource — it is yours, and lives outside this repo.
+
+**3. Confirm it fired.** Step 9 says so on stderr, and `audit/counts.tsv` records it:
+
+```
+--gene-prior overlay: 47 genes from panel.tsv (+1 gene set(s) from the JSON sidecar, 4 members
+  contributed by set membership alone; set and gene priors combined by MAX, never sum)
+  overlay: 47 genes; 12 variants promoted by list membership (rank_delta < 0)
+```
+
+Then sort `igv/variants.prioritized.tsv` (§14) on `rank_prior`, and read `rank_delta` to see what
+the panel changed. `gene_list_prior_member` / `_tier` / `_weight` / `_evidence_class` /
+`_excluded_non_germline` / `_set_applied` carry the per-variant provenance.
+
+**Two failure modes worth knowing, because both are now loud rather than silent:**
+
+- A **headerless table** (`BRCA1,0.9,GREEN` with no header row) is a **hard stop**, not a
+  degrade-with-a-warning. It cannot be told apart from a symbol list whose symbols happen to
+  contain commas, and reading it that way would produce a plausible gene *count* over a list that
+  matched nothing — the reviewer would ship an un-prioritised list believing the panel applied.
+  Every other optional resource degrades because its absence is honestly reportable; this one
+  isn't. Add a header row, or strip the file to one symbol per line.
+  (`tests/test_pure.py:test_prioritize_gene_prior_overlay_accepts_csv_and_rejects_headerless_table`)
+- A row whose `evidence_class` is in `non_germline_classes` (default
+  `[somatic_driver_not_germline]`, matched as a substring) contributes **exactly 0.0** and is
+  reported with `gene_list_prior_excluded_non_germline`. Note the string is
+  `somatic_driver_not_germline`, **not** `somatic_driver` — a near-miss class name silently gets
+  the full prior instead of zero, so check the stderr line's excluded count against what you
+  expect. Pediatric-cancer panels routinely list drivers (KRAS, NRAS, CBL, MTOR, AKT1, BCORL1);
+  they stay visible and credited nothing.
+
+And two things the prior deliberately **cannot** do: it cannot promote a variant with no molecular
+evidence (the mechanism gate of §9 still applies), and it cannot remove anything — `rank_agnostic`
+ships on every run alongside `rank_prior` precisely so the panel's effect is measurable rather than
+baked in. `prior_weight` is an **uncalibrated ordering default**, never a likelihood ratio.
+
 ### 14. The igv.js review table — where the triage actually gets used
 
 The point of the two layers above is to stop a reviewer curating thousands of variants by hand.

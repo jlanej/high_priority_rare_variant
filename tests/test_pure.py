@@ -999,6 +999,92 @@ def test_prioritize_gene_prior_off_by_default_and_gated():
     assert [r["rank_agnostic"] for r in again] == [r["rank_agnostic"] for r in rows]
 
 
+def test_prioritize_gene_prior_overlay_accepts_csv_and_rejects_headerless_table():
+    """A phenotype panel handed over as a CSV must APPLY, and a headerless table must HALT.
+
+    The overlay reader's delimiter gate was tab-only, so a spreadsheet-exported CSV fell through
+    to the bare-symbol-list branch: every line became one "symbol" ("BRCA1,0.9,GREEN") that can
+    never match a gene, while the reader announced "3 genes from pheno.csv" and the run proceeded
+    fully phenotype-agnostic. A plausible-looking gene count over a list that matched nothing is
+    the failure class nobody catches in review — the reviewer ships an un-prioritised list
+    believing their panel was applied. So: CSV works, and a table this reader cannot recognise is
+    a HARD STOP rather than the usual degrade-with-a-WARN, because its absence is not honestly
+    reportable the way a missing --mutrate is.
+    """
+    p9 = _load_p9()
+    d = tempfile.mkdtemp(prefix="_hprv_p9ovl_")
+    try:
+        cols = ["chrom", "pos", "ref", "alt", "trio_id", "gene", "consequence", "impact",
+                "inheritance", "grpmax_af", "cadd", "child_gt", "child_GQ", "child_DP", "child_AB"]
+
+        def row(pos, gene):
+            return {"chrom": "chr1", "pos": str(pos), "ref": "A", "alt": "T", "trio_id": "T1",
+                    "gene": gene, "consequence": "stop_gained", "impact": "HIGH",
+                    "inheritance": "dominant", "grpmax_af": "2e-6", "cadd": "38",
+                    "child_gt": "0/1", "child_GQ": "99", "child_DP": "40", "child_AB": "0.5"}
+        vin = os.path.join(d, "v.tsv")
+        _write_tsv(vin, cols, [row(1000, "BRCA1"), row(2000, "TP53"), row(3000, "SDHB")])
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("project: {name: t}\nprioritization:\n"
+                     "  gene_downweight: {min_control_genes: 1}\n"
+                     "  composite: {gene_list_prior: {enabled: true}}\n")
+        outv, outg = os.path.join(d, "vp.tsv"), os.path.join(d, "gp.tsv")
+
+        def run(overlay):
+            for f in (outv + ".done",):
+                if os.path.exists(f):
+                    os.remove(f)
+            return p9.main(["--variants", vin, "--config", cfgp, "--gene-prior", overlay,
+                            "--n-trios", "1", "--out-variants", outv, "--out-genes", outg])
+
+        def members():
+            import csv
+            return {r["gene"]: r for r in csv.DictReader(open(outv), delimiter="\t")
+                    if r["gene_list_prior_member"] == "1"}
+
+        # (1) a spreadsheet export: COMMA-delimited, with a header
+        csvp = os.path.join(d, "panel.csv")
+        with open(csvp, "w") as fh:
+            fh.write("gene,prior_weight,tier\nBRCA1,0.9,GREEN\nTP53,0.5,AMBER\n")
+        assert run(csvp) == 0
+        m = members()
+        assert set(m) == {"BRCA1", "TP53"}, f"CSV overlay did not apply: {sorted(m)}"
+        assert m["BRCA1"]["gene_list_prior_tier"] == "GREEN"
+        assert m["BRCA1"]["gene_list_prior_weight"] == "0.9"
+
+        # (2) the same content with NO header row is unreadable -> hard stop, not a silent no-op
+        bad = os.path.join(d, "headerless.csv")
+        with open(bad, "w") as fh:
+            fh.write("BRCA1,0.9,GREEN\nTP53,0.5,AMBER\n")
+        assert run(bad) == 1, "a headerless table must fail loudly, not match zero genes quietly"
+
+        # (3) a genuine bare symbol list still works
+        plain = os.path.join(d, "panel.txt")
+        with open(plain, "w") as fh:
+            fh.write("# my phenotype panel\nBRCA1\nSDHB\n")
+        assert run(plain) == 0
+        assert set(members()) == {"BRCA1", "SDHB"}
+
+        # (4) the JSON sidecar's gene_sets block, combined by MAX and never SUM
+        tsvp = os.path.join(d, "panel2.tsv")
+        with open(tsvp, "w") as fh:
+            fh.write("gene\tprior_weight\ttier\nBRCA1\t0.9\tGREEN\n")
+        with open(os.path.join(d, "panel2.json"), "w") as fh:
+            fh.write('{"gene_sets": {"MYPATH": {"prior_weight": 0.6, '
+                     '"members": ["BRCA1", "TP53", "SDHB"]}}}')
+        assert run(tsvp) == 0
+        m = members()
+        assert set(m) == {"BRCA1", "TP53", "SDHB"}, f"sidecar set not applied: {sorted(m)}"
+        # BRCA1 is in BOTH at 0.9 and 0.6 -> MAX, so its weight must not become 1.5
+        assert float(m["BRCA1"]["gene_list_prior_weight"]) == 0.9, \
+            "gene-level and set-level priors must combine by MAX, never SUM"
+        assert float(m["TP53"]["gene_list_prior_weight"]) == 0.6
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_prioritize_igv_review_table_preserves_track_paths():
     """--out-igv-variants must ADD triage columns without disturbing ANY input column.
 

@@ -687,12 +687,19 @@ prioritization:
     # nothing else.
     gene_list_prior:
       enabled: false
-      # A version-pinned overlay OUTSIDE this repo. Accepts a bare symbol list OR a TSV with a
-      # `gene` column plus optional `tier`/`prior_weight`/`evidence_class`/`replication`/`moi`/
-      # `pmids`/`gene_sets`; unknown columns pass through untouched. A sibling `.json` carrying a
-      # `gene_sets` block is picked up automatically. NOTE: a path here is INERT while
-      # `enabled: false` — only an explicit --gene-prior overrides that, so a stale path cannot
-      # silently start promoting genes.
+      # A version-pinned overlay OUTSIDE this repo. STEP-BY-STEP RECIPE (file shapes, how to
+      # confirm it fired, the two loud failure modes): docs/prioritization.md#13b.
+      # Accepts a bare symbol list OR a TAB- **or COMMA**-delimited table with a header naming a
+      # `gene` (or `symbol`/`gene_symbol`) column, plus optional `tier`/`prior_weight`/
+      # `evidence_class`/`replication`/`moi`/`pmids`/`gene_sets`; unknown columns pass through
+      # untouched. Comma is accepted because a panel handed over by a collaborator is usually a
+      # spreadsheet export. A HEADERLESS table is a HARD STOP, not a warning: it cannot be told
+      # apart from a symbol list, and reading it as one yields a plausible gene COUNT over a list
+      # that matched nothing — the reviewer would ship an un-prioritised list believing the panel
+      # applied. A sibling `.json` (`panel.tsv` -> `panel.json`) carrying a `gene_sets` block is
+      # picked up automatically. NOTE: a path here is INERT while `enabled: false` — only an
+      # explicit --gene-prior overrides that, so a stale path cannot silently start promoting
+      # genes.
       path: ${GENE_PRIOR_OVERLAY}
       points: 2                     # the MAXIMUM prior, scaled by prior_weight below
       # THE JOIN IS ON GENE SYMBOL ONLY — deliberately MOI-AGNOSTIC, and this is load-bearing.
