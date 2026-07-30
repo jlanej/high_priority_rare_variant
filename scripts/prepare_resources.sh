@@ -62,6 +62,10 @@ SPLICEAI_INDEL_OUT="$DIR/spliceai/${SPLICEAI_INDEL_EXPECT}"
 LOFTEE_OUT="$DIR/loftee"
 CONSTRAINT_OUT="$DIR/constraint/constraint.by_gene.tsv"
 MUTRATE_OUT="$DIR/constraint/mutation_rate.by_gene.tsv"
+# Step-9 mutational target: the gnomAD v2.1.1 constraint table kept UNJOINED (join_constraint.py
+# projects away the mu_*/oe_syn/classic_caf/constraint_flag/cds_length columns the excess
+# statistic needs). Same download as constraint above, a different prepared artifact.
+MUTTARGET_OUT="$DIR/constraint/mutational_target.by_gene.txt.bgz"
 
 MISSING=() PREPARED=() SKIPPED=()
 
@@ -247,6 +251,26 @@ prep_constraint() {
             && record ok constraint || warn "[constraint] join failed; join manually (see docs/gene_constraint.md)"
     fi
     get_free mutation_rate "$MUTRATE_URL" "$MUTRATE_OUT" "" || warn "[mutation_rate] optional (Step-6 de novo, secondary) — supply a Samocha per-gene rate TSV if wanted"
+    prep_mutational_target
+}
+
+prep_mutational_target() {
+    # Step 9's OFFSET table. Deliberately the UNJOINED gnomAD v2.1.1 constraint file: the join
+    # above projects it down to gene/oe_lof_upper/pli/s_het/phaplo, dropping mu_mis/mu_syn/mu_lof
+    # (the offset itself) plus oe_syn/classic_caf/constraint_flag (three of the six artifact
+    # signals) and cds_length (the fallback offset). Same ~3 MB download, so this is a copy of an
+    # already-fetched file rather than a second network fetch when constraint ran first.
+    selected mutational_target || return 0
+    mkdir -p "$DIR/constraint"
+    [[ -f "$MUTTARGET_OUT" ]] && { log "[mutational_target] cached"; record skip mutational_target; return 0; }
+    local gn="$DIR/constraint/gnomad_lof_metrics.txt.bgz"
+    if [[ -f "$gn" ]]; then
+        cp "$gn" "$MUTTARGET_OUT" && record ok mutational_target \
+            && log "[mutational_target] prepared from the already-fetched gnomAD constraint table -> $MUTTARGET_OUT"
+    else
+        get_free mutational_target "$MUTATIONAL_TARGET_URL" "$MUTTARGET_OUT" "" \
+            || warn "[mutational_target] optional (Step-9 excess statistic) — without it Step 9 warns and every gene reads gene_tier=T0"
+    fi
 }
 
 prep_dbnsfp() {
@@ -330,6 +354,10 @@ do_verify() {
     verify_one_intact "$CADD_SNV_OUT" cadd_snv
     verify_one_intact "$CADD_INDEL_OUT" cadd_indel
     verify_one "$CONSTRAINT_OUT" constraint
+    # Present-but-not-required: Step 9 degrades with a loud WARN when the mutational target is
+    # absent (every gene reads T0), so a missing table must not fail a correctly-configured
+    # Steps-0-8 run. Reported so an operator can see whether the excess statistic will be live.
+    verify_extra "$MUTTARGET_OUT" mutational_target
     verify_extra "$GNOMAD_OUT" gnomad_sites
     verify_extra "$CLINVAR_OUT" clinvar
     verify_extra "$LOFTEE_OUT/human_ancestor.fa.gz" loftee
@@ -359,6 +387,18 @@ do_emit() {
         echo "export SPLICEAI_INDEL=$SPLICEAI_INDEL_OUT"
         echo "export GNOMAD_V2_CONSTRAINT=$CONSTRAINT_OUT"
         echo "export MUTRATE_TABLE=$MUTRATE_OUT"
+        echo "# Step-9 prioritization: the UNJOINED gnomAD v2.1.1 constraint table (mu_mis/mu_syn/"
+        echo "# mu_lof + oe_syn/classic_caf/constraint_flag/cds_length). NOT interchangeable with"
+        echo "# GNOMAD_V2_CONSTRAINT above, which is projected down to the LOEUF/pLI priors."
+        echo "export MUTATIONAL_TARGET=$MUTTARGET_OUT"
+        echo "# Step-9 OPTIONAL inputs. Without ESTABLISHED_GENES the auditable established-gene"
+        echo "# ceiling is INACTIVE (Step 9 warns). SEGDUP_TABLE must be on the SAME coordinate"
+        echo "# build as the mutational-target table (gnomAD v2.1.1 is GRCh37/hg19)."
+        echo "# export ESTABLISHED_GENES=/path/to/established_gene_validity_union.txt"
+        echo "# export SEGDUP_TABLE=/path/to/segdup98_by_gene.tsv"
+        echo "# export GENE_MOI_TABLE=/path/to/gene_moi.tsv"
+        echo "# Class-B phenotype overlay — OFF by default; keep it OUTSIDE this repo:"
+        echo "# export GENE_PRIOR_OVERLAY=/path/to/phenotype_overlay.txt"
         echo "# Already have a VEP 115 GRCh38 VCF? Set this and Step 2 skips the VEP call entirely:"
         echo "# export VEP_ANNOTATED_VCF=/path/to/your.vep.vcf.gz"
     } > "$w"

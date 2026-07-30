@@ -282,6 +282,471 @@ burden:
   exome_wide_p: 2.5e-6            # exome-wide threshold for the recurrence AND de novo p-values
   fdr_q: 0.05
 
+# --- Prioritization (Step 9): gene excess statistic + artifact panel + variant tiering ---
+# Step 6 nominates GENES by recurrence. It cannot say whether a gene is emitting more candidate
+# rows than its MUTATIONAL TARGET predicts, and nothing downstream re-ranks the individual CALLS.
+# Step 9 adds both, and it is PHENOTYPE-AGNOSTIC: no disease gene list appears anywhere in this
+# block. The optional Class-B overlay under composite.gene_list_prior is a FILE PATH, defaults
+# OFF, and lives outside this repo.
+#
+# THE NEVER-DROP RULE IS ABSOLUTE HERE. Nothing in this block removes a variant. A gene
+# down-weight sets a tier, a separately-reported additive penalty, and a human-readable reason
+# string; the largest penalty (-3.0) is deliberately too small to demote a variant carrying
+# strong molecular evidence in a constrained gene (V4 splice +4, strong rarity +2, constraint +1
+# = +7, and -3 leaves +4). It is a re-rank, not a veto, and Step 9 asserts row-count conservation.
+#
+# READ THIS BEFORE TUNING ANY NUMBER BELOW. The excess statistic is a QUALITY question, not a
+# biology question: it answers "is this gene producing more candidate rows than its mutational
+# target predicts?", never "is this gene disease-associated?". High excess is evidence of a
+# TECHNICAL or POPULATION-GENETIC anomaly — mismapping in a segmental duplication, paralogue
+# collapse, a callability defect, a founder allele, an ancestry-uneven rarity gate, or a genuine
+# hypermutable locus. A gene can be BOTH an established predisposition gene and a mismapping
+# hotspot; the correct response there is read-level review, not discarding the gene. See
+# docs/prioritization.md.
+prioritization:
+  enabled: true                   # Step 9 runs when Step 6 output exists
+  excess:
+    # Negative binomial, NOT Poisson, and this is measured rather than assumed. Pearson
+    # dispersion on the validation cohort was phi = 18.7 raw / 1.29 after the null's own trim,
+    # so overdispersion is real but concentrated in ~0.39% of genes. In a 2-fold cross-fit the
+    # Poisson tail was 2.41x ANTI-conservative at alpha = 1e-3 (P(p<0.001) = 0.00241) WHEN THE
+    # POISSON ARM IS GIVEN THE SAME TRIM LOOP; without trimming that arm it is 1.82x (range
+    # 1.60-2.04x over 40 random splits). Quote the figure WITH its condition — the direction is
+    # invariant either way. The NB was 0.31x, i.e. CONSERVATIVE. Under the never-drop rule conservative is the correct
+    # direction of error: a missed artifact gene stays in the review queue (cost: reviewer time),
+    # an over-called one gets real variants penalised (cost: a possible missed discovery). The NB
+    # also matches the zero class (observed 0.4717, NB 0.4712, Poisson 0.4096), so no
+    # zero-inflation component is needed — do NOT fit a ZINB.
+    null_model: negative_binomial   # negative_binomial | poisson | none
+    alpha_method: mle               # mle | mom — dispersion estimator on the trimmed bulk
+    # The tail must not calibrate its own null. Untrimmed, the artifact loci are absorbed into
+    # the dispersion and then HIDE themselves: the global fit gives alpha = 0.804 against a
+    # trimmed 0.214, nearly 4x. Genes with p < trim_p are dropped from the FIT (never from the
+    # output) and the loop iterates to a fixed point (4 iterations on the validation cohort,
+    # trimming 77 of 19,643 genes = 0.39%).
+    trim_p: 1.0e-3
+    # HALT if the trim loop exceeds this. A cohort where >5% of genes look like outliers has a
+    # MIS-SPECIFIED null (usually: the mutational-target table and the candidate counts describe
+    # different gene universes), not an exome that is 5% artifact.
+    trim_max_fraction: 0.05
+    q_threshold: 0.05             # BH-FDR screening line for "significant excess"
+    # Count floor behind a RATIO rule. 1 = off, the value the validated tier table was measured
+    # with (228 genes / 2,565 variants / 10.36% down-weighted at 100% established-gene
+    # retention). Set 3 for a stricter run: same 100% retention, 92 genes / 2,369 variants
+    # (9.57%). Rationale for having the knob at all: of the 532 genes at ratio >= 5 on the
+    # validation cohort, 135 had n = 1 — a single variant against E = 0.1 is 10x excess and means
+    # nothing. The NB FDR already handles that correctly on its own (the minimum n reaching
+    # q < 0.05 was 5), so this floor guards the RATIO rules only, never the q rules.
+    #
+    # BOTH TIER TABLES ARE MEASURED ON THE SAME REAL DATA; this default is the more defensible one
+    # and the alternative is one config line away:
+    #   min_n_for_ratio_rule: 3  (DEFAULT)  92 genes / 2,369 variants (9.57%), 8 control genes
+    #       need the ceiling. 92.4% of the triaged VOLUME using 92 genes instead of 228.
+    #   min_n_for_ratio_rule: 1  reproduces the original spec tier table exactly: 228 genes /
+    #       2,565 variants (10.36%), 13 control genes need the ceiling. But 136 of those 228
+    #       (59.6%) have n < 3 and carry only 196 variants between them (7.6% of triaged volume) —
+    #       most of the down-weighted gene LIST is singletons and doubletons contributing almost
+    #       none of the benefit while generating most of the exemption burden. Ten of the 13
+    #       ceiling-exempted genes have n <= 4 and EIGHT have q_nb = 1 (no statistical evidence of
+    #       excess at all): SMPX, HMGA2, HAMP and PET100 are each ONE variant against E ~ 0.16.
+    #       They never needed protecting — they needed this floor.
+    # Retention is 100% either way. CTSA, NPRL3 and CDH23 still require the ceiling, so this does
+    # not replace it — it shrinks what the ceiling has to excuse, from 13 genes to 8.
+    min_n_for_ratio_rule: 3
+    offset:
+      # E_g = C * mu_g, where mu_g = mu_mis + mu_syn + mu_lof from the gnomAD v2.1.1 per-gene
+      # Samocha mutation-rate targets (Karczewski 2020, PMID 32461654). C is fit so the cohort
+      # total is reproduced, and it is a COHORT property re-fit every run — never a constant.
+      components: [mu_mis, mu_syn, mu_lof]
+      # mu_lof is NULL for ~505 of 19,643 genes. They are neither dropped nor charged
+      # mu_lof = 0 (which would inflate their ratio ~5% for no reason): impute at the MEDIAN
+      # mu_lof/(mu_mis+mu_syn) over the 19,138 genes that have it, and record the imputation in
+      # the mu_lof_src column so it stays visible.
+      mu_lof_impute_factor: 0.0516
+      # Genes with NO gnomAD constraint row at all (418 symbols / 623 variants = 2.5% of the
+      # validation candidate list — mostly novel/renamed ORFs and readthrough loci) get a
+      # CDS-length regression offset: log(mu_tot) = b0 + b1*log(cds_length), fit by OLS over the
+      # full gene universe (R^2 = 0.828, 10th-90th percentile of predicted/actual 0.712-1.283,
+      # i.e. a +/-30% band). A +/-30% offset error cannot support a 5x claim, which is exactly why
+      # gene_downweight.cds_fallback_ceiling exists.
+      cds_fallback: {b0: -18.4484, b1: 1.0570}
+      # Covariates were TESTED and REJECTED, and the rejection is deliberate. `+ log(gene_length)
+      # + oe_syn` improves the NB-GLM by dAIC = -121, so there IS real residual structure
+      # (candidate yield rises with genomic span and with oe_syn). It is not worth using because
+      # (a) Spearman(ratio, covariate-adjusted ratio) = 0.992 and 502 of 532 ratio>=5 genes are
+      # shared, so the adjustment is negligible where it matters, and (b) oe_syn is itself one of
+      # the six artifact signals below — regressing it into the offset would ABSORB the very
+      # signal we must report separately, so a callability-defective gene would look normal.
+      covariate_adjust: false
+    refit_per_cohort: true        # C and alpha are cohort properties, never hardcoded constants
+  # --- The six-signal artifact panel -> an integer corroboration count (0-6) ---------------
+  # The excess statistic says a gene is ANOMALOUS. It cannot say WHY, and on its own it costs
+  # sensitivity (BH-FDR at 5% alone triaged 5 established-control genes). The panel supplies the
+  # independent, mechanistically-interpretable SECOND WITNESS required before any penalty. The
+  # count is UNWEIGHTED on purpose: the folds span 4x-195x and a weighted version would be fit on
+  # the same tail it is used to judge, so it would not transfer to another cohort. Fold
+  # enrichment at excess_ratio >= 10 on the validation cohort is quoted per signal.
+  signals:
+    saturation:
+      # n_g / n_trios_screened. THE STRONGEST SIGNAL IN THE PANEL (195x, Fisher p = 2.8e-39) and
+      # the only one needing no mutation model, no external annotation and no gnomAD join — so it
+      # is the most portable across cohorts and the least likely to fail silently. 0.10 is ~2x
+      # the 99th percentile of candidate genes (median 0.0091, p99 0.050): a deliberately
+      # conservative cut that only 35 of 10,377 genes cleared. A gene in which a tenth of all
+      # families carry a "rare" variant is not delivering rare variants. NEVER sufficient alone —
+      # TTN/SYNE1/DNAH11 clear it at only 1.9-3.7x excess, which is why it must be paired with
+      # excess in every tier rule below.
+      per_trio_min: 0.10
+    segdup:
+      # Fraction of the gene span covered by high-identity segmental duplications (10.1x). The
+      # thresholds are EMPIRICAL, not conventional: any-overlap is 1.9x, >=98% identity at
+      # any coverage is 6.0x, >=98% over >=10% of the gene is 10.1x, >=50% is 13.4x but halves
+      # the gene count — so >=10% is the operating point.
+      min_identity: 0.98
+      min_frac: 0.10
+      # COORDINATE BUILD IS LOAD-BEARING. gnomAD v2.1.1 constraint start/end are GRCh37/hg19
+      # (verified: BRCA1 chr17:41,196,312-41,277,500), so the segdup track MUST be on the same
+      # build as whatever coordinates the mutational-target table carries. Mixing builds produces
+      # ~0 overlap SILENTLY — the signal goes dark with no error. Note also the important
+      # NEGATIVE result: this statistic detects segdup loci that emit TOO MANY calls and is blind
+      # to those that emit too few (CYP21A2, SMN1/2, NCF1, STRC all have ZERO candidates against
+      # non-trivial E). So segdup98_frac is emitted on EVERY gene regardless of tier, because it
+      # also marks genes where a NEGATIVE result is uninformative.
+      track_build: hg19
+      table: ${SEGDUP_TABLE}      # optional gene<TAB>segdup98_frac; absent => signal off (WARN)
+    oe_syn:
+      # |oe_syn - 1| > 0.3 (5.2x). Synonymous variation is the closest thing gnomAD offers to a
+      # neutral internal control, so oe_syn ~ 1 wherever both the mutation model and the
+      # callability are sound. Departure in EITHER direction is informative and they mean
+      # DIFFERENT things: < 0.7 (9.2x) = gnomAD saw FEWER synonymous variants than expected, so
+      # its callability/transcript model there is poor and mu_g (our denominator) is unreliable;
+      # > 1.3 (4.5x) = MORE than expected, i.e. paralogue collapse inflating gnomAD's own counts
+      # by the same mechanism that inflates ours. The symmetric flag captures both; the raw value
+      # is emitted so the direction stays visible.
+      max_deviation: 0.30
+    constraint_flag:
+      # gnomAD telling you ITS OWN constraint model did not fit the gene (4.0x). Decomposed:
+      # mis_too_many alone is 5.1x (p = 6.2e-6) and does the work; syn_outlier alone is 2.3x and
+      # NOT significant (p = 0.074) but is kept for completeness. `no_exp_lof` is deliberately
+      # EXCLUDED — it is a coverage/annotation absence rather than a model failure, and it fires
+      # on genes where the family signal already catches the real problem.
+      values: [mis_too_many, syn_outlier]
+    caf_low:
+      # classic_caf below the candidate-gene 10th percentile (3.9x). THE DIRECTION IS
+      # COUNTER-INTUITIVE and belongs in any methods text: high-excess genes have FAR LOWER
+      # cumulative pLoF allele frequency (median 2.1e-5 vs 1.3e-4 baseline), and the HIGH decile
+      # is actually DEPLETED (0.60x) — so this is NOT "common variants leaking through the rarity
+      # gate". A caf near zero means gnomAD reports essentially no pLoF alleles, which happens
+      # either because the gene is small/strongly constrained or because gnomAD's own coverage
+      # there is poor. The companion statistic disambiguates it: median exp_syn is 27.8 in the
+      # high-excess set vs 126.7 at baseline, so these genes are systematically small or poorly
+      # covered IN GNOMAD. It is a LOW-INFORMATION-LOCUS flag, not a frequency flag — and the
+      # weakest mechanism in the panel, so the strong tier never rests on it alone.
+      percentile: 0.10
+      # NULL HANDLING, pinned because the two readings differ and one of them is unsound. The
+      # percentile is taken over the genes that HAVE a value (cut 7.96e-6 on the validation
+      # cohort); genes with a NULL classic_caf are then FLAGGED — a gene for which gnomAD reports
+      # no pLoF allele frequency at all is exactly the low-information locus this signal is about.
+      # 1,122 genes flag. The alternative reading (fill nulls with 0, THEN take the percentile)
+      # gives cut 4.166e-6 and 1,038 genes, and makes the threshold applied to the MEASURED data
+      # depend on how many genes gnomAD happens to have no record for. The tier table is identical
+      # either way; the corroboration distribution shifts by 84 genes.
+      include_null_as_flagged: true
+    family:
+      # Artifact-prone gene families (6.5x). A CURATED, deliberately INCOMPLETE regex list,
+      # versioned as CONFIG rather than code so it can be reviewed and extended. Per-family folds
+      # where >=2 genes hit: LCE* 102x, PRAMEF* 41x, NBPF* 34x, GOLGA* 29x, KRTAP* 6.4x.
+      # HONEST CAVEAT: olfactory receptors (1.9x, p = 0.21) and zinc fingers (1.8x, p = 0.16) are
+      # NOT significantly enriched on this data. They are kept because the individual offenders
+      # are extreme (OR4Q3 at 546x, ZNF429 at 88x) and the mechanism — high paralogy, high
+      # pseudogene content — is well established, but the family membership is doing much less
+      # work than the per-gene excess. Family membership must NEVER be sufficient on its own,
+      # which is why it enters only as ONE VOTE in the corroboration count. Treat a family that
+      # recurs in the "unexplained high excess" review list as a candidate addition — reviewed by
+      # a human, never auto-learned from the data being screened.
+      patterns:
+        - '^OR\d+[A-Z]*\d*$'
+        - '^KRTAP'
+        - '^MUC\d+'
+        - '^PRAMEF?\d*'
+        - '^NBPF\d+'
+        - '^GOLGA\d'
+        - '^NPIP'
+        - '^HLA-'
+        - '^TAS2R'
+        - '^DEFB?\d'
+        - '^LCE\d'
+        - '^SPRR'
+        - '^(H1-|H2A|H2B|H3-|H4-|HIST)'
+  # --- Four-tier graded gene down-weight (NEVER a hard drop) -------------------------------
+  # Assignment runs in ascending severity so the highest matching tier wins; the two ceilings are
+  # applied LAST. Observed on the validation cohort AT THE SHIPPED DEFAULT
+  # (min_n_for_ratio_rule: 3): T2+T3 triages 92 genes / 2,369 variants (9.57%) at 100%
+  # established-gene retention, with 8 control genes needing the ceiling.
+  # At min_n_for_ratio_rule: 1 (the original spec table, one config line away) the tiers are
+  # T0 10,102 genes / 21,498 variants (86.80%), T1 47/703 (2.84%), T2 172/399 (1.61%),
+  # T3 56/2,166 (8.75%) — T2+T3 = 228 genes / 2,565 variants (10.36%), 13 genes needing the
+  # ceiling. Note the shape, which holds under BOTH settings: T3 is a few dozen genes carrying
+  # ~8.75% of the list, i.e. the volume reduction comes almost entirely from a handful of extreme
+  # loci — concentrated and auditable rather than diffuse.
+  gene_downweight:
+    # T1 requires NO corroboration: it costs only -0.5 and its job is to populate a reviewable
+    # WATCH LIST, including the "unexplained excess" class. q < 0.25 is deliberately loose.
+    t1_watch: {min_ratio: 3.0, max_q: 0.25}
+    # T2 uses the RATIO, not the FDR, and that is load-bearing: at the moderate-excess boundary
+    # the FDR is count-driven (no gene with n < 5 reached q < 0.05 on the validation cohort), so
+    # an FDR-only rule would exempt every LOW-COUNT artifact gene. Requiring one corroborating
+    # signal supplies the evidence the count cannot.
+    t2_downweight: {min_ratio: 5.0, min_corroboration: 1}
+    # T3 has THREE disjuncts because there are three distinct ways to be confidently anomalous:
+    # statistically significant WITH a mechanism; extreme with two mechanisms; or saturating the
+    # cohort with two mechanisms. The third exists because saturation is offset-free and
+    # therefore survives an unreliable mu_g.
+    t3_strong:
+      max_q: 0.05
+      q_min_corroboration: 1
+      min_ratio: 10.0
+      ratio_min_corroboration: 2
+      saturation_min_ratio: 5.0
+      saturation_min_corroboration: 2
+    # Points on the Tavtigian-style scale used by the composite: -0.5 ~ half a supporting
+    # increment, -1.5 ~ one supporting, -3.0 ~ one moderate. Sized so a T3 penalty CANNOT by
+    # itself demote a variant carrying strong molecular evidence in a constrained gene.
+    penalties:
+      T0_no_downweight: 0.0
+      T1_watch: -0.5
+      T2_downweight: -1.5
+      T3_strong_downweight: -3.0
+    # An established-gene-validity union member is CAPPED at T1_watch and never enters T2/T3.
+    # WHY AN EXPLICIT EXEMPTION RATHER THAN A STRICTER THRESHOLD — both reach 100% control
+    # sensitivity, but the exemption is AUDITABLE AND REVERSIBLE: the exempted genes are NAMED,
+    # they keep their full excess statistics in the watch list, and a reviewer can disagree. A
+    # stricter global threshold instead shrinks the down-weight set from 228 genes to 38, silently
+    # releasing 190 genes carrying 1,520 variants back into the review queue with NO record of
+    # the trade. Note precisely which component buys what: requiring one corroborating signal
+    # takes sensitivity from 99.63% to 99.78%, and the exemption closes the remaining gap to
+    # 100% — they are complementary, not substitutes. 13 genes were capped this way on the
+    # validation cohort (CTSA at 148x, NPRL3 at 77x among them), and they are emitted with
+    # review_flag = established_gene_high_excess: THE EXEMPTION PROTECTS THEM FROM A SCORE
+    # PENALTY, IT DOES NOT MEAN THEIR CALLS ARE CORRECT. CTSA at 160 candidate variants across
+    # 220 trios is not credible as biology; those calls need read-level review before any of them
+    # is believed. Conflating "established gene" with "trustworthy call" is the exact failure mode
+    # this whole block warns about.
+    established_gene_ceiling: T1_watch
+    established_genes: ${ESTABLISHED_GENES}   # phenotype-AGNOSTIC gene-validity union, one
+                                              #   symbol per line (ClinGen Definitive/Strong +
+                                              #   dosage HI3 + actionability). Version-pin it.
+                                              #   Absent => the ceiling is INACTIVE (loud WARN).
+    # A gene whose offset came from the CDS-length regression never reaches T3: a +/-30% offset
+    # error is too coarse to support that claim.
+    cds_fallback_ceiling: T2_downweight
+    # GUARDS, both of which HALT rather than degrade. A stale or truncated control set makes the
+    # exemption silently EMPTY, which is precisely the failure that would down-weight established
+    # genes with nobody noticing; and a down-weight fraction far above the measured 10.4% means
+    # the null is mis-specified for this cohort, not that a fifth of the exome is artifact.
+    min_control_genes: 1000
+    max_downweight_fraction: 0.20
+  # --- Per-variant tiering (V0-V5) ---------------------------------------------------------
+  # A SCREENING/TRIAGE tier, NOT an ACMG classification — hprv assigns no ACMG weight, and the
+  # resource gaps noted below make several ACMG codes unimplementable. Composition with the gene
+  # layer follows the ACMG/ClinGen SVI MECHANISM-GATING principle: gene constraint counts only
+  # when the variant has a credible molecular effect, and a molecularly-benign prediction caps
+  # the tier no matter how constrained the gene is.
+  variant_tier:
+    # V4/V3 splice bands, both from Walker 2023 (ClinGen SVI splicing, PMID 37352859): >= 0.2 is
+    # the PP3-supporting cut hprv already uses at the screen, >= 0.5 is stronger evidence. Walker
+    # is also explicit that a CANONICAL splice site with a LOW SpliceAI score deserves scrutiny
+    # rather than automatic Very Strong, so the score is reported beside the tier.
+    spliceai_strong: 0.5
+    spliceai_supporting: 0.2
+    # V0 "molecularly benign" requires BOTH scores PRESENT and below their cutoffs. A missing
+    # SpliceAI score is NOT evidence of no splice effect — the precomputed set covers every
+    # genome-wide SNV but only 1 nt insertions and deletions <= 4 nt, so a blank means "not
+    # covered", and it bites exactly the indel classes most likely to disrupt splicing. Letting a
+    # blank satisfy a benign rule would cap precisely the variants nobody scored.
+    spliceai_benign_max: 0.1
+    cadd_benign_max: 15.0
+    benign_impacts: [LOW, MODIFIER]
+    # V3 missense via CADD >= 25.3 is a DISCOVERY RANK, NOT PP3 EVIDENCE, and the tier carries
+    # missense_evidence_source = cadd_offlabel so no downstream reader mistakes it for a
+    # calibrated call. 25.3 is Pejaver-2022's missense-only PP3-supporting value (PMID 36413997),
+    # but ClinGen SVI says commit to ONE predictor chosen before seeing results and the
+    # calibrated choice is REVEL (PP3 0.644/0.773/0.932; BP4 <= 0.290/0.183). REVEL needs dbNSFP,
+    # i.e. a change to the annotation contract — a resource question, not a design question. Until
+    # then: do NOT claim graded missense strength.
+    cadd_missense_supporting: 25.3
+    rarity:
+      # Rarity strength bands on the grpmax-PROXY AF. TWO CAVEATS TRAVEL WITH THIS COLUMN.
+      # (1) It is a POINT ESTIMATE, not faf95 — the cache has no AC/AN, so the CI correction is
+      # unrecoverable at any price. Do NOT present these bands as ACMG PM2 (hprv applies PM2 at
+      # Supporting only, and PM2 is evidence, not the gate). (2) Audit A-4, a validity AND equity
+      # problem: the proxy is the MAX over grpmax-eligible groups REGARDLESS of the cohort's
+      # actual ancestry composition, so in a multi-ancestry cohort like GMKF the effective
+      # stringency VARIES WITH THE PROBAND'S ANCESTRY — a variant genuinely rare in the proband's
+      # own population but common in another is charged the other group's AF. The loss is
+      # unevenly distributed across ancestry groups and runs in the silent false-negative
+      # direction. Per-ancestry candidate yield is the run-level diagnostic that would show it,
+      # and it is NOT computable without ancestry labels.
+      strong_max: 1.0e-5
+      moderate_max: 1.0e-4
+      supporting_max: 1.0e-3
+      permissive_max: 1.0e-2
+      ba1: 0.05                   # ClinGen BA1 — caps the total, never rescued
+      # Flag when the rarity term was ONE population's doing, so a reviewer can see it.
+      # variants.tsv carries no per-group breakdown, only grpmax_af and max_af, so max_af/grpmax_af
+      # is the available proxy for the spec's "second-highest group" comparison.
+      single_group_ratio: 10.0
+    moi:
+      # A gene at or above this CDS length is treated as "long" for the audit-A-6 comp-het drift
+      # caveat: mode assignment is single-gene-keyed and a phase-confirmed mat x pat pair consumes
+      # both legs, so a genuinely dominant-grade variant is relabelled compound_het whenever the
+      # child carries any other sub-1e-2 functional het in the same gene — near-certain in TTN,
+      # NEB, RYR1, DMD. No MOI-discordance penalty is applied to a comp-het call in a long gene.
+      long_gene_cds_bp: 10000
+    # [reserved] NMD-escape sub-classification of pLoF. Abou Tayoun 2018 (PMID 30192042) grades
+    # PVS1 by whether the predicted truncation triggers NMD: a nonsense or frameshift in the LAST
+    # EXON or the last 50 nt of the penultimate exon escapes NMD and drops from Very Strong.
+    # variants.tsv carries NO exon number, CDS position or transcript length, so the test cannot
+    # be evaluated and NO pLoF CAN REACH V5 — every pLoF is capped at V4 with
+    # nmd_status = INDETERMINATE. This is the single highest-value addition to the whole step and
+    # it needs NO NEW RESOURCE, only three more VEP fields (EXON, CDS_position, transcript exon
+    # count / CDS length) carried through Step 2 into variants.tsv.
+    nmd_escape: {enabled: false, penultimate_exon_nt: 50}   # [reserved]
+  # --- The additive composite: priority_points ---------------------------------------------
+  # An interpretable ADDITIVE-POINTS score in the spirit of Tavtigian 2020 (PMID 32720330), and
+  # every term is emitted as its own column so a reviewer reads
+  # "spliceai=+4, rarity=+2, constraint=+1, gene_artifact=-3" instead of "0.71". Additive for
+  # three reasons, each a design constraint: auditability; a missing term degrades HONESTLY to
+  # "contributed 0" (under the VEP-only contract several terms are simply unavailable, and a
+  # multiplicative or learned composite would silently redistribute the missing evidence onto the
+  # terms that remain); and NO LABELLED TRUTH SET EXISTS here (audit A-3), so a fitted model
+  # would be fit on the very artifacts we are trying to remove.
+  #
+  # WHERE THE ANALOGY STOPS, and this belongs in any methods text: these are NOT ACMG points and
+  # the total MUST NOT be read against Tavtigian's classification bands (P >= 10, LP 6-9,
+  # VUS 0-5). The criteria are not ACMG criteria (a CADD-based term is not PP3); no phenotype,
+  # segregation or functional evidence exists at all (audit A-7: no PP1/BS4, no affected status);
+  # the ClinVar term has no review-status gate; and the artifact-penalty terms have no ACMG
+  # analogue whatsoever. The column is named priority_points, never acmg_points, and no P/LP/VUS
+  # label is ever emitted from it.
+  #
+  # VALIDATION STATUS, stated plainly: the GENE layer is validated on real data (the statistic,
+  # the six signals, the tier assignment and the 100%-established-gene-retention result are all
+  # measured). The VARIANT-layer weights are NOT — they are reasoned from Tavtigian's doubling
+  # scale and from which evidence classes are calibrated, and they need review against a real run.
+  composite:
+    weights:
+      # V5 is UNREACHABLE today (see variant_tier.nmd_escape), so every pLoF scores +4.
+      molecular: {V5: 8, V4: 4, V3: 2, V2: 1, V1: 0.5, V0: 0}
+      rarity: {strong: 2, moderate: 1.5, supporting: 1, permissive: 0.5, unknown: 2, ba1: -8}
+      gene_constraint: 1          # pLI >= 0.9 or LOEUF < 0.35 — MECHANISM-GATED (see below)
+      # Recurrence scores on the CARRIER COUNT and is capped at +2 — never on p_recurrence.
+      # hprv's own docs record that the recurrence null is a CASE-ONLY approximation built only
+      # from variants observed in the cohort, so p is too small and SATURATES: for essentially any
+      # gene with >= min_carriers carriers of private variants it clears the exome-wide line
+      # (audit A-2). A p-value that saturates cannot order anything. SAME-variant recurrence gets
+      # strictly less credit than distinct-variant, because one recurrent site shared by many
+      # trios is as easily a mapping artifact or a founder allele as a burden signal.
+      recurrence: {distinct_2: 1, distinct_3plus: 2, same_variant: 0.5}
+      # nhf_not_screened is 0 BY DESIGN — an explicit uncertainty flag, neither penalty nor
+      # credit. Blank NHF means NOBODY LOOKED (the member is not an ALT carrier, has no
+      # mini-CRAM, or Step 8b never ran); 0.0 means screened and clean. Scoring blank as clean
+      # would silently promote exactly the calls nobody examined.
+      quality: {gt_fail: -2, nhf_flagged: -3, nhf_not_screened: 0, partner_unknown: -0.5}
+      # No star gate is possible (no CLNREVSTAT in the cache), so clinvar_review_status is
+      # emitted as UNAVAILABLE and the +4 must never be mistaken for a >=2-star assertion.
+      clinical: {p_lp: 4, conflicting_vus: 0, benign: -4}
+      # moi unknown MUST be exactly 0. Any penalty there converts the score into a KNOWN-GENE
+      # FILTER and destroys novel-gene discovery, violating the never-drop rule in spirit.
+      moi: {discordant: -1, unknown: 0, coherent: 0}
+      gene_artifact: {T0_no_downweight: 0, T1_watch: -0.5, T2_downweight: -1.5,
+                      T3_strong_downweight: -3.0}
+      gene_list_prior: 2          # applied ONLY to rank_prior; see gene_list_prior below
+    # MECHANISM GATING — the single most important structural rule in this block. A multiplier on
+    # the gene-constraint term AND on the optional gene-list prior: V0 -> 0.0 (a constrained gene,
+    # or list membership, CANNOT rescue a molecularly-benign prediction — that is how gene-list
+    # priors turn into confirmation bias), V1/V2 -> 0.5 (half credit for a discovery-rank or
+    # uncalibrated effect), V3-V5 -> 1.0.
+    gene_constraint_gating: {V0: 0.0, V1: 0.5, V2: 0.5, V3: 1.0, V4: 1.0, V5: 1.0}
+    # hprv's canonical defaults say it directly: "Do not down-weight recessive candidates by pLoF
+    # constraint." Symmetrically, do not UP-weight them by it either — pLI/LOEUF measure selection
+    # against HETEROZYGOTES and are not evidence about a biallelic candidate.
+    zero_constraint_for_recessive_modes: true
+    caps:
+      # Two hard caps, both mechanism gating: molecular benignity and BA1-level frequency are
+      # statements about the VARIANT that no amount of gene-level enthusiasm can overturn.
+      # NEITHER CAP REMOVES THE VARIANT FROM THE OUTPUT.
+      v0_benign_max: 0.0
+      ba1_max: -4.0
+    nhf: {flag_fraction: 0.5}     # matches outputs.igv.nonhuman_screen (min_reads read from there)
+    # --- The Class-B phenotype overlay: OFF by default, and it enters ONE term only ---------
+    # This is what keeps Step 9 phenotype-agnostic. The overlay is a FILE PATH, never a list in
+    # code; this module names no gene. With enabled: false and no path, rank_prior is IDENTICAL
+    # to rank_agnostic (asserted in tests/test_pure.py). The prior is mechanism-gated exactly
+    # like constraint, and it is a PRIOR, NEVER A FILTER — genes off the list lose the +2 and
+    # nothing else.
+    gene_list_prior:
+      enabled: false
+      # A version-pinned overlay OUTSIDE this repo. Accepts a bare symbol list OR a TSV with a
+      # `gene` column plus optional `tier`/`prior_weight`/`evidence_class`/`replication`/`moi`/
+      # `pmids`/`gene_sets`; unknown columns pass through untouched. A sibling `.json` carrying a
+      # `gene_sets` block is picked up automatically. NOTE: a path here is INERT while
+      # `enabled: false` — only an explicit --gene-prior overrides that, so a stale path cannot
+      # silently start promoting genes.
+      path: ${GENE_PRIOR_OVERLAY}
+      points: 2                     # the MAXIMUM prior, scaled by prior_weight below
+      # THE JOIN IS ON GENE SYMBOL ONLY — deliberately MOI-AGNOSTIC, and this is load-bearing.
+      # Routing a prior lookup by a gene's canonical mode of inheritance would silently miss every
+      # hypothesis stated about a DIFFERENT genetic model than the gene is curated under. The
+      # concrete case: the FA/HR genes (FANCA, FANCD2, SLX4, FANCE, BRCA2) carry germ-cell-tumour
+      # evidence about HETEROZYGOUS carriers (PMID 40906985, five-gene combined OR 10.17,
+      # 95% CI 4.87-21.27, P = 2.90e-06) while their canonical model — and their PanelApp green
+      # status — is biallelic Fanconi anemia. An MOI-routed lookup would consult those rows under a
+      # recessive model and never apply them to the het observations the evidence is about.
+      # Symmetrically, an observed-mode-vs-canonical-MOI mismatch is reported as
+      # `moi_caveat = moi_mismatch_het_in_recessive_gene` and charges NO penalty — the same
+      # never-drop logic applied to the coherence layer.
+      #
+      # prior_weight is an UNCALIBRATED ordering default, NOT a likelihood ratio, and must never be
+      # reported as an odds ratio. It scales `points` (weight 1.0 -> the full +2, 0.35 -> +0.7).
+      # Set honor_prior_weight: false to treat every overlay member identically.
+      honor_prior_weight: true
+      max_prior_weight: 1.0         # the weight that maps to the full `points`
+      # Evidence classes that are NOT germline predisposition evidence and therefore contribute
+      # ZERO, whatever weight the overlay assigns them. A curated overlay lists somatic drivers
+      # deliberately (KRAS, NRAS, CBL, MTOR, AKT1, BCORL1 in the GCT resource) so a reader can see
+      # they were considered and excluded — a 0.15 weight on a somatic driver is a bookkeeping
+      # placeholder, not weak germline support. Those rows are REPORTED with
+      # `gene_list_prior_excluded_non_germline`, never silently dropped.
+      non_germline_classes: [somatic_driver_not_germline]
+      # SET-LEVEL priors (from the JSON `gene_sets` block) are combined with gene-level priors by
+      # MAX, NEVER SUM. When both derive from the same study, summing double-counts one study —
+      # the GCT resource's FA_HR_PATHWAY_23 (pooled OR 4.14, 95% CI 1.98-8.66, P = .0013) and its
+      # per-gene FA rows both come from PMID 40906985, and its own usage contract says so. The
+      # code enforces this; a documented invariant is one nobody checks.
+      combine_gene_and_set: max     # max | gene_only  (sum is deliberately NOT an option)
+    # Non-optional in practice: both rankings ship on every run, plus
+    # rank_delta = rank_prior - rank_agnostic. A large negative delta means the variant was
+    # promoted PURELY by list membership — exactly the set to scrutinise for confirmation bias,
+    # and exactly the set that would be invisible under a single blended ranking.
+    emit_both_rankings: true
+  resources:
+    # THE ONE NEW RESOURCE: a per-gene mutational-target table. gnomAD v2.1.1 constraint
+    # (lof_metrics.by_gene) carries everything the gene layer needs in one small public file
+    # (~3 MB): mu_mis/mu_syn/mu_lof (the offset), plus oe_syn, classic_caf and constraint_flag
+    # (three of the six artifact signals) and cds_length (the fallback offset). Fetch with
+    # scripts/prepare_resources.sh --only mutational_target. WITHOUT IT the excess statistic is
+    # unavailable and Step 9 degrades with a loud WARN: every gene reads T0, and the variant tier
+    # and composite still run minus the artifact term.
+    # NB this is NOT the same file as resources.mutation_rate_table (the Samocha per-gene
+    # per-consequence table Step 6's de novo arm wants) and not the same as
+    # resources.constraint.gnomad_v2_constraint (the joined LOEUF/pLI/s_het/pHaplo priors table,
+    # which has no mu_* columns).
+    mutational_target: ${MUTATIONAL_TARGET}
+    # [reserved] Per-gene curated mode of inheritance (gene<TAB>moi) for the MOI-coherence term.
+    # Absent => every gene reads moi_unknown, which is EXACTLY NEUTRAL (the novel-gene case).
+    gene_moi: ${GENE_MOI_TABLE}
+
 # --- [reserved] Pediatric-cancer overlay & phenotype priors — NOT yet wired.
 #     These specify the planned overlay/phenotype layer (see CLAUDE.md Open TODOs);
 #     no code reads them today. ---

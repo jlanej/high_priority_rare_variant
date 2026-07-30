@@ -19,6 +19,7 @@ each position. Not committed data — generated into the git-ignored work dir.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 # chrM is present ON PURPOSE: Step 1 must EXCLUDE it (it is out of scope; see
@@ -257,6 +258,73 @@ add(file="B", chrom="chrM", pos=8860, gene="MT-ATP6", csq="missense_variant", im
 add(file="C", chrom="chr1", pos=9000, gene="GENE8", csq="missense_variant", impact="MODERATE",
     af=1e-3, gts={"CH_C": ("0/1", 99, 40), "FA_C": ("0/1", 99, 40)})
 
+# --- STEP 9 (prioritization) fixtures ------------------------------------------------------
+# An ARTIFACT LOCUS: several rare functional inherited hets in one gene whose mutational target
+# is tiny (see mutational_target.tsv), carrying every corroborating signal. Step 9 must place it
+# in a DOWN-WEIGHT tier — and must not remove a single one of its rows (never-drop). Named OR4Q3
+# so the olfactory-receptor family regex is exercised on a real pattern, and it is the largest
+# real T3 member from the validation cohort (n=229 at 546x its target).
+for i, pos in enumerate((18000, 18100, 18200)):
+    add(file="A", chrom="chr2", pos=pos, gene="OR4Q3", csq="missense_variant", impact="MODERATE",
+        af=5e-5,
+        gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+add(file="B", chrom="chr2", pos=18300, gene="OR4Q3", csq="missense_variant", impact="MODERATE",
+    af=5e-5,
+    gts={"CH_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40),
+         "SIB_B": ("0/0", 99, 40)})
+
+# --- THE POSITIVE-CONTROL GUARD, and the reason it is a fixture rather than a comment.
+#     GENE1 is given the SAME tiny mutational target and the SAME four corroborating signals as
+#     the artifact locus above, plus the same pileup shape — so on the statistics alone it earns
+#     T3_strong_downweight. It is in established_genes.txt, so the auditable control ceiling must
+#     cap it at T1_watch and flag it established_gene_high_excess instead. If that ceiling ever
+#     regresses, a real predisposition gene's variants get penalised silently; this is the one
+#     failure the whole down-weight scheme exists to prevent. (GENE1 already carries the two de
+#     novo calls, so these rows push it into the same extreme-excess shape.) ---
+for pos in (18400, 18500):
+    add(file="A", chrom="chr2", pos=pos, gene="GENE1", csq="missense_variant", impact="MODERATE",
+        af=5e-5,
+        gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
+# --- CDS-FALLBACK offset: GENENOMU has no mu_* values, only a cds_length, so Step 9 must fall
+#     back to the CDS-length regression, mark E_source=cds_fallback, and never let the gene reach
+#     T3 (a +/-30% offset cannot support that claim). ---
+add(file="A", chrom="chr2", pos=18600, gene="GENENOMU", csq="missense_variant", impact="MODERATE",
+    af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
+# --- A V0 "molecularly benign PREDICTION" in a HIGHLY CONSTRAINED gene (GENE1: pLI 0.98,
+#     LOEUF 0.20). Mechanism gating must zero the constraint term and cap the total at 0 — no
+#     amount of gene-level enthusiasm may rescue a benign prediction. Kept by the CADD rung so it
+#     reaches Step 9 at all (CADD 26 clears the screen), then scored benign by the TIER rule,
+#     which reads spliceai_ds < 0.1 AND cadd < 15: the two thresholds are deliberately different,
+#     so this row is a V1 discovery rank rather than a V0...
+add(file="A", chrom="chr2", pos=18700, gene="GENE1", csq="intron_variant", impact="MODIFIER",
+    cadd="26", spliceai="0.01", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+# ...and THIS one is the real V0: a ClinVar P/LP assertion carries it through the screen (the
+# clinvar_plp override), so it arrives at Step 9 with a LOW impact, a sub-0.1 SpliceAI score and
+# a sub-15 CADD. The ClinVar term (+4) and the constraint of GENE1 both push it up; the V0 cap
+# must hold the total at 0 regardless. That is the mechanism-gating assertion in its strongest
+# form: even a P/LP assertion in a constrained gene cannot lift a molecularly-benign prediction.
+add(file="A", chrom="chr2", pos=18800, gene="GENE1", csq="synonymous_variant", impact="LOW",
+    cadd="4", spliceai="0.01", clnsig="pathogenic", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
+# --- MODEL-MISMATCH fixture. A single inherited HET pLoF in GENERC, a gene the mock curates as
+#     canonically autosomal RECESSIVE (gene_moi.tsv) while the weighted overlay carries a
+#     het-carrier hypothesis for it (the FA/HR shape: PMID 40906985 evidence is about heterozygous
+#     carriers, whereas the canonical model is biallelic Fanconi anemia). Step 9 must (a) still
+#     apply the gene prior — the overlay join is by SYMBOL, never routed by MOI — and (b) report
+#     the mismatch as an informational flag with ZERO penalty. ---
+add(file="A", chrom="chr2", pos=18900, gene="GENERC", csq="stop_gained", impact="HIGH",
+    cadd="38", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+# ...and a somatic-driver row's gene, so the zero-prior path is exercised on a real call.
+add(file="A", chrom="chr2", pos=19100, gene="GENESOM", csq="stop_gained", impact="HIGH",
+    cadd="38", af=5e-5,
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+
 
 def write_reference(path):
     with open(path, "w") as fh:
@@ -424,6 +492,87 @@ def main(argv=None) -> int:
         fh.write("GENE1\t0.2\t0.98\t0.15\n")
         fh.write("GENED\t0.25\t0.95\t0.12\n")
 
+    # --- Step-9 tables -----------------------------------------------------------------
+    # The MUTATIONAL-TARGET table: the offset (mu_mis/mu_syn/mu_lof) for the excess statistic
+    # plus three of the six artifact signals (oe_syn, classic_caf, constraint_flag) and
+    # cds_length for the fallback offset. Engineered so Step 9's every branch fires on a mock
+    # this small:
+    #   * GENEART   — an ARTIFACT locus: a tiny mutational target against several candidate rows,
+    #                 with every corroborating signal set (oe_syn 1.7, caf 0, mis_too_many, a
+    #                 segdup fraction, and a symbol matching the OR* family regex). Must reach a
+    #                 down-weight tier. It is deliberately named OR4Q3 so the FAMILY regex is
+    #                 exercised on a real pattern rather than a synthetic one.
+    #   * GENE1     — the POSITIVE CONTROL: constrained, in the established-gene union, and given
+    #                 the SAME extreme excess shape as the artifact locus. It must NEVER reach
+    #                 T2/T3 (the control ceiling), and must carry review_flag =
+    #                 established_gene_high_excess. This is the sensitivity guard that matters.
+    #   * GENENOMU  — no mu_* values at all, only a cds_length => the CDS-fallback offset AND its
+    #                 tier ceiling.
+    #   * everything else is background at a comfortable target so the null has a bulk to fit.
+    # NB the mu values are scaled for a 2-trio mock, not a real cohort: C is re-fit per run, so
+    # what matters is the RATIO between GENEART/GENE1's targets and the background's.
+    mut_genes = sorted({v["gene"] for v in V} | {f"BG{i:03d}" for i in range(120)})
+    with open(os.path.join(W, "mutational_target.tsv"), "w") as fh:
+        fh.write("gene\tgene_id\tmu_mis\tmu_syn\tmu_lof\toe_syn\tclassic_caf\t"
+                 "constraint_flag\tcds_length\tpli\toe_lof_upper\tsegdup98_frac\n")
+        for i, g in enumerate(mut_genes):
+            if g == "OR4Q3":
+                fh.write(f"{g}\tENSG{i:011d}\t2e-7\t8e-8\t1e-8\t1.70\t0\tmis_too_many"
+                         f"\t900\t0.01\t1.90\t0.55\n")
+            elif g == "GENE1":
+                # same tiny target as the artifact locus: the ONLY thing protecting it is the
+                # established-gene ceiling, which is exactly what the assertion checks
+                fh.write(f"{g}\tENSG{i:011d}\t2e-7\t8e-8\t1e-8\t1.70\t0\tmis_too_many"
+                         f"\t1182\t0.98\t0.20\t0.55\n")
+            elif g == "GENENOMU":
+                fh.write(f"{g}\tENSG{i:011d}\t\t\t\t1.00\t2e-4\t\t1500\t0.10\t1.10\t0.00\n")
+            else:
+                fh.write(f"{g}\tENSG{i:011d}\t9e-6\t4e-6\t\t1.00\t2e-4\t\t1500\t0.10"
+                         f"\t1.10\t0.00\n")
+    # The phenotype-AGNOSTIC established-gene-validity union. Small on purpose (the mock lowers
+    # prioritization.gene_downweight.min_control_genes to match), and it must contain GENE1.
+    with open(os.path.join(W, "established_genes.txt"), "w") as fh:
+        fh.write("# phenotype-agnostic gene-validity union (mock)\nGENE1\nGENE2\nGENEX\n")
+    # Curated MOI, so the moi_coherence term is exercised in all three states: GENED is curated
+    # AD (coherent with its dominant calls), GENE2 is curated AR, and every other gene is
+    # UNCURATED => moi_unknown, which must be EXACTLY neutral (the novel-gene case).
+    with open(os.path.join(W, "gene_moi.tsv"), "w") as fh:
+        # GENERC is curated as a BARE canonical AR — deliberately WITHOUT the overlay's
+        # carrier-risk annotation — so the het observation there is a genuine
+        # canonical-MOI mismatch and the suppression path is what gets tested.
+        fh.write("gene\tmoi\nGENED\tAD\nGENE2\tAR\nGENE3\tAR\nGENERC\tAR\n")
+    # The Class-B overlay. Present as a FILE but left DISABLED in the mock config, so the
+    # integration run asserts the default contract: rank_prior == rank_agnostic.
+    with open(os.path.join(W, "phenotype_overlay.txt"), "w") as fh:
+        fh.write("# Class-B overlay (mock) — NOT enabled in config.mock.yaml\nGENED\n")
+    # A WEIGHTED overlay in the real schema, for the `--gene-prior` smoke run in
+    # run_integration.sh. Every hazard is represented, with a header row as a decoy:
+    #   GENE2   T1, weight 1.0 — the full prior
+    #   GENE3   T3, weight 0.35 — a GWAS-locus row, so a fraction of the prior
+    #   GENERC  T2, weight 0.6, canonically RECESSIVE with an explicit het-carrier hypothesis —
+    #           the FA/HR shape. Its prior must apply to a HET observation and the MOI mismatch
+    #           must be a flag, not a penalty.
+    #   GENESOM T4, weight 0.15, somatic_driver_not_germline — must contribute ZERO despite the
+    #           weight, and must still be REPORTED.
+    #   GENEDD  no gene row at all; admitted only via the gene set below at the SET weight.
+    with open(os.path.join(W, "phenotype_overlay_weighted.tsv"), "w") as fh:
+        fh.write("gene\ttier\tprior_weight\tevidence_class\tmoi\treplication\tgene_sets\tpmids\n")
+        fh.write("GENE2\tT1\t1.0\trare_variant_syndromic\tAD\treplicated\t\t12345678\n")
+        fh.write("GENE3\tT3\t0.35\tgwas_common_variant_locus\tcomplex_common_variant\t"
+                 "unreplicated\t\t12345679\n")
+        fh.write("GENERC\tT2\t0.6\trare_variant_association_single_study_significant\t"
+                 "AR_biallelic;heterozygous_carrier_risk_proposed\tunreplicated\tMOCK_PATHWAY\t"
+                 "40906985\n")
+        fh.write("GENESOM\tT4\t0.15\tsomatic_driver_not_germline\tNA_somatic\tunreplicated\t\t"
+                 "12345680\n")
+    # The JSON sidecar carrying the gene set. GENERC has BOTH a gene row (0.6) and set membership
+    # (0.6) from the same study — they must combine by MAX, never sum. GENEDD has only the set.
+    with open(os.path.join(W, "phenotype_overlay_weighted.json"), "w") as fh:
+        json.dump({"resource": "mock", "gene_sets": {"MOCK_PATHWAY": {
+            "label": "mock pathway-collapsed prior (same study as the per-gene rows)",
+            "members": ["GENERC", "GENEDD"], "n_members": 2,
+            "prior_weight": 0.6, "source_pmid": "40906985"}}}, fh, indent=1)
+
     # trios file (#kid dad mom); C is unresolvable (MO_C absent everywhere)
     with open(os.path.join(W, "trios.tsv"), "w") as fh:
         fh.write("#kid\tdad\tmom\nCH_A\tFA_A\tMO_A\nCH_B\tFA_B\tMO_B\nCH_C\tFA_C\tMO_C\n")
@@ -445,6 +594,27 @@ resources:
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
   cram_map: {W}/cram_map.tsv
+prioritization:
+  # Step 9. Two mock-scale deviations from the shipped defaults, both deliberate and both about
+  # the SIZE of the mock rather than the method:
+  #  * min_control_genes 1000 -> 3. The production guard HALTS on a control union that small,
+  #    because a truncated union makes the established-gene exemption silently empty. The mock's
+  #    union has 3 genes by construction, so the guard has to be lowered for the ceiling to be
+  #    exercised at all. Nothing else about the ceiling changes.
+  #  * max_downweight_fraction 0.20 -> 1.0. The mock is engineered so a large FRACTION of its
+  #    handful of candidates sit in the artifact locus; on a real cohort that figure was 10.4%
+  #    and a fifth of the exome would indeed mean a mis-specified null.
+  gene_downweight:
+    min_control_genes: 3
+    max_downweight_fraction: 1.0
+    established_genes: {W}/established_genes.txt
+  # The Class-B overlay FILE exists in the mock but stays DISABLED, so the integration run
+  # asserts the default contract: rank_prior is identical to rank_agnostic.
+  composite:
+    gene_list_prior: {{enabled: false, path: {W}/phenotype_overlay.txt}}
+  resources:
+    mutational_target: {W}/mutational_target.tsv
+    gene_moi: {W}/gene_moi.tsv
 inputs:
   trios_file: {W}/trios.tsv
   vcf_dir: {W}/vcfs

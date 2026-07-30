@@ -41,6 +41,7 @@ no ClinGen-endorsed alternative to swap in. Region-stratified calibration is res
 | 1 | **✅ DONE.** **Calibrated recurrence null + cross-gene FDR.** From each qualifying variant's gnomAD `faf95` + N_trios, compute expected carriers → binomial/Poisson tail → BH-q **per gene**. | High | Low | *The* defensibility gap: today 2 carriers at faf95≈1e-4 rank the same as 2 truly-private carriers, and long/mutable genes float up uncorrected. Reuses the de-novo arm's `poisson.sf`/`bh_fdr`. *(Step 6: `p_recurrence`/`q_recurrence`/`recurrence_exome_wide_sig`.)* |
 | 2 | **somalier: per-sample ancestry (1KG/HGDP PCs) + cross-cohort relatedness/dup/swap + joint sex.** | High | Low | A swapped/dup proband fabricates recurrence; ancestry-mismatched faf95 mis-estimates rarity. Already imaged, unused. **Unblocks CoCoRV**; also fixes the fragile chrX-only sex check. |
 | 3 | **◐ PARTIAL.** **Contamination screen (verifyBamID FREEMIX + a VCF-only raw proxy).** | High | Low | 1–3% contamination turns hom-ref→apparent-het, manufacturing false inherited hets / comp-het second hits. **FREEMIX path is production-ready**; the VCF-only fallback is a raw (uncorrected) ref-read fraction — a CHARR-*like* proxy, **not** the calibrated Lu-2023 statistic — that flags only gross (≳5–8%) contamination, so it does **not** yet catch the 1–3% band. *(Step 0: verifyBamID `FREEMIX` if `resources.selfsm_dir` set, else the raw proxy; `contam_flag` folds into the **advisory** `overall_pass`, which no step auto-excludes yet.)* **TODO:** a corrected CHARR (per-genotype mean `/mean(1−AF)`, baseline-subtracted, threshold re-derived from spike-ins) post-annotation, and/or config-gated exclusion of flagged trios from the recurrence tally. |
+| 3b | **◐ PARTIAL.** **Null calibration diagnostic + a graded artifact down-weight (Step 9).** | High | Med | *The* other half of the A-3 gap. **DONE:** a **mid-p calibration diagnostic** is computed for the fitted null and for the Poisson alternative on every run (`audit/counts.tsv` → `calibration.*`), so the NB-vs-Poisson choice is auditable rather than asserted — measured 2.51× Poisson anti-conservatism at α=1e-3 vs 0.31× for the NB. Plus a per-gene **excess-over-mutational-target** statistic (NB2, trimmed fit, BH-FDR), a six-signal artifact panel, and a four-tier graded down-weight that triaged **10.4% of the candidate list at 100% established-gene retention** — never a drop. *(Step 9: `variants.prioritized.tsv` / `genes.prioritized.tsv`; see [prioritization.md](prioritization.md).)* **TODO:** the **synonymous-λ** check and a positive-control **recovery** measurement on real data — neither needs a new resource, and λ ≫ 1 would mean every rank in the scheme inherits a filter bias. |
 | 4 | **PP1/BS4 co-segregation points** (ingest parent affected status from PED col 6) **+ a variant-keyed meiosis ledger** to sum segregations across families. | High | Low | The one informative meiosis per trio is discarded today; the ledger turns the cohort into the extended pedigree a single trio lacks. |
 | 5 | **UTRannotator** (5′UTR/uORF) VEP plugin. | High | Low | One-line VEP fix: uAUG-creating/uORF-disrupting variants in haploinsufficient CPS genes (NF1, RB1) are currently dropped as `not_functional`. Ships with VEP 115. |
 | 6 | **UPD screen (UPDhmm/UPDio)** to *rescue* apparent-Mendelian-error homozygous recessives. | High | Low | The recessive logic currently deletes the UPD case (1/1 child + 0/0 parent → "Mendelian error"); paternal UPD(11p15) → ~20% of Beckwith-Wiedemann. |
@@ -74,7 +75,20 @@ carriers show a second hit; high impact but a new matched-tumor pipeline.
 - **ACAT-O / Cauchy multi-mask omnibus** (Med/Low) — hard-depends on #1's per-mask p-values.
 - **GIAB HG002/CMRG benchmarking harness** (hap.py/vcfeval) — impacts *credibility* not yield; run
   *after* the caller set stabilizes (post-CNV).
-- **Gene-list tier priors** (OMIM/PanelApp/ClinGen/ACMG-SF v3.3/CGC) + MOI-consistency cross-check.
+- **◐ PARTIAL — Gene-list tier priors** (OMIM/PanelApp/ClinGen/ACMG-SF v3.3/CGC) + MOI-consistency
+  cross-check. **DONE (Step 9):** the *mechanism* is built and it is deliberately Class-A —
+  a gene-list prior enters as **one additive term (+2)** in a **second, separately reported
+  ranking** (`rank_prior` beside `rank_agnostic`, with `rank_delta` exposing exactly which calls
+  list membership promoted), it is **mechanism-gated** like constraint (zero at V0, so a list can
+  never rescue a molecularly-benign prediction — that is how gene-list priors turn into
+  confirmation bias), it is a **prior and never a filter**, and it **defaults OFF** with the list
+  living in a config file path rather than in code, so hprv itself names no gene. The
+  **MOI-consistency cross-check is also live** (`moi_coherent`/`discordant`/`unknown`, with
+  `unknown` scoring *exactly* 0 so novel genes are never punished, and the audit-A-6 long-gene
+  comp-het drift suppressing the discordance penalty). **TODO:** the version-pinned list *content*
+  — PanelApp GE green returned Cloudflare 403 to the retrieving client and no machine-readable
+  ACMG SF v3.3 source was reached, so both are absent from the established-gene union too, and the
+  100%-retention figure will move once they are added.
 - **Constitutional-mosaic tier** (VAF 0.03–0.30, beta-binomial vs DP) — the rigid 0.25 AB floor drops
   mosaic TP53/NF1; shares VAF machinery with a **CHIP confounder flag**.
 - **Extended-window splicing** (SpliceVault / Pangolin) for deep-intronic/cryptic pseudoexons.
