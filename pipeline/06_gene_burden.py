@@ -215,6 +215,28 @@ def main(argv=None) -> int:
     shet_c = _find(ccols, "s_het", "shet")
     phaplo_c = _find(ccols, "phaplo", "phaplo_score")
 
+    # RECORD WHICH COLUMN WON. `_find` returns the first present name over an alias chain, so a
+    # table whose header differs from the canonical one is consumed silently: a bare `lof`/`mis`
+    # spans denovolyzeR-shaped tables, and a gnomAD **v4** `oe_lof_upper` wins the LOEUF chain and
+    # is then compared against a **v2-calibrated** cutoff (filters.constraint_weighting.
+    # loeuf_v2_tier1 = 0.35). The output columns are fixed names, so nothing downstream could tell.
+    for _lbl, _col in (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("loeuf", loeuf_c),
+                       ("pli", pli_c), ("s_het", shet_c), ("phaplo", phaplo_c)):
+        if _col:
+            audit.record("06_gene_burden", f"resolved_column.{_lbl}.{_col}", 1)
+    _resolved = ", ".join(f"{l}={c}" for l, c in
+                          (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("loeuf", loeuf_c),
+                           ("pli", pli_c), ("s_het", shet_c), ("phaplo", phaplo_c)) if c)
+    if _resolved:
+        sys.stderr.write(f"Step 6: resolved constraint/mutrate columns: {_resolved}\n")
+    # The LOEUF cutoff is calibrated on gnomAD v2.1.1. A v4 table uses the same column name for a
+    # differently-scaled quantity, so the tier boundary would move without anything saying so.
+    if loeuf_c and "v4" in (args.constraint or "").lower():
+        sys.stderr.write(
+            f"WARN: --constraint path names v4 but the LOEUF tier cutoff "
+            f"(filters.constraint_weighting.loeuf_v2_tier1) is calibrated on gnomAD v2.1.1. "
+            f"The column '{loeuf_c}' will be compared against a v2 boundary.\n")
+
     can_enrich = do_enrich and bool(mut) and poisson is not None and n_trios > 0
 
     rows = []

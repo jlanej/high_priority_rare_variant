@@ -452,17 +452,25 @@ if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
                     # dropping the member — a missing NHF row is a worse outcome than an unfiltered
                     # one, and the row still carries its own read count for the reviewer.
                     nhf_bam="$cram"
+                    # The mask ACTUALLY applied, which is not always the one requested. The cache
+                    # key below is built from this rather than from $NHF_EXCLUDE_FLAGS: stamping
+                    # the requested mask after a failed filter made a re-run reuse an UNFILTERED
+                    # row as though it were filtered, permanently. It also varies per member
+                    # inside one variants.tsv, so one member's *_nhf_reads could count PCR
+                    # duplicates while its siblings' did not.
+                    _applied_flags=0
                     if [[ "$NHF_EXCLUDE_FLAGS" -gt 0 ]]; then
                         _fb="$HPRV_TMPDIR/nhf.${trio}.${sample}.filt.bam"
                         if hprv_run -- samtools view -b -F "$NHF_EXCLUDE_FLAGS" -T "$REF" \
                                 -o "$_fb" "$cram" 2>/dev/null \
                            && hprv_run -- samtools index "$_fb" 2>/dev/null; then
-                            nhf_bam="$_fb"
+                            nhf_bam="$_fb"; _applied_flags="$NHF_EXCLUDE_FLAGS"
                         else
-                            warn "  [$trio] could not apply --nhf-exclude-flags to $role $sample; classifying the UNFILTERED mini-CRAM (duplicates may inflate its *_nhf_reads)"
+                            warn "  [$trio] could not apply --nhf-exclude-flags to $role $sample; classifying the UNFILTERED mini-CRAM (duplicates may inflate its *_nhf_reads). The .done key records -F0, so a later run RETRIES rather than reusing this row."
                             rm -f "$_fb" "$_fb.bai"
                         fi
                     fi
+                    nhf_key="${nhf_key%-F*}-F${_applied_flags}"
                     # shellcheck disable=SC2086  # $NHF_MMAP is an intentional word (empty or --memory-mapping)
                     if hprv_run --bind "$KRAKEN2_DB" -- nonhuman-screen classify \
                             --bam "$nhf_bam" --variants "$tvcf" --ref-fasta "$REF" \

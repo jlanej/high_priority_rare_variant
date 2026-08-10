@@ -400,12 +400,30 @@ prep_dbnsfp() {
 
 prep_spliceai() {
     selected spliceai || return 0
-    # SNV: free no-login Ensembl MANE mirror (MANE-select transcripts only). Full genome-wide set
-    # is Illumina BaseSpace (login-gated) — provide it manually to cover non-MANE transcripts.
-    if [[ ! -f "$SPLICEAI_SNV_OUT" ]]; then
-        get_licensed spliceai_snv "$SPLICEAI_MANE_SNV_URL" "$SPLICEAI_SNV_OUT" \
+    # SNV: free no-login Ensembl MANE mirror (MANE-select transcripts ONLY). The full genome-wide
+    # set is Illumina BaseSpace (login-gated) — provide it manually to cover non-MANE transcripts.
+    #
+    # THE MIRROR LANDS UNDER ITS OWN NAME. It used to be written to $SPLICEAI_SNV_OUT, which is
+    # the BaseSpace filename (spliceai_scores.raw.snv.hg38.vcf.gz), so the MANE-only file was
+    # RENAMED to the full file's name and even `ls` could not tell the two builds apart. Every
+    # check downstream is existence-only (verify_extra, run_pipeline's _need, Step 2's plugin
+    # gate), and `spliceai_required: true` halts on ABSENCE — which made the wrong file look
+    # exactly like the right one. A MANE-only file blanks non-MANE transcripts, and selection.py
+    # reads a blank as "no rescue", so the sole deep-intronic keep-path narrows with nothing
+    # recording it. Symlinking it into place is the deliberate, visible opt-in.
+    local mane_out="$DIR/spliceai/${SPLICEAI_SNV_MANE_EXPECT:-spliceai_scores.mane.snv.hg38.vcf.gz}"
+    if [[ ! -f "$SPLICEAI_SNV_OUT" && ! -f "$mane_out" ]]; then
+        get_licensed spliceai_snv "$SPLICEAI_MANE_SNV_URL" "$mane_out" \
             "SpliceAI non-commercial (Illumina). Free source is Ensembl MANE-only; full set needs BaseSpace login." \
-            && { [[ -f "$SPLICEAI_SNV_OUT.tbi" ]] || index_vcf "$SPLICEAI_SNV_OUT"; }
+            && { [[ -f "$mane_out.tbi" ]] || index_vcf "$mane_out"; }
+    fi
+    if [[ -f "$mane_out" && ! -f "$SPLICEAI_SNV_OUT" ]]; then
+        warn "[spliceai_snv] the MANE-ONLY mirror is prepared at $mane_out. It is NOT wired in: \
+resources.vep.spliceai_snv expects the FULL genome-wide file, and a MANE-only substitute silently \
+narrows the deep-intronic/non-MANE splice keep-path (selection.py reads a blank score as 'no \
+rescue'). Either fetch the full set (scripts/download_spliceai.sh, BaseSpace login), or opt in \
+deliberately with: ln -s '$mane_out' '$SPLICEAI_SNV_OUT' && ln -s '$mane_out.tbi' '$SPLICEAI_SNV_OUT.tbi'"
+        record miss spliceai_snv_full
     fi
     gated spliceai_indel "$SPLICEAI_INDEL_OUT" \
         "SpliceAI indel scores: download spliceai_scores.raw.indel.hg38.vcf.gz from Illumina BaseSpace

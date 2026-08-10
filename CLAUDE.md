@@ -449,6 +449,34 @@ two things that look identical in the output are not the same fact:
   said `gnomad`; and `frequency()`'s old proxy fallback. All three are fixed, and the rule is
   general: if you write `_num(x) or 0.0`, you have almost certainly just made absence into
   evidence.
+- **Two tables can carry the same constraint column, and the precedence must be ONE direction.**
+  `--constraint` and `--mutrate` both carry `pLI`/`oe_lof_upper`/`oe_syn`. The old code resolved
+  them with `_find(ccols,…) or _find(mcols,…)`, which gave oe_syn mutrate-first and pLI/LOEUF
+  constraint-first — so a gene's rank could be decided by which table it was in. Worse, it
+  resolved ONE column name and used it to index the OTHER file: the prepared constraint file is
+  lowercase (`pli`, via `join_constraint.py`) while gnomAD's own table is `pLI`, so the fallback
+  read BLANK despite the value sitting in `src_mutrate_pLI`. Resolve PER TABLE, constraint-first
+  throughout, and record the winner in `constraint_source`.
+- **Alias chains consume the wrong table silently.** `_find` returns the first present name, so a
+  bare `lof`/`mis` matches denovolyzeR-shaped tables and a gnomAD **v4** `oe_lof_upper` wins the
+  LOEUF chain and is then compared against the **v2-calibrated** `loeuf_v2_tier1` (0.35). Step 6
+  now logs and audits the resolved column for every field and warns on a v4-named constraint path.
+- **A same-named column is not the same measurement.** `segdup98_frac` used to fall back from
+  `--segdup` to a same-named column in `--mutrate` — contradicting the documented "absent =>
+  signal off (WARN)" contract, leaving the signal silently ON, and crossing coordinate builds
+  (the segdup track is hg19; the mutrate table is the gnomAD v2.1.1 projection). Now `--segdup`
+  only, with a warn if `--mutrate` carries the column.
+- **The MANE-only SpliceAI mirror must never land at the full file's filename.** It used to be
+  written to `spliceai_scores.raw.snv.hg38.vcf.gz` — the BaseSpace name — so `ls` could not tell
+  the builds apart, every check downstream is existence-only, and `spliceai_required: true` halts
+  on ABSENCE, which made the wrong file look exactly like the right one. A MANE-only file blanks
+  non-MANE transcripts and `selection.py` reads a blank as "no rescue". It now lands under its own
+  name and must be symlinked in deliberately.
+- **Step 8b stamps the mask it APPLIED, not the one it requested.** When the `-F` filter fails it
+  classifies the unfiltered mini-CRAM (deliberately — a missing NHF row is worse). It used to
+  stamp the requested mask in the `.done` key, so a re-run reused the unfiltered row forever, and
+  one member's `*_nhf_reads` could count PCR duplicates while its siblings' did not inside one
+  `variants.tsv`.
 - **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
   field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
   populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and
@@ -549,7 +577,7 @@ two things that look identical in the output are not the same fact:
   genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
   fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
   both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
-  code equals `config.example.yaml`'s value). **66 tests, no network and no VCF.**
+  code equals `config.example.yaml`'s value). **67 tests, no network and no VCF.**
   **One documented exception to "no heavy deps":** the 9 tests that drive `09_prioritize.py:main()`
   need `yaml` transitively (`load_config` does `import yaml`). They declare it at the `_load_p9()`
   chokepoint and **SKIP** without it — and `_run_all` then refuses to print "All N passed", instead

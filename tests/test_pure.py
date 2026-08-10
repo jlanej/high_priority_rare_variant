@@ -2232,6 +2232,29 @@ def test_prioritize_reads_bgzipped_tables():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_gene_artifact_penalty_tables_agree():
+    """The two gene-artifact penalty tables must stay identical.
+
+    `prioritization.gene_downweight.penalties` is the LIVE table (assign_gene_tier writes
+    `gene_artifact_penalty` into the gene row); `prioritization.composite.weights.gene_artifact`
+    is only consulted when a variant's gene matched NO gene row. Verified by execution that the
+    composite key is otherwise a no-op — so editing it alone silently changes nothing, and
+    editing the other alone makes the fallback disagree with the live path.
+    """
+    try:
+        from hprv.config import load_config
+        cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config",
+                                       "config.example.yaml"))
+    except ImportError:
+        return
+    live = get(cfg, "prioritization.gene_downweight.penalties", {})
+    fallback = get(cfg, "prioritization.composite.weights.gene_artifact", {})
+    assert live and fallback, "both penalty tables must exist"
+    for tier in set(live) | set(fallback):
+        assert abs(float(live[tier]) - float(fallback[tier])) < 1e-12, \
+            f"{tier}: live={live.get(tier)} fallback={fallback.get(tier)} — the tables diverged"
+
+
 def test_prioritize_config_matches_canonical_defaults():
     """SINGLE SOURCE OF TRUTH: a threshold in code that disagrees with the shipped config is a
     bug. Every default prioritize.py falls back to must equal config.example.yaml's value."""

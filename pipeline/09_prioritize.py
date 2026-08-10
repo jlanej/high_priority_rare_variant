@@ -67,7 +67,8 @@ GENE_COLUMNS = [
     "max_site_share", "per_trio",
     "mu_mis", "mu_syn", "mu_lof", "mu_tot", "mu_lof_src", "E_expected", "E_source",
     "excess_ratio", "p_nb", "q_nb", "p_pois", "q_pois", "used_in_null_fit",
-    "oe_syn", "oe_lof_upper", "pLI", "s_het", "classic_caf", "constraint_flag",
+    "oe_syn", "oe_lof_upper", "pLI", "constraint_source", "s_het", "classic_caf",
+    "constraint_flag",
     "cds_length", "segdup98_frac",
     "sig_constraint_flag", "sig_oe_syn", "sig_caf_low", "sig_segdup", "sig_family",
     "sig_saturation", "corroboration_count",
@@ -189,6 +190,21 @@ def _keyed_by_gene(path, label):
         if g and g.lower() not in GENE_KEYS:      # guard the literal header artifact
             out.setdefault(g, r)                  # first wins
     return out, cols
+
+
+def _pick(constraint_row, mutrate_row, col_c, col_m):
+    """(value, source) for a constraint metric: the --constraint table first, then --mutrate.
+
+    ONE precedence direction for every metric, and the column name resolved PER TABLE — see the
+    comment at the resolution site. Returns ("", "") when neither table carries it, so a blank
+    stays a blank rather than becoming a zero.
+    """
+    for row, col, src in ((constraint_row, col_c, "constraint"), (mutrate_row, col_m, "mutrate")):
+        if col and col in row:
+            v = P._num(row.get(col))
+            if v is not None:
+                return v, src
+    return None, ""
 
 
 def _find(cols, *names):
@@ -530,14 +546,40 @@ def main(argv=None) -> int:
     c_syn = _find(mcols, "mu_syn", "mut_syn")
     c_lof = _find(mcols, "mu_lof", "mut_lof")
     c_gid = _find(mcols, "gene_id", "ensembl_gene_id", "gene_ensembl_id")
-    c_oesyn = _find(mcols, "oe_syn", "oe_syn_upper") or _find(ccols, "oe_syn")
     c_caf = _find(mcols, "classic_caf", "caf")
     c_cflag = _find(mcols, "constraint_flag", "flag")
     c_cds = _find(mcols, "cds_length", "cds_len")
-    c_segf = _find(scols, "segdup98_frac", "segdup_frac", "frac") if seg else \
-        _find(mcols, "segdup98_frac")
-    c_loeuf = _find(ccols, "oe_lof_upper", "loeuf", "loeuf_v2") or _find(mcols, "oe_lof_upper")
-    c_pli = _find(ccols, "pli", "pli_v2") or _find(mcols, "pli")
+    # SEGDUP: the --segdup table ONLY. The old form fell back to a same-named column in
+    # --mutrate, which (a) contradicts the documented contract ("absent => signal off, WARN"),
+    # (b) meant the signal stayed silently ON with no --segdup and no warning, and (c) crosses
+    # coordinate builds by construction — the segdup track is hg19 while the mutrate table is the
+    # gnomAD v2.1.1 projection, so the two are not interchangeable even when the column name
+    # matches. It is also the only arm the test suite ever exercised.
+    c_segf = _find(scols, "segdup98_frac", "segdup_frac", "frac") if seg else None
+    if not seg and _find(mcols, "segdup98_frac"):
+        sys.stderr.write(
+            "WARN: --mutrate carries a segdup98_frac column but no --segdup table was supplied. "
+            "It is NOT used: the segdup signal is off for this run (one of the six artifact "
+            "signals), so corroboration_count is measured on five. Supply --segdup to enable it.\n")
+    # PER-TABLE column resolution, and ONE precedence direction for all three metrics.
+    # Two bugs lived in the old `_find(ccols, ...) or _find(mcols, ...)` form:
+    #   (a) it produced OPPOSITE precedence for adjacent columns — oe_syn was mutrate-first while
+    #       pLI/LOEUF were constraint-first — so a gene's rank could be decided by which table it
+    #       happened to be in rather than by its biology. Reproduced: a gene in both tables scored
+    #       pLI=0.01/LOEUF=0.95 (0 constraint points) while the same numbers in mutrate-only form
+    #       scored LOEUF=0.21 (0.5 points).
+    #   (b) it resolved ONE column name and then used it to index the OTHER file. The prepared
+    #       constraint file is lowercase (`pli`, via scripts/join_constraint.py) while gnomAD's own
+    #       table is `pLI`, so the mutrate fallback `r.get("pli")` missed it and the column read
+    #       BLANK despite `src_mutrate_pLI=0.99` sitting in the same output row.
+    # Constraint-first throughout: `--constraint` is the dedicated curated table, `--mutrate` is
+    # the unjoined gnomAD file that merely happens to carry the same metrics.
+    c_loeuf_c = _find(ccols, "oe_lof_upper", "loeuf", "loeuf_v2")
+    c_loeuf_m = _find(mcols, "oe_lof_upper", "loeuf", "loeuf_v2")
+    c_pli_c = _find(ccols, "pli", "pli_v2")
+    c_pli_m = _find(mcols, "pli", "pli_v2")
+    c_oesyn_c = _find(ccols, "oe_syn", "oe_syn_upper")
+    c_oesyn_m = _find(mcols, "oe_syn", "oe_syn_upper")
     c_shet = _find(ccols, "s_het", "shet")
     c_moi = _find(moicols, "moi", "mode_of_inheritance", "inheritance") if moi else None
     if mut and not (c_mis or c_syn or c_lof):
@@ -730,14 +772,19 @@ def main(argv=None) -> int:
             "E_expected": E, "E_source": e_source, "excess_ratio": ratio,
             "p_nb": p_nb, "p_pois": p_pois,
             "used_in_null_fit": (g in in_fit) if fit else None,
-            "oe_syn": P._num(r.get(c_oesyn) if (c_oesyn and c_oesyn in r) else cr.get(c_oesyn)) if c_oesyn else None,
-            "oe_lof_upper": P._num(cr.get(c_loeuf) if (c_loeuf and c_loeuf in cr) else r.get(c_loeuf)) if c_loeuf else None,
-            "pLI": P._num(cr.get(c_pli) if (c_pli and c_pli in cr) else r.get(c_pli)) if c_pli else None,
+            "oe_syn": _pick(cr, r, c_oesyn_c, c_oesyn_m)[0],
+            "oe_lof_upper": _pick(cr, r, c_loeuf_c, c_loeuf_m)[0],
+            "pLI": _pick(cr, r, c_pli_c, c_pli_m)[0],
+            "constraint_source": ",".join(
+                f"{lbl}:{src}" for lbl, src in (
+                    ("pli", _pick(cr, r, c_pli_c, c_pli_m)[1]),
+                    ("loeuf", _pick(cr, r, c_loeuf_c, c_loeuf_m)[1]),
+                    ("oe_syn", _pick(cr, r, c_oesyn_c, c_oesyn_m)[1])) if src),
             "s_het": P._num(cr.get(c_shet)) if c_shet else None,
             "classic_caf": P._num(r.get(c_caf)) if c_caf else None,
             "constraint_flag": (r.get(c_cflag) or "") if c_cflag else "",
             "cds_length": cds_len,
-            "segdup98_frac": P._num((seg.get(g) or {}).get(c_segf) if seg else r.get(c_segf)) if c_segf else None,
+            "segdup98_frac": P._num((seg.get(g) or {}).get(c_segf)) if (seg and c_segf) else None,
             "established_gene_control": g in established,
             "gene_list_prior_member": g in prior_genes,
             "gene_moi": (moi.get(g) or {}).get(c_moi) if c_moi else "",

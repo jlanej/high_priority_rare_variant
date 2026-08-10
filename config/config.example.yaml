@@ -791,6 +791,13 @@ prioritization:
       # moi unknown MUST be exactly 0. Any penalty there converts the score into a KNOWN-GENE
       # FILTER and destroys novel-gene discovery, violating the never-drop rule in spirit.
       moi: {discordant: -1, unknown: 0, coherent: 0}
+      # gene_artifact is a FALLBACK ONLY and is normally dead: whenever a gene row exists,
+      # score_variant reads that row's `gene_artifact_penalty`, which comes from the LIVE key
+      # `prioritization.gene_downweight.penalties` above. This table fires only for a variant
+      # whose gene symbol matched no gene row at all — which is also given gene_tier
+      # T0_no_downweight, i.e. an UNEVALUATED gene scored as tested-and-clean. Keep the two
+      # tables identical; hprv asserts it (tests/test_pure.py). Editing this one alone changes
+      # nothing on a normal run, which is precisely why it is called out here.
       gene_artifact: {T0_no_downweight: 0, T1_watch: -0.5, T2_downweight: -1.5,
                       T3_strong_downweight: -3.0}
       gene_list_prior: 2          # applied ONLY to rank_prior; see gene_list_prior below
