@@ -239,7 +239,14 @@ add(file="A", chrom="chr1", pos=18800, gene="GENESAILO", csq="intron_variant", i
 #     a dominant candidate. This is the concrete false-negative that using VEP's MAX_AF as the
 #     rarity field would cause, and the reason frequency() reads only GRPMAX_POPS. ---
 add(file="A", chrom="chr2", pos=17000, gene="GENEFND", csq="missense_variant", impact="MODERATE",
-    af=0.002, af_pop="gnomADe_MID_AF",
+    af=0.002, af_pop="gnomADg_AMI_AF",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
+# The `mid` case, kept SEPARATELY because it is the one class where the two oracles legitimately
+# DISAGREE: grpmax excludes mid, the FAF group set includes it. Under the default (faf95) this
+# allele is gated; under grpmax_proxy it is not. Neither is a bug, and faf95_group makes such
+# rows identifiable — but it must not be conflated with the MAX_AF trap above.
+add(file="A", chrom="chr2", pos=17500, gene="GENEMID", csq="missense_variant", impact="MODERATE",
+    af=0.002, af_pop="gnomADe_MID_AF", faf95="0.0016", faf95_group="mid",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/0", 99, 40)})
 
 # --- MULTIALLELIC trans compound het: child is 1/2 (one allele from each parent), which is the
@@ -625,6 +632,11 @@ def main(argv=None) -> int:
                 faf = v["faf95"]
             elif v["faf95_zero"]:
                 faf = ""            # in gnomAD, no published fafmax -> basis=zero_ci
+            elif str(v["af_pop"]).upper().split("_")[1] in ("AMI", "ASJ", "FIN", "OTH"):
+                # gnomAD computes FAF only over afr/amr/eas/mid/nfe/sas. An allele carried ONLY by
+                # a bottlenecked founder group therefore has no eligible group and gets NO fafmax
+                # — which is what makes the MAX_AF trap fixture work identically on both arms.
+                faf = ""
             else:
                 faf = f"{af * 0.8:.6g}"   # a plausible CI lower bound just under the point estimate
             if faf:
@@ -654,13 +666,10 @@ resources:
   # The gnomAD joint slim -> Step 2's SECOND bcftools transfer -> real faf95 + nhomalt. Wired
   # here so the integration exercises the transfer, the 0-match guard, and the faf95-before-proxy
   # precedence in annotations.frequency() — not just the proxy fallback.
-  # The slim IS transferred (so Step 2's transfer, the 0-match guard and the column plumbing all
-  # run for real), but the run uses the SHIPPED DEFAULT oracle. That keeps every golden-rule-2
-  # assertion below meaningful — they test the grpmax proxy's exclusion of founder groups, and
-  # `mid` IS in the FAF group set, so those alleles genuinely behave differently on the faf95
-  # arm. The faf95 arm is verified separately, against this same transferred VCF, in
-  # assert_integration.py (and exhaustively in tests/test_pure.py).
-  gnomad: {{sites_slim: {W}/gnomad.slim.vcf.gz, oracle: grpmax_proxy}}
+  # The slim is transferred and the run uses the SHIPPED DEFAULT oracle (faf95), so the default
+  # path is what the integration exercises. The grpmax_proxy arm is verified against these same
+  # transferred VCFs in assert_integration.py, along with an assertion that the arms never cross.
+  gnomad: {{sites_slim: {W}/gnomad.slim.vcf.gz}}
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
   cram_map: {W}/cram_map.tsv

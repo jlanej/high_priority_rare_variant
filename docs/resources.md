@@ -345,15 +345,20 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 
 ## The gnomAD joint slim (faf95)
 
-**Opt-in**, and the single most consequential resource in the pipeline: it upgrades the rarity
-oracle from a grpmax point-estimate **proxy** to gnomAD's real **faf95** — the 95% CI lower bound,
-which is the quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017).
+**Required by the default configuration**, and the single most consequential resource in the
+pipeline: it makes the rarity oracle gnomAD's real **faf95** — the 95% CI lower bound, the
+quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017) and the one you can cite in a
+methods section without caveat. `resources.gnomad.oracle` defaults to `faf95`, and
+`run_pipeline.sh` **halts at preflight** if the slim is missing rather than quietly running on the
+point estimate. Set `oracle: grpmax_proxy` to opt down deliberately (a quick run without the
+~10 GB resource); that is ONE oracle for the whole run too — the arms never mix.
 
 ```bash
 prepare_resources.sh --dir /data/hprv_resources --only gnomad_sites fetch
 ```
 
-It is not in the default set because preparing it reads ~877 GB. Only the ~10 GB slim lands:
+It is still not fetched by a bare `fetch` (preparing it reads ~877 GB), so it is one
+explicit command — but the default config expects it. Only the ~10 GB slim lands:
 `prep_gnomad` **streams** each of the 24 joint chromosome VCFs straight into `bcftools annotate
 -x` when htslib can read the URL, so no raw chromosome is ever staged. That needs htslib built
 with libcurl — check **`samtools --version`** (NOT `bcftools --version`, which prints no feature

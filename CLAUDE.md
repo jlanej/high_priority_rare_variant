@@ -38,8 +38,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
      opposite way (retaining benign polymorphisms). The two wrong substitutions err in opposite
      directions — there is no single safe fallback.
    **ONE ORACLE PER RUN — the arms NEVER cross, and `annotations.frequency()` is the single
-   chokepoint.** `resources.gnomad.oracle` selects it for the whole run (`grpmax_proxy` default;
-   `faf95` requires the gnomAD joint slim and HALTS at preflight without it), it is recorded once
+   chokepoint.** `resources.gnomad.oracle` selects it for the whole run. **`faf95` is the DEFAULT** — the
+   correct, citable quantity (a 95% CI lower bound; Whiffin 2017), not the convenient one. It
+   REQUIRES the gnomAD joint slim and HALTS at preflight without it, the same contract as
+   `resources.vep.spliceai_required`; opt down to `grpmax_proxy` deliberately for a run without
+   the slim, it is recorded once
    in `audit/counts.tsv`, and neither arm ever consults the other. A per-variant blend was tried
    and removed: it made two rows in one run comparable on different quantities. `rarity_basis`
    gives the per-variant provenance WITHIN the oracle (`measured` | `zero_ci` | `absent`).

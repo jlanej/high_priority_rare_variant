@@ -162,23 +162,28 @@ resources:
     # are gnomAD v4.1; they differ in WHICH quantity and how it is reached, so mixing them would
     # make two variants in one run incomparable and undescribable in a methods section.
     #
-    #   grpmax_proxy (DEFAULT) - a POINT ESTIMATE from the VEP cache: max AF over the
-    #       grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS). Needs no extra resource. The
-    #       cache carries no AC/AN, so no CI correction is possible on this arm; it therefore sits
-    #       ~one CI-width high on low-count alleles and errs toward DROPPING them.
-    #
-    #   faf95 - the published FILTERING allele frequency from the joint slim above: the lower
-    #       bound of the 95% Poisson CI, i.e. what ACMG/ClinGen actually specify (Whiffin 2017).
-    #       REQUIRES sites_slim; run_pipeline.sh HALTS at preflight if it is missing rather than
-    #       quietly running on the other quantity. Within this arm, an allele gnomAD HAS but
+    #   faf95 (DEFAULT) - the published FILTERING allele frequency from the joint slim above: the
+    #       lower bound of the 95% Poisson CI, i.e. what ACMG/ClinGen actually specify (Whiffin
+    #       2017) and the quantity you can cite in a methods section without caveat. It is the
+    #       default because it is the correct quantity, not because it is the convenient one:
+    #       REQUIRES sites_slim, and run_pipeline.sh HALTS at preflight if it is missing rather
+    #       than quietly running on the other quantity. (Same contract as
+    #       resources.vep.spliceai_required.) Within this arm, an allele gnomAD HAS but
     #       published no fafmax for resolves to 0.0 (rarest) — gnomAD emits fafmax as missing
     #       rather than as 0 wherever no group's CI clears zero, and 96.5% of that class are
     #       AC <= 2. `rarity_basis` records measured / zero_ci / absent per variant; the ORACLE
     #       itself is constant and is recorded once in audit/counts.tsv.
     #
-    # Switching to faf95 makes the candidate list BIGGER: faf95 <= the point estimate, so the same
-    # cutoffs stop discarding low-count alleles whose interval never justified the call.
-    oracle: grpmax_proxy            # grpmax_proxy | faf95
+    #   grpmax_proxy - a POINT ESTIMATE from the VEP cache: max AF over the grpmax-eligible
+    #       ancestry groups (AFR/AMR/EAS/NFE/SAS). Needs no extra resource, and is the opt-down
+    #       for a quick run without the slim. The cache carries no AC/AN, so no CI correction is
+    #       possible on this arm; it sits ~one CI-width high on low-count alleles and errs toward
+    #       DROPPING them. It also EXCLUDES `mid`, which the FAF group set includes — the one
+    #       class where the two arms can reach opposite conclusions.
+    #
+    # faf95 <= the point estimate, so the same cutoffs RETAIN MORE than the proxy would: it stops
+    # discarding low-count alleles whose confidence interval never justified the call.
+    oracle: faf95                   # faf95 | grpmax_proxy
   clinvar:
     # One of Step 2's TWO bcftools-transferred annotations (the other is the gnomAD joint slim
     # above) — everything else arrives as a CSQ field

@@ -432,6 +432,24 @@ def main(argv=None) -> int:
     # methods section has to state which quantity every gate in the run was applied to, and a
     # reader of audit/summary.md should not have to open a TSV to find out.
     audit.record("05_inheritance", f"rarity_oracle.{A.rarity_oracle(cfg)}", 1)
+    # JOIN-COVERAGE GUARD for the faf95 arm. The gnomAD joint slim is a SUPERSET of the VEP
+    # cache's frequencies (the cache carries only dbSNP-accessioned alleles), so a variant with a
+    # cache proxy AF but NO gnomAD record should not exist. When it does, the transfer
+    # under-matched — a partially-downloaded slim, a contig-naming mismatch on some chromosomes,
+    # or a normalisation difference — and those variants silently read as RAREST, which floods the
+    # candidate list with genuinely common alleles. Step 2's 0-match guard catches total failure;
+    # this catches PARTIAL failure, which is the more likely and more dangerous case.
+    if A.rarity_oracle(cfg) == "faf95":
+        n_orphan = sum(1 for r in all_rows
+                       if r.get("rarity_basis") == "absent" and r.get("grpmax_af"))
+        audit.record("05_inheritance", "rarity_faf95_absent_but_cache_has_af", n_orphan)
+        if n_orphan:
+            sys.stderr.write(
+                f"WARN: {n_orphan} of {len(all_rows)} calls have NO gnomAD joint record yet DO "
+                f"carry a VEP-cache gnomAD AF. The joint slim is a superset of the cache, so this "
+                f"should be 0 — the Step-2 transfer likely under-matched (partial slim? contig "
+                f"naming on some chromosomes?). Those calls read as RAREST and may be common "
+                f"alleles. Check Step 2's 'gnomAD joint matched N / M sites' line.\n")
     for _b, _n in sorted(Counter(r.get("rarity_basis", "") for r in all_rows).items()):
         if _b:
             audit.record("05_inheritance", f"rarity_basis.{_b}", _n)
