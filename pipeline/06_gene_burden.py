@@ -177,7 +177,14 @@ def main(argv=None) -> int:
             # the recurrence p slightly CONSERVATIVE (a larger q inflates the null probability
             # of seeing carriers), which is the direction to prefer for a discovery claim.
             key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
-            faf = _num(r.get("grpmax_af"))
+            # THE RUN'S ORACLE, not the proxy column. Step 5 writes rarity_af (the value every
+            # gate actually used) alongside the raw grpmax_af; reading the raw column here meant a
+            # faf95-oracle run GATED the screen on faf95 and then built the recurrence null on the
+            # point estimate — two different quantities inside one result. Fall back to grpmax_af
+            # only for a pre-existing calls table that predates the rarity_af column.
+            faf = _num(r.get("rarity_af"))
+            if faf is None and not r.get("rarity_oracle"):
+                faf = _num(r.get("grpmax_af"))
             if mode in DOMINANT_MODES:
                 g["dom"].add(trio); g["dom_faf"][key] = faf
             elif mode in BIALLELIC_MODES:

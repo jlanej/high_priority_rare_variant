@@ -329,7 +329,15 @@ def mutational_target(mu_mis, mu_syn, mu_lof, impute_factor: float = 0.0516):
     mis, syn, lof = _num(mu_mis), _num(mu_syn), _num(mu_lof)
     if mis is None and syn is None and lof is None:
         return None, "none"
-    base = (mis or 0.0) + (syn or 0.0)
+    # A MISSING mu_mis or mu_syn is not zero. `(mis or 0.0) + (syn or 0.0)` shrank the offset
+    # while still labelling it "gnomad": with mu_mis absent, mu_tot fell 3.5x and every
+    # excess_ratio rose 3.5x under an unchanged provenance label, straight into the T1/T2/T3
+    # ratio bands (3x/5x/10x). This module refuses to charge mu_lof=0 for a 5% distortion; a
+    # 250% one cannot be silent. Fall through to the CDS-length offset instead, which is
+    # honestly labelled AND capped at T2 by assign_gene_tier — the conservative direction.
+    if mis is None or syn is None:
+        return None, "none"
+    base = mis + syn
     if lof is None:
         if base <= 0.0:
             return None, "none"
@@ -1205,8 +1213,17 @@ def nhf_state(row, threshold: float = 0.5, min_reads: int = 5):
         frac = _num(row.get(f"{m}_nhf"))
         if frac is None:
             continue
+        # A fraction WITHOUT its read denominator is not a screened member. `or 0.0` made a
+        # blank denominator a MEASURED ZERO, so a 0.9 non-human fraction over an unknown number
+        # of reads scored `clean` (pts_quality 0.0) instead of `flagged` (-3.0) — indistinguishable
+        # from a genuinely screened human call. Reachable in production without any bug on our
+        # side: igv.py reads fraction and denominator with independent defaults, so a column
+        # rename in the pinned nonhuman-screen commit blanks every denominator silently.
+        # Three states, never two: an unusable measurement is `not_screened`, not `clean`.
+        reads = _num(row.get(f"{m}_nhf_reads"))
+        if reads is None:
+            continue
         screened = True
-        reads = _num(row.get(f"{m}_nhf_reads")) or 0.0
         if best_frac is None or frac > best_frac:
             best_frac, best_reads = frac, reads
         if frac >= threshold and reads >= min_reads:

@@ -194,6 +194,55 @@ def test_prioritize_consumes_the_screens_resolved_rarity():
     assert r["rarity_strength"] == "unknown"
 
 
+def test_nhf_fraction_without_denominator_is_not_screened():
+    """A blank read denominator must NOT become a measured zero.
+
+    `reads = _num(...) or 0.0` made a blank denominator 0.0, so a 0.9 non-human fraction over an
+    unknown number of reads scored `clean` (pts_quality 0.0) instead of `flagged` (-3.0) —
+    indistinguishable from a genuinely screened human call. Reproduced against the real function.
+    Reachable without any bug on our side: igv.py reads the fraction and its denominator with
+    independent defaults, so a column rename in the pinned nonhuman-screen commit blanks every
+    denominator with no warning. Three states, never two.
+    """
+    from hprv import prioritize as PR
+    assert PR.nhf_state({"child_nhf": "0.9", "child_nhf_reads": ""})[0] == "not_screened"
+    assert PR.nhf_state({"child_nhf": "0.9", "child_nhf_reads": "40"})[0] == "flagged"
+    assert PR.nhf_state({"child_nhf": "0.01", "child_nhf_reads": "40"})[0] == "clean"
+    # a denominator of zero IS a measurement (screened, nothing to judge) and is not "flagged"
+    assert PR.nhf_state({"child_nhf": "0.9", "child_nhf_reads": "0"})[0] == "clean"
+    # one usable member is enough; an unusable sibling must not drag the call to clean
+    st, frac, reads = PR.nhf_state({"child_nhf": "0.9", "child_nhf_reads": "",
+                                    "mother_nhf": "0.95", "mother_nhf_reads": "50"})
+    assert (st, frac, reads) == ("flagged", 0.95, 50.0)
+    # and it costs the right points end to end
+    b = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T",
+         "inheritance": "dominant", "child_gt": "0/1"}
+    blank = PR.score_variant({**b, "child_nhf": "0.9", "child_nhf_reads": ""}, {}, {})
+    assert blank["nhf_status"] == "not_screened"
+
+
+def test_mutational_target_missing_component_is_not_zero():
+    """A missing mu_mis or mu_syn must not be summed as 0.0 under an unchanged provenance label.
+
+    `(mis or 0.0) + (syn or 0.0)` shrank the offset while still returning E_source='gnomad':
+    with mu_mis absent, mu_tot fell 3.5x and every excess_ratio rose 3.5x, straight into the
+    T1/T2/T3 ratio bands (3x/5x/10x). This module refuses to charge mu_lof=0 over a 5%
+    distortion, so a 250% one cannot be silent. It now falls through to the CDS-length offset,
+    which is honestly labelled and capped at T2.
+    """
+    from hprv import prioritize as PR
+    full = PR.mutational_target(3e-5, 1e-5, 2e-6)
+    assert full[1] == "gnomad" and abs(full[0] - 4.2e-5) < 1e-12
+    assert PR.mutational_target(None, 1e-5, 2e-6) == (None, "none"), "mu_mis absent must not sum as 0"
+    assert PR.mutational_target(3e-5, None, 2e-6) == (None, "none"), "mu_syn absent must not sum as 0"
+    assert PR.mutational_target(None, None, None) == (None, "none")
+    # mu_lof absence is DIFFERENT: it is imputed, and says so
+    imp = PR.mutational_target(3e-5, 1e-5, None)
+    assert imp[1] == "imputed" and imp[0] > 4e-5
+    # a real zero is a measurement and is still summed
+    assert PR.mutational_target(0.0, 1e-5, 2e-6)[1] == "gnomad"
+
+
 def test_prioritize_nhomalt_conflict_is_reported_and_costs_nothing_by_default():
     """nhomalt flags a biallelic call gnomAD already carries homozygotes for — reported, not
     penalised, because no calibration exists for how many should disqualify one.
