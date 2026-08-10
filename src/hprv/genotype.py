@@ -127,3 +127,26 @@ def sample_qc(v, i, thr: GtThresholds, kind: str) -> bool:
         a = alt_ad(v, i)
         return (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
     return False
+
+
+def sample_qc_ad_measured(v, i, kind: str) -> bool:
+    """Was the ALLELE-DEPTH evidence behind a ``hom_ref``/``clean_parent`` pass actually present?
+
+    **This exists because the AD limbs fail OPEN while the others fail closed**, and the asymmetry
+    is the whole problem: ``het``/``hom_alt``/``denovo_child`` require ``ab is not None`` and so
+    DROP a carrier when AD is missing, while ``hom_ref``/``clean_parent`` return True when it is
+    missing and so AFFIRM a non-carrier. The same absent measurement decides both ways.
+
+    It is not hypothetical: a GATK ref-block-derived ``0/0`` parent carries ``GT:DP:GQ:MIN_DP:PL``
+    with no AD at all, which is exactly the shape of a parent at a site where the child is het.
+    And ``clean_parent`` is the ONLY evidence that a compound-het pair is in **trans**.
+
+    Hard-failing instead would drop the ordinary ref-block case wholesale, so the pass stands
+    (never-drop) and callers mark it instead — ``origin_unverified`` previously fired only when
+    the test FAILED, leaving a vacuous pass silently indistinguishable from a measured one.
+    """
+    if kind not in ("hom_ref", "clean_parent"):
+        return True
+    if allele_balance(v, i) is not None:
+        return True
+    return kind == "clean_parent" and alt_ad(v, i) is not None

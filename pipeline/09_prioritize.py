@@ -437,14 +437,25 @@ def main(argv=None) -> int:
                          "nothing). Check Step 5/8 output.\n")
         return 1
 
-    # variants.tsv (Step 8) names the gene column `gene`; candidates.calls.tsv (Step 5) uses
-    # `symbol`, its mode column is `mode` not `inheritance`, and its QC columns are lowercase.
-    # Accept BOTH so the step runs at either point in the pipeline.
+    # variants.tsv (Step 8) names the gene column `gene`; candidates.calls.tsv (Step 5) carries
+    # BOTH `gene` (the Ensembl gene ID) and `symbol`. Its mode column is `mode` not `inheritance`,
+    # and its QC columns are lowercase. Accept both shapes so the step runs at either point.
+    #
+    # SYMBOL FIRST, and this is load-bearing. Every resource this step joins is symbol-keyed —
+    # the mutational-target table, constraint, segdup, established-genes and the gene-prior
+    # overlay (see GENE_KEYS_LOWER). `_find` returns the FIRST name present, so preferring `gene`
+    # meant that on the documented Step-5 fallback input the whole gene layer keyed on ENSG while
+    # every join stayed on symbols: constraint, mutrate, segdup, controls and prior all matched
+    # ZERO rows, mu_lof was imputed rather than measured, and the run reported success. Step 6
+    # already resolves symbol-first (06_gene_burden.py), so this also makes the two agree.
     vcols = list(variants[0].keys())
-    gene_c = _find(vcols, "gene", "symbol")
+    gene_c = _find(vcols, "symbol", "gene")
     if gene_c is None:
         sys.stderr.write(f"ERROR: {args.variants} has no gene/symbol column (have {vcols})\n")
         return 1
+    sys.stderr.write(f"Step 9: gene join key = '{gene_c}' (symbol-preferred; every joined "
+                     f"resource is symbol-keyed)\n")
+    audit.record("09_prioritize", f"gene_join_key.{gene_c}", 1)
     mode_c = _find(vcols, "inheritance", "mode")
     alias = {"child_GQ": _find(vcols, "child_gq"), "child_DP": _find(vcols, "child_dp"),
              "child_AB": _find(vcols, "child_ab"), "clin_sig": _find(vcols, "clin_sig", "clnsig"),

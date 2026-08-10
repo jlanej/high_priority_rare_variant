@@ -27,6 +27,7 @@ import argparse
 import csv
 import os
 import sys
+import zlib
 
 from cyvcf2 import VCF, Writer
 
@@ -82,7 +83,14 @@ def annotate(inp, lookup, out) -> int:
             f["Consequence"] = row["csq"]
             f["IMPACT"] = row["impact"]
             f["SYMBOL"] = row["gene"]
-            f["Gene"] = row["gene"]
+            # DISTINCT from SYMBOL, on purpose. Setting Gene = SYMBOL made the mock structurally
+            # unable to catch a step joining on the wrong key: every symbol-keyed resource would
+            # match either way. On real data `Gene` is an Ensembl ID and matches NOTHING in the
+            # constraint / mutrate / segdup / control / prior tables, which are all symbol-keyed.
+            # zlib.crc32, NOT hash(): PYTHONHASHSEED randomises str hashing per PROCESS, so the
+            # sharded and single-pass runs would emit different IDs and the shard-equivalence
+            # check would fail on a difference the pipeline never made.
+            f["Gene"] = "ENSG%011d" % (zlib.crc32(row["gene"].encode()) % 10**11)
             f["Feature_type"] = "Transcript"
             f["Feature"] = f"ENST_MOCK_{row['gene']}"
             f["BIOTYPE"] = "protein_coding"

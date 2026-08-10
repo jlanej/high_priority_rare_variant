@@ -1638,6 +1638,54 @@ def test_prioritize_cache_invalidates_on_config_and_resource_change():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_prioritize_joins_on_symbol_not_ensembl_id():
+    """Step 9 must key the gene layer on SYMBOL when the input carries both columns.
+
+    `candidates.calls.tsv` (the documented Step-5 fallback input) carries BOTH `gene` (the
+    Ensembl gene ID) and `symbol`, and `_find` returns the FIRST name present. Preferring `gene`
+    keyed the whole gene layer on ENSG while every joined resource stayed symbol-keyed —
+    mutational target, constraint, segdup, established genes and the gene-prior overlay all
+    matched ZERO rows, `mu_lof` was imputed rather than measured, and the run reported success.
+    The integration suite cannot catch it: its input is Step 8's table, which has one `gene`
+    column already holding the symbol.
+    """
+    p9 = _load_p9()
+    d = tempfile.mkdtemp(prefix="_hprv_p9key_")
+    try:
+        mut = os.path.join(d, "mut.tsv")
+        _write_tsv(mut, ["gene", "mu_mis", "mu_syn", "mu_lof", "cds_length"],
+                   [{"gene": "BRCA1", "mu_mis": "8e-6", "mu_syn": "3e-6", "mu_lof": "5e-7",
+                     "cds_length": "1500"}])
+        # Step-5 shaped: BOTH columns, gene=ENSG and symbol=BRCA1, with `gene` FIRST in the header
+        cols = ["chrom", "pos", "ref", "alt", "trio_id", "gene", "symbol", "consequence",
+                "impact", "mode", "grpmax_af", "cadd", "child_gt"]
+        _write_tsv(os.path.join(d, "v.tsv"), cols,
+                   [{"chrom": "chr17", "pos": "43000000", "ref": "A", "alt": "T",
+                     "trio_id": "T1", "gene": "ENSG00000012048", "symbol": "BRCA1",
+                     "consequence": "missense_variant", "impact": "MODERATE", "mode": "dominant",
+                     "grpmax_af": "2e-6", "cadd": "12", "child_gt": "0/1"}])
+        outv, outg = os.path.join(d, "vp.tsv"), os.path.join(d, "gp.tsv")
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("project: {name: t}\nprioritization:\n"
+                     "  gene_downweight: {min_control_genes: 1}\n")
+        assert p9.main(["--variants", os.path.join(d, "v.tsv"), "--mutrate", mut,
+                        "--config", cfgp, "--n-trios", "1",
+                        "--out-variants", outv, "--out-genes", outg]) == 0
+        import csv as _csv
+        grows = list(_csv.DictReader(open(outg), delimiter="\t"))
+        assert grows, "no gene rows emitted"
+        g = grows[0]
+        assert g["gene"] == "BRCA1", f"gene layer keyed on {g['gene']!r}, not the symbol"
+        # the symbol-keyed mutational target must have MATCHED — the whole point
+        assert g["E_source"] == "gnomad_mu", \
+            f"the mutrate join missed (E_source={g['E_source']!r}); the key was wrong"
+        assert g["mu_lof_src"] == "gnomad", "mu_lof was imputed, so the join did not match"
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_prioritize_never_drop_row_conservation():
     """THE NEVER-DROP INVARIANT, end to end through the CLI step: output rows == input rows.
 

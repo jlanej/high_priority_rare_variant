@@ -234,6 +234,50 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `rank_delta`. `prioritization.composite.gene_list_prior.enabled` defaults **false** and a config
   overlay path is inert while it is false, so hprv stays phenotype-agnostic by default.
 
+## The annotation surface (authoritative — check here before adding or reading one)
+
+Every annotation the pipeline reads, its provenance, and what happens when it is missing. If you
+are adding one, it must appear here, in `annotations.F`, and in a Step-2 producer (a VEP plugin or
+one of the two `bcftools annotate` transfers) — nothing may reach around that.
+
+| Annotation | Source | INFO field | Getter | Consumer | Missing ⇒ |
+|---|---|---|---|---|---|
+| consequence / IMPACT / SYMBOL / Gene / … | VEP cache CSQ | `vep_*` | `consequence()` etc. | Step 3 keep-ladder rung 1 | Step 2 **dies** (core field) |
+| CADD | CADD plugin | `vep_CADD_PHRED` | `cadd()` | Step 3 rung 3; Step 9 off-label missense | WARN, screen goes impact+splice-only |
+| SpliceAI | SpliceAI plugin | `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` | `spliceai_ds()` (max of 4) | Step 3 rung 2; Step 9 V4/V3/V0 | **HALT** (`spliceai_required: true`) |
+| REVEL | REVEL plugin | `vep_REVEL` | `revel()` | Step 9 missense tier **only** | **HALT** (`missense_predictors_required: true`) |
+| AlphaMissense | AlphaMissense plugin | `vep_am_pathogenicity` / `vep_am_class` | `alphamissense()` | Step 9 missense tier **only** | **HALT** (same knob) |
+| ClinVar significance | VEP cache CSQ | `vep_CLIN_SIG` | `clnsig()` / `clnsig_is_plp()` | Step 3 P/LP override; Step 9 clinical | cache always has it |
+| ClinVar review status | **transfer** (ClinVar VCF) | `clinvar_CLNREVSTAT` | `clinvar_stars()` | Step 9 clinical damp | WARN, stars `UNAVAILABLE` = FULL weight |
+| faf95 | **transfer** (gnomAD joint slim) | `gnomad_faf95` (+ `_group`) | `faf95()` | **every rarity gate** | **HALT** when `oracle: faf95` (the default) |
+| nhomalt | **transfer** (same slim) | `gnomad_nhomalt` | `nhomalt()` | Step 9 recessive flag | flag never fires (absent ≠ 0) |
+| grpmax proxy | VEP cache CSQ | `vep_gnomAD{e,g}_{POP}_AF` | `grpmax_af()` | rarity gates **only** under `oracle: grpmax_proxy` | — |
+| MAX_AF / global AF | VEP cache CSQ | `vep_MAX_AF`, `vep_gnomAD{e,g}_AF` | — | **REPORTING ONLY** | never a filter field (rule 2) |
+
+**Exactly TWO `bcftools annotate` transfers exist** — ClinVar and the gnomAD joint slim — both
+because the cache cannot supply the field at any price, both under their own INFO namespace, both
+guarded by a 0-match `die`. Everything else is a CSQ field lifted by `+split-vep`.
+
+**Three resources HALT at preflight when required-and-missing** (`spliceai_required`,
+`missense_predictors_required`, and `oracle: faf95` needing the slim). The pattern is deliberate:
+each one silently absent would change a *reported quantity* — the splice keep-path, the
+calibration of the missense tier, or which frequency quantity every gate used — without changing
+whether the run appears to succeed. Contrast ClinVar, which only damps a score and so warns.
+
+**Provenance columns you must keep populated** when touching any of this — each exists because
+two things that look identical in the output are not the same fact:
+
+| Column | Says |
+|---|---|
+| `rarity_oracle` | run-level: `faf95` or `grpmax_proxy`. ONE per run; the arms never cross |
+| `rarity_basis` | per variant: `measured` / `zero_ci` / `absent` **within** that oracle |
+| `missense_evidence_source` | `revel` / `alphamissense` / `cadd_offlabel` / `none` — fixed precedence, never a max |
+| `E_source` | `gnomad_mu` / `cds_fallback` / `none` (also selects the FDR pool) |
+| `mu_lof_src` | `gnomad` / `imputed` / `none` |
+| `spliceai_status` | `scored` / `not_covered` — absence is not "no effect" |
+| `nhf_status` | `clean` / `flagged` / `not_screened` — three states, never two |
+| `clinvar_review_status` | `N_star` or `UNAVAILABLE` (= full weight, NOT 0 stars) |
+
 ## Gotchas that WILL bite you
 
 - **Step 9's mutational-target table is NOT `resources.constraint.gnomad_v2_constraint`, and it
@@ -377,6 +421,34 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   the same cutoffs stop discarding low-count alleles whose CI never justified the call. If the
   list got SMALLER after supplying it, the join is broken — check Step 2's
   "gnomAD joint matched N / M sites" line, which is guarded to die at 0 but not at 1.
+- **The AD limbs of `sample_qc` fail OPEN while the others fail closed — and that asymmetry
+  decided both ways on one missing measurement.** `het`/`hom_alt`/`denovo_child` require
+  `ab is not None` and so DROP a carrier when FORMAT/AD is absent; `hom_ref`/`clean_parent`
+  returned True when it was absent and so AFFIRMED a non-carrier. A GATK ref-block-derived `0/0`
+  parent carries `GT:DP:GQ:MIN_DP:PL` with **no AD** — exactly the shape of a parent at a site
+  where the child is het — and `clean_parent` is the ONLY evidence a compound-het pair is in
+  TRANS. Hard-failing would drop the ordinary ref-block case wholesale, so the pass stands
+  (never-drop) and is now MARKED: `genotype.sample_qc_ad_measured()` is the witness, and Step 5
+  emits `parent_ad_unmeasured` / `trans_evidence_unmeasured`. Distinct from `origin_unverified`,
+  which means the test FAILED — this one is a vacuous pass.
+- **Step 9 joins the gene layer on SYMBOL, not on `gene`.** `candidates.calls.tsv` carries BOTH
+  `gene` (an Ensembl ID) and `symbol`, and `_find` returns the FIRST name present. Preferring
+  `gene` keyed the whole gene layer on ENSG while every joined resource stayed symbol-keyed
+  (`GENE_KEYS_LOWER`): mutational target, constraint, segdup, established genes and the
+  gene-prior overlay all matched ZERO rows, `mu_lof` was imputed rather than measured, and the
+  run reported success. Step 6 was already symbol-first, so the two now agree, and the resolved
+  key is logged + audited. The integration suite CANNOT catch this — its input is Step 8's table,
+  which has one `gene` column already holding the symbol — so the guard is
+  `tests/test_pure.py:test_prioritize_joins_on_symbol_not_ensembl_id`, and `mock_vep.py` now
+  emits a distinct ENSG-style `Gene` (via `zlib.crc32`, NOT `hash()`, which is per-process random
+  and would break shard equivalence).
+- **A missing component is never zero.** Three separate places substituted 0.0 for an absent
+  measurement and kept an unchanged provenance label: a blank NHF read denominator made a 0.9
+  non-human fraction read `clean` (0.0 instead of -3.0 points); a missing `mu_mis`/`mu_syn` was
+  summed as 0.0 and inflated every `excess_ratio` in that gene by 3.5x while `E_source` still
+  said `gnomad`; and `frequency()`'s old proxy fallback. All three are fixed, and the rule is
+  general: if you write `_num(x) or 0.0`, you have almost certainly just made absence into
+  evidence.
 - **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
   field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
   populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and
@@ -477,11 +549,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
   fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
   both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
-  code equals `config.example.yaml`'s value). **59 tests, no network and no VCF.**
-  **One documented exception to "no heavy deps":** the 6 tests that drive `09_prioritize.py:main()`
+  code equals `config.example.yaml`'s value). **66 tests, no network and no VCF.**
+  **One documented exception to "no heavy deps":** the 9 tests that drive `09_prioritize.py:main()`
   need `yaml` transitively (`load_config` does `import yaml`). They declare it at the `_load_p9()`
   chokepoint and **SKIP** without it — and `_run_all` then refuses to print "All N passed", instead
-  reporting `48 passed, 6 SKIPPED ... NOT full coverage`, because the skipped set holds the
+  reporting `57 passed, 9 SKIPPED ... NOT full coverage`, because the skipped set holds the
   never-drop and cache-invalidation guards. **CI `pip install pyyaml`s** so they actually execute
   there rather than being permanently green-by-skipping. Before calling this suite green, run it the
   way CI does — a BARE `python3`, not an env that happens to carry the container's packages. (This
