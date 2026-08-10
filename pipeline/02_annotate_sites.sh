@@ -545,9 +545,11 @@ if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "${HPRV_GNOMAD_SITES:-}" ]]; then
         # proxy for EVERY variant, and the run looks like a successful faf95 run that never was.
         #
         # NB the denominator is deliberately "sites with ANY gnomAD INFO", not "sites with faf95".
-        # A faf95 count of 0 is legitimate on a small/rare cohort — gnomAD emits fafmax only where
-        # some group's CI lower bound exceeds 0, and on a chr22 sample 74% of records had none.
-        # Guarding on faf95 alone would abort correct runs; guarding on the JOIN proves the join.
+        # A faf95 count of 0 is legitimate — gnomAD emits fafmax as MISSING wherever no group's CI
+        # lower bound clears 0, which is 80% of a chr22 sample. Guarding on faf95 alone would abort
+        # correct runs; guarding on the JOIN proves the join. That same AF_joint field is also what
+        # lets annotations.frequency() tell "gnomAD says faf95 is 0" (rarest) from "gnomAD has
+        # never seen this" (use the proxy) — it is a witness, not just a reporting column.
         n_gn="$(hprv_run -- bcftools query -i 'INFO/gnomad_AF_joint!="."' -f '\n' "$gn_out" \
                 | wc -l | tr -d '[:space:]')"
         n_faf="$(hprv_run -- bcftools query -i 'INFO/gnomad_faf95!="."' -f '\n' "$gn_out" \

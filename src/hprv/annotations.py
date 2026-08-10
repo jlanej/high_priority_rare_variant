@@ -288,6 +288,18 @@ def frequency(variant, cfg=None) -> Optional[float]:
     both exist, so the fallback can only ever filter more — never silently retain something faf95
     would have caught.
 
+    **An absent faf95 on a variant gnomAD HAS is faf95 = 0, not "unknown".** gnomAD emits
+    ``fafmax`` as MISSING rather than as 0 wherever no ancestry group's CI lower bound exceeds
+    zero, and on a chr22 sample that is 80% of records — overwhelmingly singletons (of the rows
+    with no faf95 but a proxy >= 1e-4, **96.5% are AC <= 2**). Falling back to the point estimate
+    there would filter a variant on the basis of one or two observed alleles, which is precisely
+    the error faf95 exists to prevent (Whiffin 2017). So when the variant is present in the gnomAD
+    slim, an absent faf95 resolves to **0.0** — rarest — and the proxy is NOT consulted.
+
+    The proxy is consulted only when gnomAD has no record of the variant at all, where it is the
+    only estimate available. That distinction is why ``gnomad_AF_joint`` is transferred: it is the
+    witness that gnomAD looked. Without it the two cases are indistinguishable.
+
     `cfg` selects the oracle (`resources.gnomad.oracle`: faf95 | grpmax_proxy) and defaults to
     faf95. Passing None keeps faf95 precedence, which is inert when the transfer did not run.
     """
@@ -296,7 +308,42 @@ def frequency(variant, cfg=None) -> Optional[float]:
         if str(_get(cfg, "resources.gnomad.oracle", "faf95")).lower() == "grpmax_proxy":
             return grpmax_af(variant)
     f = faf95(variant)
-    return grpmax_af(variant) if f is None else f
+    if f is not None:
+        return f
+    if gnomad_observed(variant):
+        return 0.0        # gnomAD looked; no group's 95% CI lower bound clears zero
+    return grpmax_af(variant)
+
+
+def gnomad_observed(variant) -> bool:
+    """True when the gnomAD joint slim carries a record for this allele.
+
+    The witness that distinguishes "gnomAD computed a FAF of 0" from "gnomAD has never seen this
+    variant". Both leave ``faf95`` absent, and they demand opposite fallbacks — see
+    ``frequency()``. False whenever the slim was not transferred at all, which correctly puts the
+    whole run on the proxy.
+    """
+    return _max_float(variant, "gnomad_af_joint") is not None
+
+
+def rarity_oracle(variant, cfg=None) -> str:
+    """Which arm produced ``frequency()`` for THIS variant: the value's provenance, reported.
+
+    ``faf95`` | ``faf95_zero`` | ``grpmax_proxy`` | ``absent``. A single run mixes them, so a
+    run-level label would be wrong. ``faf95_zero`` is deliberately distinct from ``faf95``: the
+    value is a real measurement (gnomAD looked and the CI lower bound is 0), but the underlying
+    allele count is tiny, so a reviewer reading a "rarest" band should be able to see that it
+    rests on an interval rather than on absence from the database.
+    """
+    if cfg is not None:
+        from .config import get as _get
+        if str(_get(cfg, "resources.gnomad.oracle", "faf95")).lower() == "grpmax_proxy":
+            return "grpmax_proxy" if grpmax_af(variant) is not None else "absent"
+    if faf95(variant) is not None:
+        return "faf95"
+    if gnomad_observed(variant):
+        return "faf95_zero"
+    return "grpmax_proxy" if grpmax_af(variant) is not None else "absent"
 
 
 # --- functional predictors ---------------------------------------------------

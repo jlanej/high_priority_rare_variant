@@ -37,7 +37,11 @@ COLS = [
     # closed — and frequency() (the chokepoint) prefers faf95 and falls back to the proxy.
     # faf95_group names the ancestry group that produced it: the FAF set is GRPMAX_POPS + `mid`,
     # so this is how the one deviation stays visible. nhomalt is the recessive false-positive tell.
-    "consequence", "impact", "grpmax_af", "faf95", "faf95_group", "nhomalt",
+    # rarity_af is THE value every gate used (annotations.frequency()) and rarity_oracle is its
+    # provenance — resolved ONCE here so Step 9 ranks on exactly what the screen gated on instead
+    # of re-deriving it from the raw columns and risking divergence. Both raw inputs ride along.
+    "consequence", "impact", "rarity_af", "rarity_oracle",
+    "grpmax_af", "faf95", "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
     # IMPACT=MODERATE and selection.py returns at the impact rung), carried here purely so
@@ -70,12 +74,13 @@ class Trio:
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
 
 
-def base_row(trio_id, v, gt, mode, pair_id=""):
+def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
     return {
         "trio_id": trio_id, "mode": mode, "pair_id": pair_id,
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
+        "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(v, cfg),
         "grpmax_af": fmt(A.grpmax_af(v)), "faf95": fmt(A.faf95(v)),
         "faf95_group": A.faf95_group(v) or "", "nhomalt": fmt(A.nhomalt(v)),
         "max_af": fmt(A._max_float(v, "max_af")),
@@ -198,7 +203,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             if require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name):
                 ok = False  # tag exists in this callset but not a hiConf de novo for THIS child
             if ok:
-                r = base_row(trio_id, v, gt, "denovo_x_hemi" if male_x else "denovo")
+                r = base_row(trio_id, v, gt, "denovo_x_hemi" if male_x else "denovo", cfg=cfg)
                 if crosscheck:
                     r["review_prior_crosscheck"] = "1"
                 rows.append(r)
@@ -217,14 +222,14 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 and gd in (G.HET, G.HOM_ALT) and gmm in (G.HET, G.HOM_ALT):
             if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(d, gd) and carrier_ok(m, gmm)
                     and rare(v, rec_max)):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive"), v))
+                rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive", cfg=cfg), v))
 
         # ---- X-linked recessive, affected male: hemizygous son + carrier mother. The father
         #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and is not
         #      required — an affected/carrier father or a father chrX no-call must not drop the call. ----
         if male_x_chrx and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
             if G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm) and rare(v, rec_max):
-                r = base_row(trio_id, v, gt, "x_linked_recessive")
+                r = base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg)
                 if gd in (G.HET, G.HOM_ALT):
                     r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "father_carries_x_allele"
                 rows.append(tag_strict(r, v))
@@ -235,7 +240,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 and gmm in (G.HET, G.HOM_ALT) and gd == G.HOM_ALT):
             if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm)
                     and G.sample_qc(v, d, thr, "hom_alt") and rare(v, rec_max)):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive"), v))
+                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg), v))
 
         # ---- collect het candidates (het child, rare, parent-of-origin) ----
         #      The transmitting parent must be a QC-confident carrier (documented rule),
@@ -324,7 +329,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             if ua or ub:
                 pair_flags.append("origin_unverified")
             for v in (va, vb):
-                r = tag_strict(base_row(trio_id, v, gt, "compound_het", pid), v)
+                r = tag_strict(base_row(trio_id, v, gt, "compound_het", pid, cfg=cfg), v)
                 for fl in pair_flags:
                     r["flags"] = (r["flags"] + ";" if r["flags"] else "") + fl
                 rows.append(r)
@@ -335,7 +340,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         for gene, cands in hets.items():
             for origin, v, key, unver in cands:
                 if origin in ("mat", "pat", "both") and key not in consumed and rare(v, dom_max):
-                    r = base_row(trio_id, v, gt, "dominant")
+                    r = base_row(trio_id, v, gt, "dominant", cfg=cfg)
                     r["flags"] = f"origin={origin}"
                     if unver:
                         r["flags"] += ";origin_unverified"

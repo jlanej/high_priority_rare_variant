@@ -82,9 +82,11 @@ Three properties worth stating, each verified against the real v4.1 data rather 
 - **The FAF group set is afr/amr/eas/mid/nfe/sas** — `GRPMAX_POPS` plus `mid`, and it EXCLUDES the
   bottlenecked ami/asj/fin. So faf95 does not reintroduce the `MAX_AF` trap of §2a. `mid` is the
   one deviation, so `faf95_group` reports the producing group on every row.
-- **Absent faf95 ≠ AF 0.** gnomAD emits `fafmax` only where a group's CI lower bound exceeds zero
-  (74% of a chr22 sample carried none). The proxy fallback there is the *more stringent* of the
-  two, so it can only ever filter more — never silently retain what faf95 would have caught.
+- **Absent faf95 splits in two.** gnomAD emits `fafmax` as *missing*, never as 0, wherever no
+  group's CI lower bound clears zero (80% of a chr22 sample). If gnomAD **has** the allele, faf95
+  is 0 ⇒ rarest, and the proxy must not be consulted — 96.5% of that class are AC ≤ 2, and
+  filtering a singleton on its inflated point estimate is the error faf95 exists to prevent. Only
+  a variant gnomAD has **never seen** falls back to the proxy. `rarity_oracle` distinguishes them.
 - **Supplying the slim RETAINS MORE.** faf95 ≤ the point estimate, so the same cutoffs stop
   discarding low-count alleles the interval never justified discarding. A smaller candidate list
   after enabling it means a broken join, not a better filter — check Step 2's match count.

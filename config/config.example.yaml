@@ -159,9 +159,14 @@ resources:
     # deviation, so the group that produced the max rides along as `faf95_group` for review.
     sites_slim: ${GNOMAD_SITES}     # gnomad.joint.v4.1.sites.slim.vcf.gz (+ .tbi)
     # Which oracle annotations.frequency() reads. THE single chokepoint every rarity gate uses.
-    #   faf95        - prefer faf95, fall back to the grpmax proxy per-variant when absent
-    #                  (absent faf95 means no group has a confidently non-zero AF, so the proxy
-    #                  is the more STRINGENT of the two there — the safe direction).
+    #   faf95        - prefer faf95. When it is absent, WHICH fallback applies depends on whether
+    #                  gnomAD has a record for the allele at all (gnomad_AF_joint is the witness):
+    #                    * gnomAD HAS it  -> faf95 is 0 -> RAREST. gnomAD emits fafmax as missing,
+    #                      never as 0, wherever no group's CI lower bound clears zero. 96.5% of
+    #                      that class are AC <= 2, so consulting the point estimate there would
+    #                      filter a singleton on its inflated AF — the error faf95 prevents.
+    #                    * gnomAD has NO record -> the grpmax proxy is the only estimate there is.
+    #                  rarity_oracle reports faf95 / faf95_zero / grpmax_proxy / absent per row.
     #   grpmax_proxy - ignore faf95 entirely; the pre-transfer behaviour, bit-for-bit.
     # `faf95` is inert until the slim is actually configured, so setting it early is harmless.
     oracle: faf95                   # faf95 | grpmax_proxy

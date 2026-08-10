@@ -440,10 +440,24 @@ def main(argv=None) -> int:
               "faf95 (a CI LOWER bound) is below the point estimate, as it must be")
         check(all(r["faf95_group"] in ("afr", "amr", "eas", "mid", "nfe", "sas") for r in faf),
               "faf95_group names a FAF-eligible ancestry group (GRPMAX_POPS + mid)")
-        # the fallback is the majority case and must be labelled, not silently conflated
-        prox = [r for r in pv if not r["faf95"] and r["grpmax_af"]]
-        check(prox and all(r["rarity_oracle"] == "grpmax_proxy" for r in prox),
-              "a variant with NO faf95 falls back to the proxy and SAYS so (rarity_oracle)")
+        # THE DISTINCTION THAT MATTERS. gnomAD emits fafmax as MISSING, never as 0, wherever no
+        # ancestry group's CI lower bound clears zero — and of the records with no faf95 but a
+        # proxy >= 1e-4, 96.5% are AC <= 2. So "no faf95" splits in two, and the two demand
+        # opposite fallbacks:
+        #   * gnomAD HAS a record  -> faf95 is 0 -> RAREST. Using the proxy here would filter a
+        #     variant on one or two observed alleles, exactly what faf95 exists to prevent.
+        #   * gnomAD has NO record -> the proxy is the only estimate available.
+        fz = [r for r in pv if r["rarity_oracle"] == "faf95_zero"]
+        check(fz, "the faf95_zero case is exercised (gnomAD has the allele, published no faf95)")
+        check(all(float(r["rarity_af"]) == 0.0 for r in fz),
+              "faf95_zero resolves to 0 — rarest — NOT to the inflated point estimate")
+        check(all(float(r["grpmax_af"]) > 0 for r in fz if r["grpmax_af"]),
+              "the faf95_zero fixture really does carry a non-zero proxy (else it proves nothing)")
+        check(all(r["rarity_strength"] in ("strong", "moderate") for r in fz),
+              "a faf95_zero variant ranks on faf95=0, not on the proxy that would demote it")
+        prox = [r for r in pv if r["rarity_oracle"] == "grpmax_proxy"]
+        check(prox and all(not r["faf95"] for r in prox),
+              "the proxy arm is used only where faf95 is absent, and SAYS so (rarity_oracle)")
         none = [r for r in pv if not r["faf95"] and not r["grpmax_af"]]
         check(all(r["rarity_oracle"] == "absent" and r["rarity_strength"] == "unknown"
                   for r in none),

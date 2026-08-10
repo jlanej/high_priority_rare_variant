@@ -95,8 +95,11 @@ add(file="A", chrom="chr1", pos=8000, gene="GENE2", csq="missense_variant", impa
     gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/1", 99, 40)})
 # 3+4) compound het in GENE3 (var3 maternal, var4 paternal) -> mode=compound_het
 # AlphaMissense only (REVEL absent): the ladder must fall through to it rather than to CADD.
+# ALSO the faf95_zero case: gnomAD HAS this allele (nhomalt present => a record exists) but
+# published no faf95, so faf95 is 0 and the variant must survive a gate its inflated
+# point-estimate proxy (1e-3) would fail. 96.5% of that class are AC<=2 singletons.
 add(file="A", chrom="chr2", pos=5000, gene="GENE3", csq="missense_variant", impact="MODERATE",
-    af=1e-3, alphamissense="0.9",
+    af=1e-3, alphamissense="0.9", nhomalt="0",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 add(file="A", chrom="chr2", pos=6000, gene="GENE3", csq="missense_variant", impact="MODERATE",
     af=1e-3,
