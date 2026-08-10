@@ -59,8 +59,10 @@ def main(argv=None) -> int:
     for v in VCF(os.path.join(W, "plausible.sites.vcf.gz")):
         plaus[(v.CHROM, v.POS)] = v.INFO.get("hprv_keep_reason")
     check(("chr2", 8000) in plaus and plaus[("chr2", 8000)] == "clinvar_plp",
-          "ClinVar P/LP (LOW impact) kept via clinvar_plp — on UNSTARRED CLIN_SIG from the VEP "
-          "cache (there is no CLNREVSTAT, so the old >=2-star gate cannot and does not apply)")
+          "ClinVar P/LP (LOW impact) kept via clinvar_plp — the SCREEN gates on CLIN_SIG alone "
+          "and is deliberately star-blind: stars arrive from the Step-2 ClinVar transfer and are "
+          "a Step-9 RANKING input, never a keep/drop gate (never-drop). A 1-star assertion must "
+          "still reach review; it is merely ranked below a 3-star one.")
     check(("chr1", 12000) not in plaus, "BA1-common variant dropped at Step 3")
     check(("chr1", 17000) not in plaus, "non-PASS variant dropped before Step 3")
     check(("chr1", 5000) in plaus, "de novo site retained as plausible")
@@ -403,6 +405,35 @@ def main(argv=None) -> int:
         cadd_mis = [r for r in pv if r["missense_evidence_source"] == "cadd_offlabel"]
         check(all("off-label" in r["variant_tier_reason"] for r in cadd_mis),
               "a CADD-based missense tier is labelled off-label (never presentable as PP3)")
+
+        # --- calibrated missense predictors: PRECEDENCE, not a max over what is available.
+        # ClinGen SVI's rule is to commit to ONE predictor chosen before seeing results, so the
+        # ladder is revel -> alphamissense -> cadd(off-label) -> none and always reports which
+        # one spoke. The mock's GENE2 row carries REVEL 0.85 against a deliberately LOW cadd=3:
+        # if the ladder ever regressed to "take the best score available", cadd would win here
+        # and the source would read cadd_offlabel. ---
+        rev = [r for r in pv if r["gene"] == "GENE2" and r["revel"]]
+        check(rev, "the REVEL-scored missense variant reached Step 9")
+        check(all(r["missense_evidence_source"] == "revel" for r in rev),
+              "REVEL outranks a (low) CADD — precedence, not best-of-N")
+        check(all(r["variant_tier"] == "V4" for r in rev),
+              "REVEL >= 0.773 (Pejaver moderate) reaches V4, above the supporting-only rungs")
+        am = [r for r in pv if r["gene"] == "GENE3" and r["alphamissense"] and not r["revel"]]
+        check(am, "the AlphaMissense-only missense variant reached Step 9")
+        check(all(r["missense_evidence_source"] == "alphamissense" for r in am),
+              "with REVEL absent the ladder falls through to AlphaMissense, not to CADD")
+        check(all(r["alphamissense_class"] in ("likely_pathogenic", "ambiguous", "likely_benign")
+                  for r in am),
+              "am_class rides along (the PLUGIN's key name, not dbNSFP's AlphaMissense_score)")
+
+        # --- ClinVar stars: the mock configures NO ClinVar VCF, so every row must read
+        # UNAVAILABLE — and crucially NOT 0. Blank/absent means nobody looked; 0 means ClinVar
+        # has a record whose submitter provided no assertion criteria. If a future change ever
+        # collapses the two, every P/LP assertion in an un-transferred run gets silently damped. ---
+        check(all(r["clinvar_review_status"] == "UNAVAILABLE" for r in pv),
+              "with no ClinVar VCF configured, review status reads UNAVAILABLE for every call")
+        check(all(r["clinvar_stars"] == "" for r in pv),
+              "an absent ClinVar transfer leaves clinvar_stars BLANK, never 0")
 
         # --- MOI coherence: curated genes get a verdict, UNCURATED genes are EXACTLY neutral.
         # Any penalty on moi_unknown converts the score into a known-gene filter and destroys

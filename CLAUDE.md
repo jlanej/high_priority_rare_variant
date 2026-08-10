@@ -44,9 +44,12 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    CADD (required-ish) and **SpliceAI** (required by default). Nothing else is bcftools-transferred in: no
    gnomAD, ClinVar, dbNSFP or LOFTEE file. Adding an annotation means either a VEP plugin or a
    `bcftools annotate` transfer in Step 2 **and** its INFO field in `annotations.F` — never a lookup
-   that reaches around that contract. Known, accepted losses (see
-   [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no nhomalt, no LOFTEE, no
-   ClinVar stars. Below MODERATE impact there are now TWO keep-paths: **SpliceAI** (max delta
+   that reaches around that contract. **ClinVar is the one transfer** (`resources.clinvar.vcf` ->
+   `clinvar_CLNREVSTAT` -> `clinvar_stars`), because the cache carries `CLIN_SIG` but no
+   `CLNREVSTAT` at any price; it is prefixed `clinvar_` rather than `vep_` precisely so the
+   different oracle is visible. **REVEL and AlphaMissense are plugins** (dedicated files, never
+   dbNSFP — 32 GB for 5 columns and a dead URL). Remaining accepted losses (see
+   [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no nhomalt, no LOFTEE. Below MODERATE impact there are now TWO keep-paths: **SpliceAI** (max delta
    ≥ `spliceai_ds_min`, default 0.2 — the deep-intronic/synonymous splice signal; checked first) and
    **CADD** (≥ `cadd_phred_supporting`, default 25.3 — everything else non-coding). SpliceAI is a
    VEP plugin over the precomputed RAW scores (`resources.vep.spliceai_snv`/`spliceai_indel`); the
@@ -97,12 +100,15 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `bcftools annotate` — it never re-runs VEP. Keep it that way. Already have a VEP VCF? Set
   `resources.vep.annotated_vcf` and Step 2 ingests it instead (verifying build + frequency
   presence); the rest of Step 2 is unchanged.
-- **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): ALL of them are CSQ
-  fields lifted by `bcftools +split-vep` with a `vep_` prefix — there are no `hprv_*` transfers
-  any more. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
+- **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): all but two are CSQ
+  fields lifted by `bcftools +split-vep` with a `vep_` prefix. The exceptions are
+  `clinvar_CLNREVSTAT` / `clinvar_CLNSIG`, `bcftools annotate`-transferred from the ClinVar sites
+  VCF — a THIRD namespace on purpose, so which oracle a field came from is readable at a glance. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
   `vep_BIOTYPE`, `vep_HGVSc`, `vep_HGVSp`, `vep_MANE_SELECT`, `vep_CADD_PHRED`, `vep_CLIN_SIG`,
   `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` (+ `DP_*`, `SYMBOL`; `annotations.spliceai_ds()` = the max,
   the splice keep-path — present only when the SpliceAI plugin is configured),
+  `vep_REVEL` + `vep_am_pathogenicity`/`vep_am_class` (the calibrated missense predictors —
+  **inert at the screen**, consumed only by Step 9's missense tier),
   `vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF` (the rarity oracle), plus `vep_MAX_AF` /
   `vep_MAX_AF_POPS` / `vep_gnomAD{e,g}_AF` for REPORTING ONLY — never as filter fields (see rule
   2). Add a new annotation by wiring it through Step 2's split-vep `want` list AND
@@ -288,6 +294,29 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   (a CADD-based term is not PP3), no phenotype/segregation/functional evidence exists at all, the
   ClinVar term has no review-status gate, and the artifact-penalty terms have no ACMG analogue. The
   column is named `priority_points`, never `acmg_points`.
+- **Three acquisition traps, each of which fails SILENTLY rather than loudly.** All are handled in
+  `scripts/prepare_resources.sh`; the point is that none of them errors — each yields a resource
+  that opens fine and matches nothing.
+  1. **ClinVar ships BARE contig names** (`1`, not `chr1`) while these callsets are chr-prefixed.
+     `bcftools annotate` matches on the contig STRING, so an unrenamed ClinVar transfers ZERO
+     records and exits 0. `prep_clinvar` renames and then PROVES the rename landed; Step 2 also
+     hard-fails on a 0-match transfer (a cohort union always overlaps ClinVar somewhere).
+  2. **REVEL must be sorted on the GRCh38 column.** Its columns are
+     `chr,hg19_pos,grch38_pos,...` — GRCh38 is column **3**, hence `sort -k1,1 -k3,3n` and
+     `tabix -s 1 -b 3 -e 3`. Sorted/indexed on column 2 (hg19) it indexes without complaint and
+     matches nothing. Its published upstream recipe also contains the `zcat | head -n1` SIGPIPE
+     trap documented below — `prep_revel` guards it, and the ~8 GB sort gets an explicit `-T`.
+  3. **AlphaMissense's field is `am_pathogenicity`, not `AlphaMissense_score`.** The latter is
+     dbNSFP's name for the same quantity; putting it in Step 2's split-vep `want` list gives you a
+     plugin that runs and a column that is never populated. `tests/integration/mock_vep.py`
+     deliberately uses the plugin spelling so an upstream rename breaks the mock.
+- **`clinvar_stars` blank is NOT zero, and stars RANK rather than gate.** Blank = the ClinVar
+  transfer did not run (nobody looked); `0` = ClinVar has a record whose submitter provided no
+  assertion criteria. Conflating them silently damps every P/LP assertion in a run with no ClinVar
+  resource, so an absent star count leaves Step 9's clinical term at FULL weight. Only the
+  POSITIVE limb is damped — shrinking a low-star BENIGN term toward zero would promote a
+  poorly-reviewed benign call. And the screen stays star-blind: reinstating the old >=2-star
+  keep/drop gate would violate never-drop.
 - **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
   field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
   populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and
@@ -298,10 +327,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   accessioned into **dbSNP** — an un-accessioned gnomAD variant returns no AF and reads as
   "absent ⇒ rarest". Ensembl itself recommends `--custom` with the gnomAD VCF over `--af_gnomad*`
   for this reason. Under the VEP-only contract we accept it; it biases toward retention.
-- **The predictor branches you may be tempted to re-add were dead.** REVEL/AlphaMissense/MPC are
+- **REVEL/AlphaMissense are wired but STILL dead at the screen, and that is structural.** They are
   missense-only; every missense is `IMPACT=MODERATE`; `selection.py` keeps it at an earlier branch
-  and returns. Re-adding dbNSFP without also narrowing `keep_impacts` buys exactly nothing at the
-  screen (it is only worth reporting/tiering value). CI asserts these reasons never fire.
+  and returns before any predictor is consulted — true whether or not the resource is configured.
+  CI asserts these keep-reasons never fire. Their only consumer is **Step 9's missense tier**,
+  where the ladder is `revel -> alphamissense -> cadd(off-label) -> none`: a FIXED PRECEDENCE, not
+  a max over what is available, because ClinGen SVI says commit to one predictor chosen before
+  seeing results and best-of-N is an uncalibrated cherry-pick. `missense_evidence_source` always
+  names which one spoke. Do not "improve" this by taking the maximum.
 - **LOFTEE plugin code is baked into the image** at `/plugins` (the Dockerfile clones the
   `konradjk/loftee` **grch38** branch there — the base image ships all other VEP_plugins but
   `--skip_plugins LoF`, and master LOFTEE is GRCh37-only). The code ships; the **data**
@@ -384,7 +417,7 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
   fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
   both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
-  code equals `config.example.yaml`'s value). **54 tests, no network and no VCF.**
+  code equals `config.example.yaml`'s value). **59 tests, no network and no VCF.**
   **One documented exception to "no heavy deps":** the 6 tests that drive `09_prioritize.py:main()`
   need `yaml` transitively (`load_config` does `import yaml`). They declare it at the `_load_p9()`
   chokepoint and **SKIP** without it — and `_run_all` then refuses to print "All N passed", instead

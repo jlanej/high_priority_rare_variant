@@ -961,8 +961,8 @@ def test_prioritize_recurrence_scores_on_count_not_pvalue():
 def test_prioritize_clinvar_has_no_star_gate():
     """P/LP is honored unstarred (the cache has no CLNREVSTAT) and the column SAYS so."""
     from hprv import prioritize as PR
-    assert PR.clinvar_strength("pathogenic") == "p_lp_no_star_gate"
-    assert PR.clinvar_strength("Pathogenic/Likely_pathogenic") == "p_lp_no_star_gate"
+    assert PR.clinvar_strength("pathogenic") == "p_lp"
+    assert PR.clinvar_strength("Pathogenic/Likely_pathogenic") == "p_lp"
     assert PR.clinvar_strength("conflicting_classifications_of_pathogenicity") == "conflicting"
     assert PR.clinvar_strength("benign") == "benign"
     assert PR.clinvar_strength("uncertain_significance") == "vus"
@@ -1212,6 +1212,110 @@ def test_prioritize_igv_review_table_preserves_track_paths():
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_clinvar_stars_parses_every_rendering_and_absent_is_not_zero():
+    """CLNREVSTAT arrives in several shapes, and absent must never read as 0 stars.
+
+    The VCF value carries commas INSIDE it ("criteria_provided,_multiple_submitters,_no_conflicts")
+    while the field is Number=., so the comma is also the array separator: cyvcf2 may hand back a
+    string or a tuple and bcftools query joins with commas. A plain string compare against any one
+    of those forms breaks on the others, so the parser canonicalises. Verified against a real
+    bcftools transfer + cyvcf2 read before this test was written.
+
+    The load-bearing distinction: None (the ClinVar transfer did not run — nobody looked) vs 0
+    ("submitter provided no assertion criteria"). Collapsing them would let a run with no ClinVar
+    resource damp every P/LP assertion as if it were unreviewed.
+    """
+    from hprv import annotations as AN
+    canon = AN._canon_revstat
+    stars = lambda v: AN._REVSTAT_STARS.get(canon(v))      # noqa: E731
+    assert stars("criteria_provided,_multiple_submitters,_no_conflicts") == 2
+    assert stars(("criteria_provided", "_multiple_submitters", "_no_conflicts")) == 2
+    assert stars("criteria provided, multiple submitters, no conflicts") == 2
+    assert stars("practice_guideline") == 4
+    assert stars("reviewed_by_expert_panel") == 3
+    assert stars("criteria_provided,_single_submitter") == 1
+    # ClinVar renamed this in 2024; a pinned older release is still a legitimate input
+    assert stars("criteria_provided,_conflicting_classifications") == 1
+    assert stars("criteria_provided,_conflicting_interpretations") == 1
+    assert stars("no_assertion_criteria_provided") == 0
+    # absent / unknown -> None, NEVER 0
+    assert stars(None) is None and stars("") is None
+    assert stars("a_status_clinvar_invents_later") is None, \
+        "an unrecognised status is an unknown, not a zero-star assertion"
+
+
+def test_prioritize_missense_predictor_precedence():
+    """REVEL -> AlphaMissense -> CADD(off-label) -> none, in that fixed order.
+
+    NOT a max over whatever is available: ClinGen SVI's rule is to commit to ONE predictor chosen
+    before seeing results, so taking the best of N would be an uncalibrated cherry-pick. The tier
+    must always report which predictor spoke, and a variant scored by REVEL must not be re-scored
+    by CADD just because CADD happens to be higher.
+    """
+    from hprv import prioritize as PR
+    base = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T"}
+
+    def tier(**kw):
+        return PR.assign_variant_tier({**base, **kw}, {})
+
+    # REVEL wins even when CADD would give a different answer
+    t = tier(revel="0.9", cadd="1.0")
+    assert t["missense_evidence_source"] == "revel" and t["variant_tier"] == "V4", t
+    t = tier(revel="0.70", cadd="40")
+    assert t["missense_evidence_source"] == "revel" and t["variant_tier"] == "V3", t
+    t = tier(revel="0.1", cadd="40")
+    assert t["missense_evidence_source"] == "revel" and t["variant_tier"] == "V1", \
+        f"a calibrated BENIGN REVEL must not be overridden by a high CADD: {t}"
+    t = tier(revel="0.5", cadd="40")
+    assert t["missense_evidence_source"] == "revel" and t["variant_tier"] == "V2", t
+
+    # AlphaMissense only when REVEL is absent (both are missense-only; neither covers everything)
+    t = tier(alphamissense="0.9", cadd="1.0")
+    assert t["missense_evidence_source"] == "alphamissense" and t["variant_tier"] == "V3", t
+    t = tier(alphamissense="0.1", cadd="40")
+    assert t["missense_evidence_source"] == "alphamissense" and t["variant_tier"] == "V1", t
+
+    # CADD last, and explicitly labelled off-label so no reader mistakes it for calibrated
+    t = tier(cadd="40")
+    assert t["missense_evidence_source"] == "cadd_offlabel" and t["variant_tier"] == "V3", t
+    t = tier(cadd="2")
+    assert t["missense_evidence_source"] == "none" and t["variant_tier"] == "V2", t
+    # and a blank string is absent, not zero
+    t = tier(revel="", alphamissense="", cadd="40")
+    assert t["missense_evidence_source"] == "cadd_offlabel", t
+
+
+def test_prioritize_clinvar_star_gate_damps_only_the_positive_limb():
+    """Low stars damp a P/LP assertion; they must NOT damp a benign one, and absent = full weight.
+
+    Scaling a negative (benign) term toward zero would PROMOTE a poorly-reviewed benign call —
+    the opposite of the intent. And an absent star count means the ClinVar transfer did not run,
+    which must leave the term at full weight rather than damping every assertion in the run.
+    """
+    from hprv import prioritize as PR
+    cfg = {"resources": {"clinvar": {"min_review_stars": 2, "low_star_scale": 0.5}}}
+    row = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T",
+           "inheritance": "dominant", "grpmax_af": "1e-6", "child_gt": "0/1"}
+
+    def pts(clin_sig, stars):
+        r = dict(row, clin_sig=clin_sig)
+        if stars is not None:
+            r["clinvar_stars"] = str(stars)
+        return PR.score_variant(r, {}, cfg)
+
+    full = pts("Pathogenic", 3)["pts_clinical"]
+    assert full > 0
+    assert pts("Pathogenic", 1)["pts_clinical"] == full * 0.5, "1-star P/LP must be damped"
+    assert pts("Pathogenic", None)["pts_clinical"] == full, \
+        "no ClinVar transfer must leave the clinical term at FULL weight, not damped"
+    assert pts("Pathogenic", None)["clinvar_review_status"] == "UNAVAILABLE"
+    assert pts("Pathogenic", 3)["clinvar_review_status"] == "3_star"
+    ben_hi = pts("Benign", 3)["pts_clinical"]
+    ben_lo = pts("Benign", 1)["pts_clinical"]
+    assert ben_hi < 0 and ben_lo == ben_hi, \
+        f"a low-star BENIGN call must not be shrunk toward zero (would promote it): {ben_lo} vs {ben_hi}"
 
 
 def test_prioritize_cache_invalidates_on_config_and_resource_change():
@@ -1865,6 +1969,15 @@ def test_prioritize_config_matches_canonical_defaults():
         ("prioritization.variant_tier.spliceai_benign_max", 0.1),
         ("prioritization.variant_tier.cadd_benign_max", 15.0),
         ("prioritization.variant_tier.cadd_missense_supporting", 25.3),
+        # missense predictor ladder — REVEL's cuts are Pejaver 2022's, AlphaMissense's are the
+        # model's own (Cheng 2023). Pinned here so a code default cannot drift from the config.
+        ("prioritization.variant_tier.revel_supporting", 0.644),
+        ("prioritization.variant_tier.revel_moderate", 0.773),
+        ("prioritization.variant_tier.revel_benign_max", 0.290),
+        ("prioritization.variant_tier.alphamissense_supporting", 0.564),
+        ("prioritization.variant_tier.alphamissense_benign_max", 0.34),
+        ("resources.clinvar.min_review_stars", 2),
+        ("resources.clinvar.low_star_scale", 0.5),
         ("prioritization.variant_tier.rarity.ba1", 0.05),
         ("prioritization.variant_tier.rarity.moderate_max", 1.0e-4),
         ("prioritization.variant_tier.rarity.single_group_ratio", 10.0),

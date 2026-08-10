@@ -45,6 +45,10 @@ CSQ_FIELDS = [
     # field so annotations.spliceai_ds() (max over the four) sees it, exercising the splice keep-path.
     "SpliceAI_pred_SYMBOL", "SpliceAI_pred_DS_AG", "SpliceAI_pred_DS_AL",
     "SpliceAI_pred_DS_DG", "SpliceAI_pred_DS_DL",
+    # Calibrated missense predictors. `am_pathogenicity`/`am_class` are the ALPHAMISSENSE PLUGIN's
+    # key names — dbNSFP calls the same quantity `AlphaMissense_score`, and using that name would
+    # lift nothing. The mock uses the plugin spelling precisely so a rename upstream breaks here.
+    "REVEL", "am_pathogenicity", "am_class",
 ]
 
 # VEP's own header lines. Step 2 checks these to refuse a wrong-build annotation, so the mock
@@ -92,6 +96,13 @@ def annotate(inp, lookup, out) -> int:
                 f["CLIN_SIG"] = row["clnsig"]
             if row.get("spliceai"):
                 f["SpliceAI_pred_DS_AL"] = row["spliceai"]   # one event; spliceai_ds() takes the max
+            if row.get("revel"):
+                f["REVEL"] = row["revel"]
+            if row.get("alphamissense"):
+                f["am_pathogenicity"] = row["alphamissense"]
+                f["am_class"] = ("likely_pathogenic" if float(row["alphamissense"]) >= 0.564
+                                 else "likely_benign" if float(row["alphamissense"]) <= 0.34
+                                 else "ambiguous")
                 f["SpliceAI_pred_SYMBOL"] = row["gene"]
             if row.get("af"):
                 # Put the AF in the requested population only. A grpmax-eligible group drives

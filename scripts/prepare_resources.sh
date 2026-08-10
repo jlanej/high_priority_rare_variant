@@ -55,6 +55,8 @@ VEP_CACHE_OUT="$DIR/vep_cache"
 GNOMAD_OUT="$DIR/gnomad/gnomad.joint.v${GNOMAD_VERSION}.sites.slim.vcf.gz"
 CLINVAR_OUT="$DIR/clinvar/clinvar_${CLINVAR_DATE}.GRCh38.vcf.gz"
 DBNSFP_OUT="$DIR/dbnsfp/${DBNSFP_EXPECT}"
+REVEL_OUT="$DIR/revel/${REVEL_EXPECT}"
+ALPHAMISSENSE_OUT="$DIR/alphamissense/${ALPHAMISSENSE_EXPECT}"
 CADD_SNV_OUT="$DIR/cadd/whole_genome_SNVs.tsv.gz"
 CADD_INDEL_OUT="$DIR/cadd/gnomad.genomes.r4.0.indel.tsv.gz"
 SPLICEAI_SNV_OUT="$DIR/spliceai/${SPLICEAI_SNV_EXPECT}"
@@ -217,8 +219,38 @@ prep_gnomad() {
 
 prep_clinvar() {
     selected clinvar || return 0
-    get_free clinvar "$CLINVAR_URL" "$CLINVAR_OUT" "" || return 0
-    index_vcf "$CLINVAR_OUT"
+    [[ -f "$CLINVAR_OUT" && -f "$CLINVAR_OUT.tbi" ]] && \
+        { log "[clinvar] cached"; record skip clinvar; return 0; }
+    local raw="$DIR/clinvar/clinvar_${CLINVAR_DATE}.raw.vcf.gz"
+    get_free clinvar "$CLINVAR_URL" "$raw" "" || return 0
+    # CONTIG NAMING. ClinVar ships GRCh38 with bare contig names (1, 2, ... X, MT) while a
+    # GMKF/Kids First GRCh38 callset is chr-prefixed. `bcftools annotate` matches on the contig
+    # STRING, so transferring bare-named ClinVar onto a chr-prefixed cohort matches ZERO records
+    # and exits 0 — Step 2's 0-match guard would then abort a run for a reason that is really a
+    # resource-prep defect. Rename here, once, rather than leave it as a footgun at annotate time.
+    local map="$DIR/clinvar/chr_rename.txt"
+    : > "$map"
+    for c in $(seq 1 22) X Y MT; do
+        case "$c" in MT) printf '%s\tchrM\n' "$c" >> "$map";; *) printf '%s\tchr%s\n' "$c" "$c" >> "$map";; esac
+    done
+    if bcftools annotate --rename-chrs "$map" -Oz -o "$CLINVAR_OUT" "$raw" 2>/dev/null; then
+        index_vcf "$CLINVAR_OUT"
+        # Prove the rename actually landed rather than trusting the exit code — a silently
+        # unrenamed file is the same 0-match failure one step later. `grep -c`, not `grep -q`:
+        # -q closes the pipe early and SIGPIPEs the producer (CLAUDE.md), and here the COUNT is
+        # the answer anyway.
+        local n_chr; n_chr="$(bcftools index -s "$CLINVAR_OUT" 2>/dev/null | grep -c '^chr' || true)"
+        if [[ "${n_chr:-0}" -gt 0 ]]; then
+            rm -f "$raw"; record ok clinvar
+        else
+            warn "[clinvar] contig rename produced no chr-prefixed contigs — keeping the raw file"
+            record miss clinvar
+        fi
+    else
+        warn "[clinvar] contig rename failed; falling back to the raw (bare-contig) file — the \
+Step-2 transfer will match 0 sites on a chr-prefixed cohort"
+        mv "$raw" "$CLINVAR_OUT"; index_vcf "$CLINVAR_OUT"; record ok clinvar
+    fi
 }
 
 prep_loftee() {
@@ -270,6 +302,69 @@ prep_mutational_target() {
     else
         get_free mutational_target "$MUTATIONAL_TARGET_URL" "$MUTTARGET_OUT" "" \
             || warn "[mutational_target] optional (Step-9 excess statistic) — without it Step 9 warns and every gene reads gene_tier=T0"
+    fi
+}
+
+prep_revel() {
+    selected revel || return 0
+    [[ -f "$REVEL_OUT" ]] && { log "[revel] cached"; record skip revel; return 0; }
+    local zip="$DIR/revel/revel-v${REVEL_VERSION}_all_chromosomes.zip"
+    get_licensed revel "$REVEL_URL" "$zip" \
+        "REVEL is free for academic/non-commercial use (Ioannidis 2016, AJHG)." || return 0
+    need unzip || { warn "[revel] unzip not available"; record miss revel; return 0; }
+    local wd="$DIR/revel"
+    ( cd "$wd" && unzip -o -q "$(basename "$zip")" ) || {
+        warn "[revel] unzip failed"; record miss revel; return 0; }
+    # The distribution is a COMMA-separated file whose columns are
+    #   chr,hg19_pos,grch38_pos,ref,alt,aaref,aaalt,REVEL,Ensembl_transcriptid
+    # so the GRCh38 coordinate is column 3 — which is why the index below is -b 3 -e 3 and why
+    # the sort key is -k3,3n. THIS IS THE WHOLE TRAP: sorting/indexing on column 2 (hg19) yields
+    # a file tabix accepts without complaint and the plugin then matches NOTHING, silently.
+    local csv="$wd/revel_with_transcript_ids"
+    [[ -f "$csv" ]] || { warn "[revel] expected $csv inside the zip; layout changed upstream"; record miss revel; return 0; }
+    local tabbed="$wd/tabbed_revel.tsv"
+    tr ',' '\t' < "$csv" > "$tabbed" || { warn "[revel] csv->tsv failed"; record miss revel; return 0; }
+    # `head -n1` closes the pipe the moment it has the header, so the producer dies of SIGPIPE
+    # (exit 141); under `set -euo pipefail` that aborts the script with NO message, and it fires
+    # only on healthy data big enough for head to exit early. The published REVEL recipe has
+    # exactly this shape. `|| true` INSIDE the $( ) is the fix (CLAUDE.md, download_spliceai.sh).
+    local hdr; hdr="$(head -n1 "$tabbed" || true)"
+    [[ -n "$hdr" ]] || { warn "[revel] empty header after csv->tsv"; record miss revel; return 0; }
+    # sort spills to disk: this file is ~8 GB uncompressed and the default /tmp may be a small
+    # tmpfs (the same class of failure as Apptainer's --containall; see CLAUDE.md).
+    local sdir="${TMPDIR:-$DIR/revel}/revel_sort.$$"; mkdir -p "$sdir"
+    if { printf '%s\n' "$hdr"; tail -n +2 "$tabbed" | awk -F'\t' '$3 != "."' \
+           | sort -T "$sdir" -k1,1 -k3,3n; } | bgzip -c > "$REVEL_OUT" \
+       && tabix -f -s 1 -b 3 -e 3 "$REVEL_OUT"; then
+        rm -rf "$sdir" "$tabbed" "$csv"
+        record ok revel
+    else
+        warn "[revel] sort/bgzip/tabix failed — leaving the raw files for inspection"
+        rm -f "$REVEL_OUT" "$REVEL_OUT.tbi"; rm -rf "$sdir"; record miss revel
+    fi
+}
+
+prep_alphamissense() {
+    selected alphamissense || return 0
+    [[ -f "$ALPHAMISSENSE_OUT" && -f "$ALPHAMISSENSE_OUT.tbi" ]] && \
+        { log "[alphamissense] cached"; record skip alphamissense; return 0; }
+    get_licensed alphamissense "$ALPHAMISSENSE_URL" "$ALPHAMISSENSE_OUT" \
+        "AlphaMissense predictions are CC BY-NC-SA 4.0 (NON-COMMERCIAL); Cheng 2023, Science." || return 0
+    # Upstream ships .gz; tabix needs BGZF. If the file is plain gzip, tabix fails with an
+    # unhelpful error, so re-compress once rather than leave a resource that silently never
+    # indexes. -S 1 skips the column-name row (the leading #-comment lines are handled by
+    # tabix's default comment char).
+    if tabix -f -s 1 -b 2 -e 2 -S 1 "$ALPHAMISSENSE_OUT" 2>/dev/null; then
+        record ok alphamissense; return 0
+    fi
+    log "[alphamissense] not BGZF — re-compressing with bgzip (one pass) then indexing"
+    if gzip -cd "$ALPHAMISSENSE_OUT" | bgzip -c > "$ALPHAMISSENSE_OUT.bgz" \
+       && mv "$ALPHAMISSENSE_OUT.bgz" "$ALPHAMISSENSE_OUT" \
+       && tabix -f -s 1 -b 2 -e 2 -S 1 "$ALPHAMISSENSE_OUT"; then
+        record ok alphamissense
+    else
+        warn "[alphamissense] could not index the score file"
+        rm -f "$ALPHAMISSENSE_OUT.bgz"; record miss alphamissense
     fi
 }
 
@@ -359,7 +454,12 @@ do_verify() {
     # Steps-0-8 run. Reported so an operator can see whether the excess statistic will be live.
     verify_extra "$MUTTARGET_OUT" mutational_target
     verify_extra "$GNOMAD_OUT" gnomad_sites
+    # Consumed but OPTIONAL, so `extra` rather than a hard requirement: each degrades with a loud
+    # warning (ClinVar -> stars UNAVAILABLE; REVEL/AlphaMissense -> Step 9's missense tier falls
+    # back to an off-label CADD rank). Reported so an operator can see which evidence will be live.
     verify_extra "$CLINVAR_OUT" clinvar
+    verify_extra "$REVEL_OUT" revel
+    verify_extra "$ALPHAMISSENSE_OUT" alphamissense
     verify_extra "$LOFTEE_OUT/human_ancestor.fa.gz" loftee
     verify_extra "$DBNSFP_OUT" dbnsfp
     verify_extra "$SPLICEAI_SNV_OUT" spliceai_snv
@@ -385,6 +485,15 @@ do_emit() {
         echo "# (login); the auto-fetched SNV is the no-login Ensembl MANE-only subset. See docs/resources.md."
         echo "export SPLICEAI_SNV=$SPLICEAI_SNV_OUT"
         echo "export SPLICEAI_INDEL=$SPLICEAI_INDEL_OUT"
+        echo "# ClinVar sites VCF — the ONE bcftools transfer in Step 2. Without it, review status"
+        echo "# and therefore GOLD STARS are unavailable and a 1-star single-submitter assertion is"
+        echo "# indistinguishable from a 3-star expert-panel one."
+        echo "export CLINVAR_VCF=$CLINVAR_OUT"
+        echo "# Calibrated MISSENSE predictors (VEP plugins). These change the SCREEN by nothing —"
+        echo "# missense is IMPACT=MODERATE and selection.py returns at the impact rung. They make"
+        echo "# Step 9's missense TIER calibrated instead of an off-label CADD rank."
+        echo "export REVEL_SCORES=$REVEL_OUT"
+        echo "export ALPHAMISSENSE_SCORES=$ALPHAMISSENSE_OUT"
         echo "export GNOMAD_V2_CONSTRAINT=$CONSTRAINT_OUT"
         echo "export MUTRATE_TABLE=$MUTRATE_OUT"
         echo "# Step-9 prioritization: the UNJOINED gnomAD v2.1.1 constraint table (mu_mis/mu_syn/"
@@ -412,15 +521,22 @@ case "$MODE" in
     emit-env) do_emit; exit 0;;
     verify)   do_verify; exit 0;;
     fetch)
-        # DEFAULT = only what the VEP-only contract consumes. gnomAD/ClinVar/dbNSFP/SpliceAI/
-        # LOFTEE are NOT fetched by default: no step reads them, and defaulting them on would
-        # start an ~877 GB gnomAD download for data nothing consumes. They remain reachable by
-        # explicit `--only gnomad_sites,clinvar,...` so the roadmap restorations
-        # (docs/ROADMAP.md) stay one flag away. Note the pinned dbNSFP URL is DEAD upstream
-        # (S3 NoSuchBucket -> registration-gated); prefer the dedicated REVEL/AlphaMissense files.
+        # DEFAULT = what the pipeline actually CONSUMES. ClinVar (183 MB, Step-2 transfer ->
+        # gold stars) and the two missense predictors (REVEL 667 MB, AlphaMissense 643 MB ->
+        # Step 9's missense tier) are now read by steps, so they are fetched by default. The
+        # licensed ones still no-op without --accept-license, and every one of them degrades
+        # with a warning rather than failing the run, so a default fetch that skips them is
+        # survivable.
+        #
+        # gnomAD/dbNSFP/LOFTEE stay OPT-IN: nothing reads them, and defaulting gnomAD on would
+        # start an ~877 GB download for data no step consumes (it becomes the faf95 restoration,
+        # ROADMAP R3). Reachable via explicit `--only gnomad_sites,...`. Note the pinned dbNSFP
+        # URL is DEAD upstream (S3 NoSuchBucket -> registration-gated) — which is exactly why
+        # REVEL/AlphaMissense above use their own dedicated files instead.
         prep_reference; prep_vep_cache; prep_cadd; prep_constraint
+        prep_clinvar; prep_revel; prep_alphamissense
         if [[ -n "$ONLY" ]]; then
-            prep_gnomad; prep_clinvar; prep_loftee; prep_dbnsfp; prep_spliceai
+            prep_gnomad; prep_loftee; prep_dbnsfp; prep_spliceai
         fi
         log "---------------------------------------------------------------"
         log "prepared: ${#PREPARED[@]}  cached: ${#SKIPPED[@]}  missing/gated: ${#MISSING[@]}"

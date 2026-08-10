@@ -32,7 +32,15 @@ COLUMNS = [
     "child_gt", "mother_gt", "father_gt", "child_GQ", "child_DP", "child_AB",
     # max_af/max_af_pops are shown next to grpmax_af so a reviewer can spot a call whose
     # frequency is driven by a founder group grpmax excludes (see annotations.GRPMAX_POPS).
-    "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds", "clin_sig",
+    "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds",
+    # Calibrated missense predictors (REVEL / AlphaMissense plugins). Filterable in igv.js like
+    # every other extra column. Blank on non-missense is EXPECTED — these are missense-only
+    # scores, not a coverage gap.
+    "revel", "alphamissense", "alphamissense_class",
+    # clin_sig is the VEP cache's CLIN_SIG. clinvar_stars is the ClinVar VCF's review status
+    # (0-4) and is BLANK when the transfer did not run — blank is "nobody looked", NOT 0 stars.
+    # Without it a 1-star single-submitter assertion and a 3-star expert-panel one look alike.
+    "clin_sig", "clinvar_stars",
     # Step-8b NHF: fraction of each member's ALT-supporting reads that classify NON-human, with
     # its read-count denominator right beside it (an NHF over few reads is noise). nhf_flag is a
     # single convenience boolean (>= NHF_FLAG_FRACTION over >= min_reads in any screened member).
@@ -168,7 +176,10 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "grpmax_af": r.get("grpmax_af"), "max_af": r.get("max_af"),
                 "max_af_pops": r.get("max_af_pops"), "cadd": r.get("cadd"),
                 "spliceai_ds": r.get("spliceai_ds"),
-                "clin_sig": r.get("clnsig"),
+                "revel": r.get("revel"), "alphamissense": r.get("alphamissense"),
+                "alphamissense_class": r.get("alphamissense_class"),
+                # renamed on the way through (clnsig -> clin_sig); clinvar_stars keeps its name
+                "clin_sig": r.get("clnsig"), "clinvar_stars": r.get("clinvar_stars"),
                 "child_nhf": member_nhf["child"][0], "child_nhf_reads": member_nhf["child"][1],
                 "mother_nhf": member_nhf["mother"][0], "mother_nhf_reads": member_nhf["mother"][1],
                 "father_nhf": member_nhf["father"][0], "father_nhf_reads": member_nhf["father"][1],

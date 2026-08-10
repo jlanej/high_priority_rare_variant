@@ -88,6 +88,25 @@ resources:
     # deliberately run without SpliceAI (dev/quick runs) — then it degrades with a warning as before.
     # Not enforced when resources.vep.annotated_vcf is set (VEP is not invoked at all).
     spliceai_required: true
+    # --- calibrated MISSENSE predictors (both VEP plugins; optional, like CADD) ----------------
+    # BE CLEAR ON WHAT THESE BUY. They change the SCREEN by exactly nothing: they are
+    # missense-only, every missense is IMPACT=MODERATE, and selection.py keeps MODERATE at the
+    # impact rung and returns BEFORE any predictor is consulted (docs/limitations.md #7). Their
+    # consumer is Step 9's missense TIER, which without them can only offer an off-label CADD
+    # rank — 25.3 is Pejaver 2022's missense PP3 value, but ClinGen SVI says commit to ONE
+    # predictor chosen in advance, and CADD is not the calibrated choice. So adding these makes
+    # the missense tier calibrated; it does not add or remove a single candidate.
+    #
+    # REVEL: the dedicated file (revel_grch38.tsv.gz), NOT dbNSFP — 30 GB for 5 columns and its
+    # URL is dead upstream. TRAP: the distribution must be re-sorted on the GRCh38 column before
+    # tabix; a file sorted on the GRCh37 column indexes fine and then silently matches NOTHING.
+    # scripts/prepare_resources.sh --only revel does it correctly.
+    revel: ${REVEL_SCORES}            # new_tabbed_revel_grch38.tsv.gz (+ .tbi)
+    # AlphaMissense: SVI-endorsed on par with REVEL and reaches Strong on constrained genes where
+    # REVEL sits at Supporting. TRAP: Ensembl's AlphaMissense.pm emits `am_pathogenicity`/`am_class`
+    # — NOT `AlphaMissense_score` (that is dbNSFP's column name). A want-list entry copied from the
+    # dbNSFP naming populates nothing, silently.
+    alphamissense: ${ALPHAMISSENSE_SCORES}   # AlphaMissense_hg38.tsv.gz (+ .tbi)
     # Step 2b — live SpliceAI backfill. OFF by default: the pipeline currently screens on the
     # PRECOMPUTED scores alone. The precomputed set covers every genome-wide SNV but only 1 nt
     # insertions and deletions <= 4 nt, so larger indels carry no score — and a missing score is
@@ -112,6 +131,27 @@ resources:
     # Tip: the CADD plugin's per-variant tabix reads into the ~81 GB file are the per-shard
     # bottleneck; if it lives on a network/FUSE mount, stage it to node-local disk first.
     shard_by_contig: true
+  clinvar:
+    # The ONE bcftools-transferred annotation in Step 2 — everything else arrives as a CSQ field
+    # from VEP. It has to be a transfer: the VEP cache exposes CLIN_SIG but carries NO CLNREVSTAT,
+    # so review status and therefore GOLD STARS are unavailable from the cache at any price.
+    # Without stars, a single-submitter no-criteria "Pathogenic" assertion and a 3-star expert
+    # panel one are indistinguishable — which is why Step 9's clinical term is deliberately
+    # ungated today and why `priority_points` must never be read as ACMG points.
+    #
+    # Optional and graceful: unset (or a missing file) and Step 2 skips the transfer with a
+    # warning; clinvar_stars then reads UNAVAILABLE everywhere, exactly as it does now. The
+    # variant's OWN CLIN_SIG still comes from the cache either way, so nothing regresses.
+    #
+    # Version-pin it. ClinVar re-releases weekly and a classification can change between runs;
+    # the transferred release date is recorded in the audit so a result is reproducible.
+    vcf: ${CLINVAR_VCF}             # clinvar_YYYYMMDD.vcf.gz (+ .tbi), GRCh38
+    # Minimum gold stars for the Step-9 clinical term to grant its FULL weight. Assertions below
+    # this still appear (never dropped, and clinvar_stars is always reported) but are damped by
+    # `low_star_scale` — reported and down-weighted, never silently ignored. 2 = "multiple
+    # submitters, no conflicts" or better, the usual bar for acting on a ClinVar assertion.
+    min_review_stars: 2
+    low_star_scale: 0.5             # multiplier applied below min_review_stars (0 = ignore them)
   constraint:
     # One per-gene TSV with LOEUF (oe_lof_upper) / pLI / s_het / phaplo columns (any subset).
     gnomad_v2_constraint: ${GNOMAD_V2_CONSTRAINT}  # pLI/LOEUF/s_het/pHaplo per gene
@@ -567,13 +607,28 @@ prioritization:
     spliceai_benign_max: 0.1
     cadd_benign_max: 15.0
     benign_impacts: [LOW, MODIFIER]
-    # V3 missense via CADD >= 25.3 is a DISCOVERY RANK, NOT PP3 EVIDENCE, and the tier carries
-    # missense_evidence_source = cadd_offlabel so no downstream reader mistakes it for a
-    # calibrated call. 25.3 is Pejaver-2022's missense-only PP3-supporting value (PMID 36413997),
-    # but ClinGen SVI says commit to ONE predictor chosen before seeing results and the
-    # calibrated choice is REVEL (PP3 0.644/0.773/0.932; BP4 <= 0.290/0.183). REVEL needs dbNSFP,
-    # i.e. a change to the annotation contract — a resource question, not a design question. Until
-    # then: do NOT claim graded missense strength.
+    # MISSENSE PREDICTOR PRECEDENCE: revel -> alphamissense -> cadd(off-label) -> none. Fixed
+    # order, NOT a max over whatever is available: ClinGen SVI's rule is to commit to ONE
+    # predictor chosen BEFORE seeing results, and taking the best of N is an uncalibrated
+    # cherry-pick. The tier always reports which one spoke, in missense_evidence_source.
+    #
+    # REVEL first: its cut points are the ones Pejaver 2022 (PMID 36413997) calibrated —
+    # PP3 0.644 supporting / 0.773 moderate / 0.932 strong, BP4 <= 0.290 supporting / 0.183
+    # moderate. hprv assigns no ACMG weight; it uses the same cut points to ORDER candidates,
+    # which is why >= moderate reaches V4 while supporting-only sits at V3.
+    revel_supporting: 0.644
+    revel_moderate: 0.773
+    revel_benign_max: 0.290
+    # AlphaMissense second — SVI-endorsed on par with REVEL and it reaches Strong on constrained
+    # genes where REVEL sits at Supporting. 0.564 is the model's own likely-pathogenic cut and
+    # 0.34 its likely-benign cut (Cheng 2023); they are the authors' calibration, not SVI's.
+    alphamissense_supporting: 0.564
+    alphamissense_benign_max: 0.34
+    # CADD LAST and explicitly off-label: 25.3 is Pejaver-2022's missense-only PP3-supporting
+    # value, but CADD is not the ClinGen-recommended predictor, so the tier carries
+    # missense_evidence_source = cadd_offlabel and no reader should mistake it for a calibrated
+    # call. This fires only when BOTH REVEL and AlphaMissense are absent for the variant —
+    # either the resources are not configured, or (expected) neither scored this substitution.
     cadd_missense_supporting: 25.3
     rarity:
       # Rarity strength bands on the grpmax-PROXY AF. TWO CAVEATS TRAVEL WITH THIS COLUMN.

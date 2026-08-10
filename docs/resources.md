@@ -12,7 +12,57 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 
 > **STATUS — the VEP-only contract (read this before you download anything).**
 > The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD and
-> SpliceAI** (see [## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
+> SpliceAI** (see [## ClinVar, REVEL and AlphaMissense
+
+All three are **fetched by default** (`prepare_resources.sh --dir DIR fetch`) because steps now
+read them. All three are **optional and graceful**: each missing one produces a loud warning and a
+documented degradation, never a failed run.
+
+### ClinVar
+
+The **one** `bcftools annotate` transfer in the pipeline — everything else is a CSQ field lifted
+from VEP. It has to be a transfer: the cache carries `CLIN_SIG` but no `CLNREVSTAT`, so gold stars
+are unreachable from it at any price. Transferred under a `clinvar_` prefix (a third namespace
+beside `vep_`, so a reader can tell which oracle a field came from) into `clinvar_stars` (0-4).
+
+Two traps, both handled in `prep_clinvar`:
+
+- **Contig naming.** ClinVar ships GRCh38 with **bare** contig names (`1`, `2`, … `MT`) while a
+  GMKF/Kids First GRCh38 callset is `chr`-prefixed. `bcftools annotate` matches on the contig
+  *string*, so an unrenamed ClinVar transfers **zero** records and exits 0. The prep renames
+  contigs once and proves the rename landed; Step 2 additionally hard-fails on a 0-match transfer
+  rather than producing a fully-populated header over entirely empty values.
+- **`CLNREVSTAT` values contain commas** (`criteria_provided,_multiple_submitters,_no_conflicts`)
+  while the field is `Number=.`, so the comma is also the array separator — cyvcf2 may hand back a
+  string or a tuple. `annotations._canon_revstat` canonicalises every rendering to one key, which
+  also survives ClinVar's periodic renames (the 2024 `conflicting_interpretations` ->
+  `conflicting_classifications` change is carried as both).
+
+Stars **rank, they never gate** — see [limitations.md](limitations.md#6).
+
+### REVEL and AlphaMissense
+
+Both are VEP plugins whose `.pm` already ships in the image at `/plugins`. **Neither changes the
+screen**: missense is `IMPACT=MODERATE` and `selection.py` returns at the impact rung before any
+predictor runs. Their consumer is Step 9's missense tier.
+
+Use the **dedicated files, never dbNSFP** — dbNSFP is ~32 GB for 5 useful columns and its pinned
+URL is dead upstream (S3 `NoSuchBucket`, now registration-gated).
+
+- **REVEL** `revel-v1.3_all_chromosomes.zip` (667 MB). **The trap is the sort key.** The
+  distribution's columns are `chr,hg19_pos,grch38_pos,ref,alt,…`, so GRCh38 is **column 3**; the
+  prepared file must be sorted `-k1,1 -k3,3n` and indexed `tabix -s 1 -b 3 -e 3`. Sorting or
+  indexing on column 2 (hg19) yields a file tabix accepts without complaint that then matches
+  **nothing**. Also note the published upstream recipe uses `zcat … | head -n1`, which SIGPIPEs the
+  producer under `set -euo pipefail` — `prep_revel` guards it (see [CLAUDE.md](../CLAUDE.md)).
+  The sort spills ~8 GB, so it uses an explicit `-T` rather than a possibly-tmpfs `/tmp`.
+- **AlphaMissense** `AlphaMissense_hg38.tsv.gz` (643 MB), **CC BY-NC-SA 4.0** — non-commercial, so
+  it needs `--accept-license`. **The trap is the field name**: Ensembl's `AlphaMissense.pm` emits
+  `am_pathogenicity` / `am_class`, **not** dbNSFP's `AlphaMissense_score`. A split-vep want-list
+  entry copied from the dbNSFP naming produces a plugin that runs and a column that is never
+  populated, silently. The prep re-bgzips if upstream ships plain gzip (tabix needs BGZF).
+
+## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
 > annotate` transfers**. **gnomAD, ClinVar, dbNSFP and LOFTEE data are no longer fetched, bind-mounted
 > or read** — the config keys that pointed at them are gone. The **required** acquisition therefore
 > collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB)**
@@ -59,6 +109,9 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 | VEP indexed cache (r115) | **everything**: consequence/IMPACT, gnomAD v4.1 AFs, ClinVar `CLIN_SIG` | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~24 GB |
 | CADD SNV + indel | CADD plugin — the general-purpose functional predictor (SpliceAI covers splice), genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
 | VEP plugin **code** (`.pm`) | CADD (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
+| **ClinVar** GRCh38 sites VCF | Step-2 **transfer** -> `CLNREVSTAT` ⇒ `clinvar_stars` (0-4), a Step-9 ranking input. Also un-stales ClinVar vs the cache's pinned release. **Optional**, degrades with a warning | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free (NCBI) | ~0.18 GB |
+| **REVEL** (dedicated file) | REVEL plugin — Step-9 missense tier. **No effect on selection** | `resources.vep.revel` (`REVEL_SCORES`) | free, academic use | ~0.7 GB |
+| **AlphaMissense** | AlphaMissense plugin — Step-9 missense tier. **No effect on selection** | `resources.vep.alphamissense` (`ALPHAMISSENSE_SCORES`) | **CC BY-NC-SA 4.0** (`--accept-license`) | ~0.65 GB |
 | Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) — **optional**, skipped if unset | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
 | Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) — **optional**, skipped if unset | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
 
@@ -266,7 +319,9 @@ ever do want those scores, the replacement is the **dedicated files, not dbNSFP*
 
 ## Optional resources — NOT currently fetched or used
 
-**None of the following is downloaded, bind-mounted or read by the pipeline today.** This is the
+**None of the following is downloaded, bind-mounted or read by the pipeline today.** (ClinVar,
+REVEL and AlphaMissense used to be on this list and are now WIRED — see the required-set table
+above and the section below.) This is the
 shopping list for building on top: each is re-enabled by **one `bcftools annotate` transfer in
 `02_annotate_sites.sh` plus its INFO field in `annotations.F`** — the contract is a single seam, and
 the plugin code is already in the image. Ordered by value-per-GB. Sizes and rationale come from
@@ -274,8 +329,6 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 
 | Resource | ~Size | Why you'd add it | Acquisition trap |
 |---|---|---|---|
-| **ClinVar** GRCh38 VCF | ~0.18 GB | restores `CLNREVSTAT` ⇒ the ≥2★ gate, `CLNSIGCONF`, and un-stales ClinVar (monthly vs. the cache's 2025-02) | none — free, public domain, dated monthly release from NCBI |
-| **REVEL + AlphaMissense** (dedicated) | ~1.3 GB | missense scores for *reporting/tiering* and a future PP3/BP4 step — **not** selection power | use `AlphaMissense_hg38.tsv.gz` (643 MB) + `revel-v1.3_all_chromosomes.zip` (667 MB), **never** the 30 GB dbNSFP (dead URL, 5 useful columns). Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`/`am_class`, **not** `AlphaMissense_score` |
 | **gnomAD v4.1 joint** slim | ~10 GB | restores real **faf95** + **nhomalt** (the homozygote sanity check) | stream-slim the 24 chromosome VCFs to ~5 of their 664 INFO fields; nothing but the slim output lands on disk and GCS egress is free. Confirmed v4.1 joint tags: `AF_joint`, `AF_grpmax_joint`, `fafmax_faf95_max_joint`, `nhomalt_joint` |
 | **LOFTEE** GRCh38 data | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | mostly the GERP bigwig. Use the plugin's **`grch38` branch** (already baked in; master is GRCh37-only) |
 
