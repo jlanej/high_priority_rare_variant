@@ -126,8 +126,18 @@ if run_step 2; then
         fi
         _opt HPRV_GNOMAD_SITES    "gnomAD joint slim (resources.gnomad.sites_slim) — rarity falls back to the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward DROPPING); no faf95, no nhomalt"
         _opt HPRV_CLINVAR_VCF     "ClinVar sites VCF (resources.clinvar.vcf) — no review status/GOLD STARS; a 1-star and a 3-star assertion will be indistinguishable"
-        _opt HPRV_REVEL           "REVEL (resources.vep.revel) — Step 9's missense tier falls back to an off-label CADD rank"
-        _opt HPRV_ALPHAMISSENSE   "AlphaMissense (resources.vep.alphamissense) — no SVI-endorsed missense predictor"
+        # REVEL + AlphaMissense: REQUIRED by default. Without them Step 9's missense tier is an
+        # off-label CADD rank labelled `cadd_offlabel` — usable for discovery, but not a
+        # calibrated call, and a run that lost them silently would put an uncalibrated tier into a
+        # methods section. Same halt contract as spliceai_required. The SCREEN is unaffected
+        # either way, so this is about the honesty of the tier, not about sensitivity.
+        if [[ "$(cfg_get resources.vep.missense_predictors_required true)" != "false" ]]; then
+            _need HPRV_REVEL         "REVEL (resources.vep.revel) — REQUIRED by default. Prepare it with 'prepare_resources.sh --only revel fetch --accept-license', or set resources.vep.missense_predictors_required: false to run with an OFF-LABEL CADD missense tier"
+            _need HPRV_ALPHAMISSENSE "AlphaMissense (resources.vep.alphamissense) — REQUIRED by default. Prepare it with 'prepare_resources.sh --only alphamissense fetch --accept-license' (CC BY-NC-SA 4.0), or set resources.vep.missense_predictors_required: false"
+        else
+            _opt HPRV_REVEL           "REVEL (resources.vep.revel) — Step 9's missense tier falls back to an off-label CADD rank"
+            _opt HPRV_ALPHAMISSENSE   "AlphaMissense (resources.vep.alphamissense) — no SVI-endorsed missense predictor"
+        fi
         # SpliceAI is part of the DEFAULT screen (resources.vep.spliceai_required, default true):
         # it is the only signal reaching deep-intronic cryptic sites + exonic-synonymous splice
         # disruption, so its silent absence is a materially weaker screen, not a cosmetic loss.

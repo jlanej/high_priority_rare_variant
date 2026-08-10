@@ -59,9 +59,16 @@ Stars **rank, they never gate** — see [limitations.md](limitations.md#6-clinva
 
 ### REVEL and AlphaMissense
 
-Both are VEP plugins whose `.pm` already ships in the image at `/plugins`. **Neither changes the
-screen**: missense is `IMPACT=MODERATE` and `selection.py` returns at the impact rung before any
-predictor runs. Their consumer is Step 9's missense tier.
+Both are VEP plugins whose `.pm` already ships in the image at `/plugins`, and both are
+**REQUIRED by default** (`resources.vep.missense_predictors_required: true`) — `run_pipeline.sh`
+halts at preflight when either is missing, the same contract as SpliceAI. Set the knob `false` to
+run deliberately without them.
+
+**Neither changes the screen**: missense is `IMPACT=MODERATE` and `selection.py` returns at the
+impact rung before any predictor runs. Their consumer is Step 9's missense tier — which without
+them can only report an off-label CADD rank (`missense_evidence_source=cadd_offlabel`). That is
+why they halt rather than warn: an uncalibrated tier that *looks* calibrated is the failure mode,
+not a loss of sensitivity.
 
 Use the **dedicated files, never dbNSFP** — dbNSFP is ~32 GB for 5 useful columns and its pinned
 URL is dead upstream (S3 `NoSuchBucket`, now registration-gated).

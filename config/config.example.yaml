@@ -117,6 +117,14 @@ resources:
     # — NOT `AlphaMissense_score` (that is dbNSFP's column name). A want-list entry copied from the
     # dbNSFP naming populates nothing, silently.
     alphamissense: ${ALPHAMISSENSE_SCORES}   # AlphaMissense_hg38.tsv.gz (+ .tbi)
+    # Both are REQUIRED by default: a run that silently lacks them produces a missense tier built
+    # on an off-label CADD rank, which is not a calibrated call and must not be mistaken for one
+    # in a methods section. HALTS at preflight when a configured-or-not path is missing, exactly
+    # like resources.vep.spliceai_required. Set false to run deliberately without them — the
+    # screen is unaffected either way (missense is IMPACT=MODERATE and selection.py returns at
+    # the impact rung before any predictor is consulted), so this only costs Step 9's tier.
+    # Not enforced when resources.vep.annotated_vcf is set (VEP is not invoked at all).
+    missense_predictors_required: true
     # Step 2b — live SpliceAI backfill. OFF by default: the pipeline currently screens on the
     # PRECOMPUTED scores alone. The precomputed set covers every genome-wide SNV but only 1 nt
     # insertions and deletions <= 4 nt, so larger indels carry no score — and a missing score is

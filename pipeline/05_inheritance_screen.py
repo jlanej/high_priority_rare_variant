@@ -193,8 +193,14 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             # parental cleanliness: both parents for an autosomal de novo; only the transmitting
             # mother for a male-X de novo (father's chrX is not transmitted to a son).
             parents_clean = G.sample_qc(v, m, thr, "clean_parent")
+            # A parent with NO allele-depth data passes clean_parent vacuously (the AD limbs fail
+            # open while het/hom_alt fail closed — see genotype.sample_qc_ad_measured). Track it so
+            # a de novo affirmed by an unmeasured parent is distinguishable from one affirmed by a
+            # measured one; a GATK ref-block 0/0 parent has exactly this shape.
+            parents_ad = G.sample_qc_ad_measured(v, m, "clean_parent")
             if not male_x:
                 parents_clean = parents_clean and G.sample_qc(v, d, thr, "clean_parent")
+                parents_ad = parents_ad and G.sample_qc_ad_measured(v, d, "clean_parent")
             ok = (G.sample_qc(v, c, thr, child_kind) and parents_clean and rare(v, dom_max))
             if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
                 ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
@@ -206,6 +212,8 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 ok = False  # tag exists in this callset but not a hiConf de novo for THIS child
             if ok:
                 r = base_row(trio_id, v, gt, "denovo_x_hemi" if male_x else "denovo", cfg=cfg)
+                if not parents_ad:
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "parent_ad_unmeasured"
                 if crosscheck:
                     r["review_prior_crosscheck"] = "1"
                 rows.append(r)
@@ -266,7 +274,14 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 # `0/.` parent is reported as HOM_REF, not UNKNOWN — hence strict_gt=True below.
                 mom_clear = gmm == G.HOM_REF and G.sample_qc(v, m, thr, "hom_ref")
                 dad_clear = gd == G.HOM_REF and G.sample_qc(v, d, thr, "hom_ref")
+                # ...and whether that clearance rested on an actual measurement. hom_ref passes
+                # vacuously with no AD, and mom_clear/dad_clear are the ONLY evidence a
+                # compound-het pair is in TRANS — so a vacuous pass here silently manufactures
+                # phase. Never-drop: the call still stands, it is flagged.
+                mom_meas = G.sample_qc_ad_measured(v, m, "hom_ref")
+                dad_meas = G.sample_qc_ad_measured(v, d, "hom_ref")
                 unverified = False
+                vacuous = False
                 if gmm == G.HOM_REF and gd == G.HOM_REF:
                     # only a genuinely de novo het may pair in trans; require BOTH parents to
                     # pass cleanliness QC, else a dropped-out parental het masquerades as de novo
@@ -290,14 +305,16 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 elif mom_carries:
                     origin = "mat" if mom_ok else None
                     unverified = not dad_clear
+                    vacuous = dad_clear and not dad_meas
                 elif dad_carries:
                     origin = "pat" if dad_ok else None
                     unverified = not mom_clear
+                    vacuous = mom_clear and not mom_meas
                 else:
                     origin = None                # a parent no-call — inheritance unestablished
                 if origin:
                     key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
-                    hets.setdefault(gene, []).append((origin, v, key, unverified))
+                    hets.setdefault(gene, []).append((origin, v, key, unverified, vacuous))
 
     # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
     # A mat×pat pair is trans BY DESCENT (confirmed). A pair with a DE NOVO leg is NOT phase-
@@ -309,12 +326,12 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     pair_n = 0
     for gene, cands in hets.items():
         by = {"mat": [], "pat": [], "denovo": [], "both": []}
-        for origin, v, key, unver in cands:
-            by[origin].append((v, key, unver))
-        denovo_keys = {k for _, k, _ in by["denovo"]}
+        for origin, v, key, unver, vac in cands:
+            by[origin].append((v, key, unver, vac))
+        denovo_keys = {k for _, k, _, _ in by["denovo"]}
         pairs = [(a, b) for a in by["mat"] for b in by["pat"] + by["denovo"]]
         pairs += [(a, b) for a in by["pat"] for b in by["denovo"]]
-        for (va, ka, ua), (vb, kb, ub) in pairs:
+        for (va, ka, ua, wa), (vb, kb, ub, wb) in pairs:
             pair_n += 1
             pid = f"{trio_id}:CH{pair_n}"
             unphased = ka in denovo_keys or kb in denovo_keys
@@ -330,6 +347,12 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 pair_flags.append("unphased_denovo_partner")
             if ua or ub:
                 pair_flags.append("origin_unverified")
+            # The trans evidence PASSED but rested on a parent with no allele-depth data, so the
+            # phase is inferred from a genotype call alone. Distinct from origin_unverified (which
+            # means the test FAILED): this one is a vacuous pass, and without the flag it is
+            # indistinguishable in the output from a measured one.
+            if wa or wb:
+                pair_flags.append("trans_evidence_unmeasured")
             for v in (va, vb):
                 r = tag_strict(base_row(trio_id, v, gt, "compound_het", pid, cfg=cfg), v)
                 for fl in pair_flags:
@@ -340,12 +363,16 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----
     if emit_dominant:
         for gene, cands in hets.items():
-            for origin, v, key, unver in cands:
+            for origin, v, key, unver, vac in cands:
                 if origin in ("mat", "pat", "both") and key not in consumed and rare(v, dom_max):
                     r = base_row(trio_id, v, gt, "dominant", cfg=cfg)
                     r["flags"] = f"origin={origin}"
                     if unver:
                         r["flags"] += ";origin_unverified"
+                    # the non-transmitting parent PASSED cleanliness but carried no allele-depth
+                    # data, so parent-of-origin rests on a genotype call alone
+                    if vac:
+                        r["flags"] += ";parent_ad_unmeasured"
                     rows.append(r)
     return rows, n_plp_inert
 
