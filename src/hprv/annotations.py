@@ -271,47 +271,66 @@ def nhomalt(variant) -> Optional[int]:
     return None if v is None else int(v)
 
 
-def frequency(variant, cfg=None) -> Optional[float]:
-    """The rarity field every gate reads — the single chokepoint for population frequency.
+def rarity_oracle(cfg=None) -> str:
+    """``faf95`` | ``grpmax_proxy`` — the ONE frequency oracle this run uses, for every variant.
 
-    **Precedence: faf95, then the grpmax point-estimate proxy.** Never MAX_AF, never a global AF —
-    those fail in opposite directions and there is no safe single fallback (golden rule 2).
+    Deliberately a RUN-LEVEL constant, not a per-variant choice. An earlier design preferred faf95
+    and fell back to the proxy per variant; that made two variants in one run comparable on
+    different quantities and impossible to describe in a methods section. It also got the
+    fallback direction wrong (see ``frequency()``). One oracle, chosen in config, recorded in the
+    audit, and never crossed at runtime.
 
-    faf95 is preferred because it is the quantity the frequency filter is *supposed* to use: a CI
-    lower bound, so a gate on it only fires when the allele is confidently common. The proxy is a
-    point estimate and therefore sits ~one CI-width HIGH on low-count alleles, discarding
-    candidates the interval never justified discarding. Consequence to expect when the gnomAD slim
-    is first supplied: the SAME cutoffs RETAIN MORE, not fewer.
-
-    Falling back to the proxy when faf95 is absent is deliberate and is the STRINGENT direction:
-    absent faf95 means no group has a confidently non-zero AF, and the proxy is >= faf95 wherever
-    both exist, so the fallback can only ever filter more — never silently retain something faf95
-    would have caught.
-
-    **An absent faf95 on a variant gnomAD HAS is faf95 = 0, not "unknown".** gnomAD emits
-    ``fafmax`` as MISSING rather than as 0 wherever no ancestry group's CI lower bound exceeds
-    zero, and on a chr22 sample that is 80% of records — overwhelmingly singletons (of the rows
-    with no faf95 but a proxy >= 1e-4, **96.5% are AC <= 2**). Falling back to the point estimate
-    there would filter a variant on the basis of one or two observed alleles, which is precisely
-    the error faf95 exists to prevent (Whiffin 2017). So when the variant is present in the gnomAD
-    slim, an absent faf95 resolves to **0.0** — rarest — and the proxy is NOT consulted.
-
-    The proxy is consulted only when gnomAD has no record of the variant at all, where it is the
-    only estimate available. That distinction is why ``gnomad_AF_joint`` is transferred: it is the
-    witness that gnomAD looked. Without it the two cases are indistinguishable.
-
-    `cfg` selects the oracle (`resources.gnomad.oracle`: faf95 | grpmax_proxy) and defaults to
-    faf95. Passing None keeps faf95 precedence, which is inert when the transfer did not run.
+    ``resources.gnomad.oracle``, default ``grpmax_proxy`` — the behaviour that needs no extra
+    resource. Selecting ``faf95`` requires the gnomAD joint slim; ``run_pipeline.sh`` HALTS at
+    preflight rather than quietly running on the other quantity.
     """
-    if cfg is not None:
-        from .config import get as _get
-        if str(_get(cfg, "resources.gnomad.oracle", "faf95")).lower() == "grpmax_proxy":
-            return grpmax_af(variant)
-    f = faf95(variant)
-    if f is not None:
-        return f
-    if gnomad_observed(variant):
-        return 0.0        # gnomAD looked; no group's 95% CI lower bound clears zero
+    from .config import get as _get
+    v = str(_get(cfg or {}, "resources.gnomad.oracle", "grpmax_proxy")).strip().lower()
+    return "faf95" if v == "faf95" else "grpmax_proxy"
+
+
+def rarity_basis(variant, cfg=None) -> str:
+    """How this variant's rarity value arose WITHIN the chosen oracle: ``measured`` |
+    ``zero_ci`` | ``absent``.
+
+    Provenance, not a second oracle — the quantity is the same for every row. ``zero_ci`` is the
+    faf95-arm case where gnomAD HAS the allele but published no filtering AF, meaning no ancestry
+    group's 95% CI lower bound clears zero (80% of a chr22 sample). That resolves to 0.0, and it
+    is worth distinguishing from ``absent`` because the two are different facts: gnomAD looked and
+    could not bound the frequency, versus gnomAD has no record at all.
+    """
+    if rarity_oracle(cfg) == "faf95":
+        if faf95(variant) is not None:
+            return "measured"
+        return "zero_ci" if gnomad_observed(variant) else "absent"
+    return "measured" if grpmax_af(variant) is not None else "absent"
+
+
+def frequency(variant, cfg=None) -> Optional[float]:
+    """The rarity value every gate reads — the single chokepoint for population frequency.
+
+    **ONE oracle per run** (``rarity_oracle``), never a per-variant blend. Both arms are gnomAD
+    v4.1; they differ in the QUANTITY and in how they reach it:
+
+    * ``faf95`` — the published filtering allele frequency from the gnomAD JOINT sites slim: the
+      lower bound of the 95% Poisson CI, the quantity ACMG/ClinGen specify for frequency
+      filtering (Whiffin 2017). Absent-but-present-in-gnomAD resolves to **0.0**, because gnomAD
+      emits fafmax as missing rather than as 0 wherever no group's CI clears zero; of that class
+      96.5% are AC <= 2, and filtering a singleton on a point estimate is the error faf95 exists
+      to prevent. Absent from the slim entirely -> ``None`` (rarest).
+    * ``grpmax_proxy`` — a POINT ESTIMATE from the VEP cache: max AF over the grpmax-eligible
+      ancestry groups. Same underlying dataset, no CI correction available (the cache carries no
+      AC/AN), so it sits ~one CI-width high on low-count alleles and errs toward dropping.
+
+    Neither arm ever consults the other. ``None`` means the chosen oracle has no value for this
+    allele and every gate treats it as rarest. MAX_AF and global AFs are never consulted by
+    either arm (golden rule 2).
+    """
+    if rarity_oracle(cfg) == "faf95":
+        f = faf95(variant)
+        if f is not None:
+            return f
+        return 0.0 if gnomad_observed(variant) else None
     return grpmax_af(variant)
 
 
@@ -326,36 +345,6 @@ def gnomad_observed(variant) -> bool:
     return _max_float(variant, "gnomad_af_joint") is not None
 
 
-def rarity_oracle(variant, cfg=None) -> str:
-    """Which arm produced ``frequency()`` for THIS variant: the value's provenance, reported.
-
-    ``faf95`` | ``faf95_zero`` | ``grpmax_proxy`` | ``absent``. A single run mixes them, so a
-    run-level label would be wrong. ``faf95_zero`` is deliberately distinct from ``faf95``: the
-    value is a real measurement (gnomAD looked and the CI lower bound is 0), but the underlying
-    allele count is tiny, so a reviewer reading a "rarest" band should be able to see that it
-    rests on an interval rather than on absence from the database.
-    """
-    if cfg is not None:
-        from .config import get as _get
-        if str(_get(cfg, "resources.gnomad.oracle", "faf95")).lower() == "grpmax_proxy":
-            return "grpmax_proxy" if grpmax_af(variant) is not None else "absent"
-    if faf95(variant) is not None:
-        return "faf95"
-    if gnomad_observed(variant):
-        return "faf95_zero"
-    return "grpmax_proxy" if grpmax_af(variant) is not None else "absent"
-
-
-# --- functional predictors ---------------------------------------------------
-# CADD (genome-wide), SpliceAI (splice), and the calibrated MISSENSE pair REVEL +
-# AlphaMissense, all VEP plugins. MPC / MetaRNN remain unwired (they would need dbNSFP,
-# whose pinned URL is dead upstream).
-#
-# The missense pair is INERT AT THE SCREEN by construction and always will be: they are
-# missense-only scores, every missense is IMPACT=MODERATE, and selection.py keeps MODERATE
-# at the impact rung and returns BEFORE any predictor is consulted. Their Step-3 keep-
-# reasons are asserted never to fire in CI. Their only consumer is Step 9's missense tier,
-# where they replace an off-label CADD rank with a ClinGen-calibrated one.
 def cadd(variant) -> Optional[float]:
     return _max_float(variant, "cadd")
 

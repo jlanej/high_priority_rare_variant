@@ -426,42 +426,54 @@ def main(argv=None) -> int:
                   for r in am),
               "am_class rides along (the PLUGIN's key name, not dbNSFP's AlphaMissense_score)")
 
-        # --- faf95: the gnomAD joint transfer, the rarity oracle, and the nhomalt tell.
-        # The mock ships a real (tiny) gnomAD slim, so this exercises the actual `bcftools
-        # annotate` transfer, the 0-match guard, and the faf95-before-proxy precedence — not a
-        # faked INFO field. GENE2 carries faf95=8e-05 against a proxy of 5e-04: the CI-corrected
-        # value is the RARER one, which is the whole point (a point estimate sits ~one CI-width
-        # high and discards candidates the interval never justified discarding). ---
+        # --- rarity: ONE oracle per run, both arms proven on the real transferred VCF. ---
         faf = [r for r in pv if r["faf95"]]
-        check(faf, "the gnomAD joint transfer reached Step 9 (faf95 populated)")
-        check(all(r["rarity_oracle"] == "faf95" for r in faf),
-              "a variant WITH faf95 is ranked on faf95, not on the point-estimate proxy")
-        check(all(float(r["faf95"]) < float(r["grpmax_af"]) for r in faf if r["grpmax_af"]),
-              "faf95 (a CI LOWER bound) is below the point estimate, as it must be")
+        check(faf, "the gnomAD joint transfer reached Step 9 (faf95 column populated)")
+        check(all(float(r["faf95"]) < float(r["grpmax_af"]) for r in faf
+                  if r["grpmax_af"] and float(r["grpmax_af"]) > 0),
+              "faf95 (a CI LOWER bound) sits below the point estimate, as it must")
         check(all(r["faf95_group"] in ("afr", "amr", "eas", "mid", "nfe", "sas") for r in faf),
               "faf95_group names a FAF-eligible ancestry group (GRPMAX_POPS + mid)")
-        # THE DISTINCTION THAT MATTERS. gnomAD emits fafmax as MISSING, never as 0, wherever no
-        # ancestry group's CI lower bound clears zero — and of the records with no faf95 but a
-        # proxy >= 1e-4, 96.5% are AC <= 2. So "no faf95" splits in two, and the two demand
-        # opposite fallbacks:
-        #   * gnomAD HAS a record  -> faf95 is 0 -> RAREST. Using the proxy here would filter a
-        #     variant on one or two observed alleles, exactly what faf95 exists to prevent.
-        #   * gnomAD has NO record -> the proxy is the only estimate available.
-        fz = [r for r in pv if r["rarity_oracle"] == "faf95_zero"]
-        check(fz, "the faf95_zero case is exercised (gnomAD has the allele, published no faf95)")
-        check(all(float(r["rarity_af"]) == 0.0 for r in fz),
-              "faf95_zero resolves to 0 — rarest — NOT to the inflated point estimate")
-        check(all(float(r["grpmax_af"]) > 0 for r in fz if r["grpmax_af"]),
-              "the faf95_zero fixture really does carry a non-zero proxy (else it proves nothing)")
-        check(all(r["rarity_strength"] in ("strong", "moderate") for r in fz),
-              "a faf95_zero variant ranks on faf95=0, not on the proxy that would demote it")
-        prox = [r for r in pv if r["rarity_oracle"] == "grpmax_proxy"]
-        check(prox and all(not r["faf95"] for r in prox),
-              "the proxy arm is used only where faf95 is absent, and SAYS so (rarity_oracle)")
-        none = [r for r in pv if not r["faf95"] and not r["grpmax_af"]]
-        check(all(r["rarity_oracle"] == "absent" and r["rarity_strength"] == "unknown"
-                  for r in none),
-              "absent on both oracles reads unknown — never a measured zero")
+        # ONE ORACLE PER RUN. rarity_oracle is a run-level constant (the mock selects faf95);
+        # rarity_basis is the per-variant provenance WITHIN that oracle. The arms never cross —
+        # an earlier design blended them per variant, which made two rows in one run comparable
+        # on different quantities and got the fallback direction wrong for singletons.
+        oracles = {r["rarity_oracle"] for r in pv if r["rarity_oracle"]}
+        check(oracles == {"grpmax_proxy"},
+              f"exactly ONE rarity oracle for the whole run (got {sorted(oracles)})")
+        # BOTH ARMS, against the REAL transferred per-trio VCF. The pipeline ran on the default
+        # (proxy) oracle above; this proves the faf95 arm on the same bcftools-transferred data
+        # without a second full run — and proves the arms never cross.
+        import glob as _glob
+        from cyvcf2 import VCF as _VCF
+        from hprv import annotations as _A
+        FAF = {"resources": {"gnomad": {"oracle": "faf95"}}}
+        PRX = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+        seen = {"measured": 0, "zero_ci": 0, "absent": 0}
+        crossed = []
+        for _tv in _glob.glob(os.path.join(W, "trios", "*.candidates.annotated.vcf.gz")):
+            for _v in _VCF(_tv):
+                b = _A.rarity_basis(_v, FAF)
+                seen[b] = seen.get(b, 0) + 1
+                f, px = _A.faf95(_v), _A.grpmax_af(_v)
+                # the faf95 arm must never return the proxy's value, and vice versa
+                if f is None and px is not None and _A.frequency(_v, FAF) == px:
+                    crossed.append(("faf95 arm returned the proxy", _v.CHROM, _v.POS))
+                if f is not None and px is not None and f != px and _A.frequency(_v, PRX) == f:
+                    crossed.append(("proxy arm returned faf95", _v.CHROM, _v.POS))
+                if b == "zero_ci":
+                    if _A.frequency(_v, FAF) != 0.0:
+                        crossed.append(("zero_ci did not resolve to 0", _v.CHROM, _v.POS))
+                if b == "measured" and _A.frequency(_v, FAF) != f:
+                    crossed.append(("measured != faf95", _v.CHROM, _v.POS))
+        check(not crossed, f"the two oracle arms NEVER cross on real data ({crossed[:2]})")
+        check(seen["measured"] > 0, "the faf95 arm has measured rows on the real transferred VCF")
+        check(seen["zero_ci"] > 0,
+              "the zero_ci basis is exercised (gnomAD has the allele, published no faf95)")
+        check(all(r["rarity_af"] == "" and r["rarity_strength"] == "unknown"
+                  for r in pv if r["rarity_basis"] == "absent"),
+              "absent reads unknown — never a measured zero")
+
         # nhomalt: the recessive false-positive tell, reported and costing nothing by default
         nh = [r for r in pv if r["nhomalt_recessive_conflict"] == "1"]
         check(nh, "a biallelic call with gnomAD homozygotes raises nhomalt_recessive_conflict")

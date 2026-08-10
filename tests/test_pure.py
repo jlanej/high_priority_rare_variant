@@ -81,30 +81,23 @@ def test_annotations_frequency_and_predictors():
     assert A.frequency(FakeVar({})) is None               # absent = rarest
 
 
-def test_frequency_prefers_faf95_then_proxy_never_max_af():
-    """The rarity chokepoint's precedence: faf95 -> grpmax proxy. Never MAX_AF, never global AF.
+def test_frequency_uses_exactly_one_oracle_per_run():
+    """ONE frequency oracle for the whole run — the arms must NEVER cross.
 
-    faf95 is the quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017) — the LOWER
-    bound of the 95% CI — so a gate on it fires only when the allele is confidently common. The
-    proxy is a point estimate and sits ~one CI-width HIGH, discarding candidates the interval
-    never justified discarding. Verified against the real gnomAD v4.1 joint data: the FAF group
-    set is afr/amr/eas/mid/nfe/sas, which EXCLUDES the bottlenecked ami/asj/fin, so faf95 does not
-    reintroduce the MAX_AF trap.
+    An earlier design preferred faf95 and fell back to the grpmax proxy per variant. Two problems,
+    both real: (a) two variants in one run were then compared on different quantities, which is
+    undescribable in a methods section; and (b) the fallback direction was wrong — gnomAD emits
+    fafmax as MISSING (never as 0) wherever no group's CI clears zero, and of the records with no
+    faf95 but a proxy >= 1e-4, 96.5% are AC <= 2, so consulting the point estimate there filtered
+    singletons on an inflated AF, exactly what faf95 exists to prevent.
 
-    Falling back to the proxy when faf95 is absent is the STRINGENT direction and is deliberate:
-    absent faf95 means no group has a confidently non-zero AF, and proxy >= faf95 wherever both
-    exist, so the fallback can only ever filter MORE — never silently retain something faf95
-    would have caught.
+    Both arms are gnomAD v4.1 — the proxy is the VEP cache's own gnomAD AFs — so this is a choice
+    of QUANTITY (CI lower bound vs point estimate), not of database.
     """
     from hprv import annotations as AN
-
-    class V:
-        def __init__(self, **info): self.INFO = info
-        # cyvcf2's INFO.get semantics
-    def mk(**info):
-        v = V(); v.INFO = dict(info)
-        v.INFO.get = info.get           # noqa: E731
-        return v
+    F = AN.F
+    FAF = {"resources": {"gnomad": {"oracle": "faf95"}}}
+    PRX = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
 
     def _v(**info):
         class I(dict):
@@ -113,69 +106,80 @@ def test_frequency_prefers_faf95_then_proxy_never_max_af():
         o.INFO = I(info)
         return o
 
-    def freq(cfg=None, **info):
-        return AN.frequency(_v(**info), cfg)
+    # the oracle is RUN-level and constant; the default needs no extra resource
+    assert AN.rarity_oracle(FAF) == "faf95"
+    assert AN.rarity_oracle(PRX) == "grpmax_proxy"
+    assert AN.rarity_oracle(None) == "grpmax_proxy", "the default must not require the gnomAD slim"
+    assert AN.rarity_oracle({}) == "grpmax_proxy"
 
-    DOM = 1.0e-4
-    keep = lambda f: f is None or f < DOM        # noqa: E731
+    both = _v(**{F["faf95"]: "6e-05", F["gnomad_af_joint"]: "8e-05",
+                 F["gnomade_nfe_af"]: "0.00025"})
+    # each arm returns ITS OWN quantity and ignores the other entirely
+    assert AN.frequency(both, FAF) == 6e-05
+    assert AN.frequency(both, PRX) == 0.00025
+    assert AN.rarity_basis(both, FAF) == "measured"
+    assert AN.rarity_basis(both, PRX) == "measured"
 
-    F = AN.F
-    # faf95 present -> used, even though the proxy is 4x higher
-    assert freq(**{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
-    # faf95 absent AND gnomAD has no record -> the proxy is the only estimate there is
-    assert freq(**{F["gnomade_nfe_af"]: "9e-05"}) == 9e-05
+    # faf95 arm: gnomAD HAS the allele but published no fafmax -> 0.0 (rarest), basis=zero_ci.
+    # The proxy is NOT consulted, even though it is present and would have failed the gate.
+    singleton = _v(**{F["gnomad_af_joint"]: "8.25e-05", F["gnomade_nfe_af"]: "0.00022"})
+    assert AN.frequency(singleton, FAF) == 0.0
+    assert AN.rarity_basis(singleton, FAF) == "zero_ci"
+    assert AN.frequency(singleton, FAF) < 1.0e-4 <= 0.00022, \
+        "the singleton survives the dominant gate on faf95 and would fail on the point estimate"
+    # ...and on the proxy arm the SAME variant reads the point estimate, consistently
+    assert AN.frequency(singleton, PRX) == 0.00022
+    assert AN.rarity_basis(singleton, PRX) == "measured"
 
-    # THE CASE THAT MATTERS. gnomAD HAS the variant but published no faf95 -> faf95 is 0, not
-    # unknown: gnomAD emits fafmax as MISSING (never as 0) wherever no group's CI lower bound
-    # clears zero, and of the rows with no faf95 but a proxy >= 1e-4, 96.5% are AC <= 2. Falling
-    # back to the point estimate there filters a variant on one or two observed alleles — exactly
-    # what faf95 exists to prevent. gnomad_AF_joint is the witness that gnomAD looked.
-    singleton = {F["gnomad_af_joint"]: "8.25e-05",      # present => gnomAD has a record
-                 F["gnomade_nfe_af"]: "0.00022"}       # a singleton's inflated point estimate
-    assert freq(**singleton) == 0.0, \
-        "a gnomAD-observed variant with no faf95 must resolve to 0 (rarest), not to the proxy"
-    assert keep(freq(**singleton)) and not keep(0.00022), \
-        "the singleton must survive the dominant gate; the point estimate would have dropped it"
-    assert AN.rarity_oracle(_v(**singleton)) == "faf95_zero", \
-        "faf95_zero must be distinguishable from a measured faf95 and from the proxy"
-    # ...and with NO gnomAD record the same proxy value still gates normally
-    assert freq(**{F["gnomade_nfe_af"]: "0.00022"}) == 0.00022
-    # both absent -> None (rarest); an absent AF is never a measured zero
-    assert freq() is None
-    # MAX_AF must NEVER be consulted, at any precedence
-    assert freq(**{F["max_af"]: "0.02"}) is None, "MAX_AF leaked into the rarity oracle"
-    # gnomad_AF_joint is a WITNESS (gnomAD has a record), never a frequency VALUE. Present with
-    # no faf95 => faf95_zero => 0.0. If its value ever leaked through this would read 0.02.
-    assert freq(**{F["gnomad_af_joint"]: "0.02"}) == 0.0, "a global AF leaked into the oracle"
-    # the config switch pins the pre-transfer behaviour bit-for-bit
-    proxy_cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
-    assert freq(proxy_cfg, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 0.00025
-    # ...and the default (no cfg) prefers faf95
-    assert freq(None, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
+    # nothing at all -> None (rarest) on both arms, never a measured zero
+    empty = _v()
+    assert AN.frequency(empty, FAF) is None and AN.rarity_basis(empty, FAF) == "absent"
+    assert AN.frequency(empty, PRX) is None and AN.rarity_basis(empty, PRX) == "absent"
 
-    # THE DIRECTIONAL CLAIM, pinned: at the dominant gate the same cutoff RETAINS MORE on faf95.
-    both = {F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}
-    assert keep(freq(**both)) and not keep(freq(proxy_cfg, **both)), \
-        "faf95 must retain a variant the point-estimate proxy would drop"
+    # the faf95 arm must not read the proxy even when faf95 is absent AND gnomAD has no record
+    proxy_only = _v(**{F["gnomade_nfe_af"]: "0.02"})
+    assert AN.frequency(proxy_only, FAF) is None, "the faf95 arm consulted the proxy"
+    assert AN.frequency(proxy_only, PRX) == 0.02
+
+    # MAX_AF and the global AFs are never the oracle on EITHER arm (golden rule 2)
+    for cfg in (FAF, PRX):
+        assert AN.frequency(_v(**{F["max_af"]: "0.03"}), cfg) is None, "MAX_AF leaked"
+        assert AN.frequency(_v(**{F["gnomade_af"]: "0.03"}), cfg) is None, "a global AF leaked"
+    # gnomad_AF_joint is a WITNESS on the faf95 arm, never a value
+    assert AN.frequency(_v(**{F["gnomad_af_joint"]: "0.03"}), FAF) == 0.0
 
 
-def test_prioritize_rarity_oracle_matches_the_screen():
-    """Step 9 must RANK on the same quantity the screen GATED on, and say which per variant.
+def test_prioritize_consumes_the_screens_resolved_rarity():
+    """Step 9 must RANK on the value the SCREEN resolved, and must not re-derive it.
 
-    If Step 9 read the proxy while the screen gated on faf95, a variant kept because its CI lower
-    bound was low would then be scored as though it carried the higher point estimate — penalised
-    for the very reason it was (correctly) retained.
+    The raw columns for "gnomAD published no faf95" (=> 0, rarest) and "gnomAD has no record"
+    (=> absent) are IDENTICAL — faf95 blank either way. So a local re-derivation in Step 9 is
+    structurally unable to tell them apart, and would rank a singleton on the point estimate that
+    the screen correctly declined to gate it on. Step 5 resolves once; Step 9 consumes.
     """
     from hprv import prioritize as PR
     base = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T",
             "inheritance": "dominant", "child_gt": "0/1"}
-    r = PR.score_variant({**base, "faf95": "6e-05", "grpmax_af": "0.00025"}, {}, {})
+    # the screen said 0.0 via the faf95 arm; the proxy column disagrees and MUST be ignored
+    r = PR.score_variant({**base, "rarity_af": "0", "rarity_oracle": "faf95",
+                          "rarity_basis": "zero_ci", "grpmax_af": "0.00022"}, {}, {})
+    assert r["rarity_oracle"] == "faf95" and r["rarity_basis"] == "zero_ci"
+    assert r["rarity_strength"] == PR.rarity_strength("0", {}), \
+        "Step 9 re-derived from the proxy instead of consuming the screen's value"
+    # a measured faf95 rides through unchanged
+    r = PR.score_variant({**base, "rarity_af": "6e-05", "rarity_oracle": "faf95",
+                          "rarity_basis": "measured", "grpmax_af": "0.00025"}, {}, {})
     assert r["rarity_oracle"] == "faf95"
-    assert r["rarity_strength"] == PR.rarity_strength("6e-05", {}), "ranked on the wrong quantity"
+    assert r["rarity_strength"] == PR.rarity_strength("6e-05", {})
+    # the proxy arm is carried verbatim too
+    r = PR.score_variant({**base, "rarity_af": "9e-05", "rarity_oracle": "grpmax_proxy",
+                          "rarity_basis": "measured"}, {}, {})
+    assert r["rarity_oracle"] == "grpmax_proxy"
+    # legacy Step-8 tables (no rarity_* columns) still score, via the documented fallback path
     r = PR.score_variant({**base, "grpmax_af": "9e-05"}, {}, {})
     assert r["rarity_oracle"] == "grpmax_proxy"
     r = PR.score_variant(dict(base), {}, {})
-    assert r["rarity_oracle"] == "absent" and r["rarity_strength"] == "unknown"
+    assert r["rarity_strength"] == "unknown"
 
 
 def test_prioritize_nhomalt_conflict_is_reported_and_costs_nothing_by_default():

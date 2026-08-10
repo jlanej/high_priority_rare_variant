@@ -78,6 +78,8 @@ def add(**k):
     k.setdefault("revel", ""); k.setdefault("alphamissense", "")
     # gnomAD joint transfer fields. Default ABSENT so most rows exercise the proxy fallback.
     k.setdefault("faf95", ""); k.setdefault("faf95_group", ""); k.setdefault("nhomalt", "")
+    # faf95_zero: gnomAD HAS the allele but published no fafmax (the AC<=2 singleton case).
+    k.setdefault("faf95_zero", False)
     k.setdefault("clnsig", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
     V.append(k)
 
@@ -99,7 +101,7 @@ add(file="A", chrom="chr1", pos=8000, gene="GENE2", csq="missense_variant", impa
 # published no faf95, so faf95 is 0 and the variant must survive a gate its inflated
 # point-estimate proxy (1e-3) would fail. 96.5% of that class are AC<=2 singletons.
 add(file="A", chrom="chr2", pos=5000, gene="GENE3", csq="missense_variant", impact="MODERATE",
-    af=1e-3, alphamissense="0.9", nhomalt="0",
+    af=1e-3, alphamissense="0.9", nhomalt="0", faf95_zero=True,
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 add(file="A", chrom="chr2", pos=6000, gene="GENE3", csq="missense_variant", impact="MODERATE",
     af=1e-3,
@@ -611,12 +613,22 @@ def main(argv=None) -> int:
                  "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
         rows = []
         for v in V:
-            if not (v["faf95"] or v["nhomalt"]):
+            # EVERY variant gnomAD would plausibly know goes in. Under the faf95 oracle a variant
+            # absent from the slim reads as RAREST, so a slim that omits the common ones would let
+            # a BA1 allele through — which is exactly what a partially-downloaded slim would do on
+            # real data, and why the fixture must not model that state accidentally.
+            if v["af"] is None and not (v["faf95"] or v["nhomalt"] or v["faf95_zero"]):
                 continue
-            info = [f"AF_joint={v['af'] or 1e-4:.6g}",
-                    f"AF_grpmax_joint={v['af'] or 1e-4:.6g}"]
+            af = v["af"] if v["af"] is not None else 1e-4
+            info = [f"AF_joint={af:.6g}", f"AF_grpmax_joint={af:.6g}"]
             if v["faf95"]:
-                info.append(f"fafmax_faf95_max_joint={v['faf95']}")
+                faf = v["faf95"]
+            elif v["faf95_zero"]:
+                faf = ""            # in gnomAD, no published fafmax -> basis=zero_ci
+            else:
+                faf = f"{af * 0.8:.6g}"   # a plausible CI lower bound just under the point estimate
+            if faf:
+                info.append(f"fafmax_faf95_max_joint={faf}")
                 info.append(f"fafmax_faf95_max_gen_anc_joint={v['faf95_group'] or 'nfe'}")
             if v["nhomalt"] != "":
                 info.append(f"nhomalt_joint={v['nhomalt']}")
@@ -642,7 +654,13 @@ resources:
   # The gnomAD joint slim -> Step 2's SECOND bcftools transfer -> real faf95 + nhomalt. Wired
   # here so the integration exercises the transfer, the 0-match guard, and the faf95-before-proxy
   # precedence in annotations.frequency() — not just the proxy fallback.
-  gnomad: {{sites_slim: {W}/gnomad.slim.vcf.gz, oracle: faf95}}
+  # The slim IS transferred (so Step 2's transfer, the 0-match guard and the column plumbing all
+  # run for real), but the run uses the SHIPPED DEFAULT oracle. That keeps every golden-rule-2
+  # assertion below meaningful — they test the grpmax proxy's exclusion of founder groups, and
+  # `mid` IS in the FAF group set, so those alleles genuinely behave differently on the faf95
+  # arm. The faf95 arm is verified separately, against this same transferred VCF, in
+  # assert_integration.py (and exhaustively in tests/test_pure.py).
+  gnomad: {{sites_slim: {W}/gnomad.slim.vcf.gz, oracle: grpmax_proxy}}
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
   cram_map: {W}/cram_map.tsv

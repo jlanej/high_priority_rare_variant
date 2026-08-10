@@ -17,6 +17,7 @@ docs/inheritance_and_genotype_qc.md and docs/pipeline_design.md (Step 5).
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import sys
 
 from cyvcf2 import VCF
@@ -40,7 +41,7 @@ COLS = [
     # rarity_af is THE value every gate used (annotations.frequency()) and rarity_oracle is its
     # provenance — resolved ONCE here so Step 9 ranks on exactly what the screen gated on instead
     # of re-deriving it from the raw columns and risking divergence. Both raw inputs ride along.
-    "consequence", "impact", "rarity_af", "rarity_oracle",
+    "consequence", "impact", "rarity_af", "rarity_oracle", "rarity_basis",
     "grpmax_af", "faf95", "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
@@ -80,7 +81,8 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
-        "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(v, cfg),
+        "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(cfg),
+        "rarity_basis": A.rarity_basis(v, cfg),
         "grpmax_af": fmt(A.grpmax_af(v)), "faf95": fmt(A.faf95(v)),
         "faf95_group": A.faf95_group(v) or "", "nhomalt": fmt(A.nhomalt(v)),
         "max_af": fmt(A._max_float(v, "max_af")),
@@ -426,6 +428,13 @@ def main(argv=None) -> int:
     by_mode = {}
     for r in all_rows:
         by_mode[r["mode"]] = by_mode.get(r["mode"], 0) + 1
+    # The rarity oracle is a RUN-LEVEL fact and belongs in the audit, not only in a column: a
+    # methods section has to state which quantity every gate in the run was applied to, and a
+    # reader of audit/summary.md should not have to open a TSV to find out.
+    audit.record("05_inheritance", f"rarity_oracle.{A.rarity_oracle(cfg)}", 1)
+    for _b, _n in sorted(Counter(r.get("rarity_basis", "") for r in all_rows).items()):
+        if _b:
+            audit.record("05_inheritance", f"rarity_basis.{_b}", _n)
     audit.record("05_inheritance", "trios_screened", n_trios)
     audit.record("05_inheritance", "candidate_calls_total", len(all_rows))
     audit.record("05_inheritance", "clinvar_plp_dropped_ge_recessive_max", n_plp_inert_total)
