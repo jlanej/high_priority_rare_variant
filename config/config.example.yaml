@@ -40,10 +40,11 @@ reference:
 # Provide the ones you have; steps that need a missing resource fail loudly with a
 # clear message rather than silently skipping annotation.
 # VEP-CENTRIC CONTRACT. The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS
-# (CADD, and optionally SpliceAI) — nothing else is bcftools-transferred in. Population frequency
-# (gnomAD v4.1 per-population AFs) and ClinVar (CLIN_SIG) come out of the cache itself via
-# --af_gnomade/--af_gnomadg and --check_existing. What that costs, in one place (details in
-# docs/allele_frequency.md):
+# (CADD, SpliceAI, REVEL, AlphaMissense) plus EXACTLY ONE bcftools transfer — the ClinVar sites
+# VCF, which supplies CLNREVSTAT (gold stars) that the cache carries at no price. Population
+# frequency (gnomAD v4.1 per-population AFs) and ClinVar CLIN_SIG come out of the cache itself via
+# --af_gnomade/--af_gnomadg and --check_existing. What the contract still costs, in one place
+# (details in docs/allele_frequency.md):
 #   * no faf95        — the cache has no AC/AN, so the 95% CI correction cannot be computed at
 #                       any price. Rarity uses a grpmax-PROXY point estimate instead, which runs
 #                       slightly stringent on low-count alleles (errs toward dropping).
@@ -53,9 +54,14 @@ reference:
 #                       detection. Caveat: the PRECOMPUTED set does not score every indel/context,
 #                       so a missing score is not "no effect" (it never drops, only fails to rescue).
 #   * no LOFTEE       — no HC/LC pLoF confidence (was near-inert for selection; matters for tiering).
-#   * no ClinVar stars— the >=2-star gate is unimplementable; unstarred P/LP is honored instead.
-#   * no REVEL/AlphaMissense/MPC — these were already inert for selection (missense-only scores,
-#                       and every missense is IMPACT=MODERATE, which is kept at an earlier branch).
+#   * ClinVar stars: WIRED — via the ClinVar VCF transfer (resources.clinvar.vcf) -> clinvar_stars
+#                       0-4. They RANK in Step 9 and never gate the screen: a >=2-star keep/drop
+#                       gate would violate never-drop, so unstarred P/LP is still honored at the
+#                       screen and merely ranked below a 3-star assertion.
+#   * REVEL/AlphaMissense: WIRED — VEP plugins (resources.vep.revel/alphamissense). They remain
+#                       INERT FOR SELECTION and always will be: missense-only scores, and every
+#                       missense is IMPACT=MODERATE, which is kept at an earlier branch. Their
+#                       consumer is Step 9's missense tier. MPC stays unwired (needs dbNSFP).
 resources:
   vep:
     cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
@@ -681,7 +687,7 @@ prioritization:
   # the total MUST NOT be read against Tavtigian's classification bands (P >= 10, LP 6-9,
   # VUS 0-5). The criteria are not ACMG criteria (a CADD-based term is not PP3); no phenotype,
   # segregation or functional evidence exists at all (audit A-7: no PP1/BS4, no affected status);
-  # the ClinVar term has no review-status gate; and the artifact-penalty terms have no ACMG
+  # the ClinVar term applies only an uncalibrated review-status damp (positive limb only), which is not ACMG PP5/BP6; and the artifact-penalty terms have no ACMG
   # analogue whatsoever. The column is named priority_points, never acmg_points, and no P/LP/VUS
   # label is ever emitted from it.
   #

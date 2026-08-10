@@ -1246,6 +1246,53 @@ def test_clinvar_stars_parses_every_rendering_and_absent_is_not_zero():
         "an unrecognised status is an unknown, not a zero-star assertion"
 
 
+def test_prioritize_tier_is_monotone_in_splice_evidence():
+    """Adding splice evidence must never LOWER a variant's tier, and must never erase the
+    missense evidence source.
+
+    The splice rungs return early. Once the missense branch gained a V4 rung (REVEL >= Pejaver
+    moderate), that early return became a SCORING INVERSION: a missense with revel=0.9 AND a
+    supporting spliceai_ds=0.25 scored V3 with missense_evidence_source="none", while the SAME
+    variant with ds=0.15 scored V4/revel. Strictly more evidence, strictly worse tier, and a
+    source column asserting no predictor spoke when REVEL had said 0.9. Reproduced against the
+    real function before the fix.
+
+    The two signals are independent mechanisms (amino-acid effect vs splice disruption), so the
+    combination takes the STRONGER tier and reports BOTH reasons.
+    """
+    from hprv import prioritize as PR
+    base = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T"}
+    idx = {t: i for i, t in enumerate(PR.VARIANT_TIERS)}
+
+    # the exact inversion, pinned
+    lo = PR.assign_variant_tier({**base, "revel": "0.9", "spliceai_ds": "0.15"}, {})
+    hi = PR.assign_variant_tier({**base, "revel": "0.9", "spliceai_ds": "0.25"}, {})
+    assert idx[hi["variant_tier"]] >= idx[lo["variant_tier"]], \
+        f"more splice evidence lowered the tier: {lo['variant_tier']} -> {hi['variant_tier']}"
+    assert hi["missense_evidence_source"] == "revel", \
+        f"a splice rung erased the missense source: {hi['missense_evidence_source']!r}"
+    assert "revel" in hi["variant_tier_reason"] and "spliceai" in hi["variant_tier_reason"], \
+        f"both signals must be reported: {hi['variant_tier_reason']!r}"
+
+    # monotone across the whole grid, for every REVEL band
+    for rev in ("", "0.1", "0.5", "0.7", "0.9"):
+        best = -1
+        for ds in ("", "0.05", "0.15", "0.25", "0.4", "0.6", "0.95"):
+            t = PR.assign_variant_tier({**base, "revel": rev, "spliceai_ds": ds}, {})["variant_tier"]
+            assert idx[t] >= best, f"revel={rev!r} ds={ds!r}: tier fell to {t}"
+            best = max(best, idx[t])
+
+    # a splice signal still wins on a BENIGN-REVEL missense (different mechanism), and says so
+    r = PR.assign_variant_tier({**base, "revel": "0.05", "spliceai_ds": "0.6"}, {})
+    assert r["variant_tier"] == "V4" and "revel=0.05" in r["variant_tier_reason"]
+
+    # non-missense paths are untouched by the merge
+    for cq, im in (("stop_gained", "HIGH"), ("intron_variant", "MODIFIER")):
+        r = PR.assign_variant_tier({"consequence": cq, "impact": im, "ref": "A", "alt": "T",
+                                    "spliceai_ds": "0.25", "cadd": "30"}, {})
+        assert r["missense_evidence_source"] == "none"
+
+
 def test_prioritize_missense_predictor_precedence():
     """REVEL -> AlphaMissense -> CADD(off-label) -> none, in that fixed order.
 

@@ -964,30 +964,20 @@ def assign_variant_tier(row, cfg=None) -> dict:
                                        f"&cadd={cadd:.3g}<{cadd_benign:g}&impact={imp}")
         return out
 
-    # V4 — strong splice, or an NMD-INDETERMINATE pLoF. V5 is defined so the ladder is complete
-    # and the implementation has a target, but it is UNREACHABLE today: every pLoF lands here.
-    if ds is not None and ds >= sai_strong:
-        out.update(variant_tier="V4",
-                   variant_tier_reason=f"spliceai_ds={ds:.3g}>={sai_strong:g}")
-        return out
-    if mec in ("plof", "canonical_splice") and imp == "HIGH":
-        note = ("canonical_splice_site" if mec == "canonical_splice" else "plof")
-        # Walker 2023 is explicit that a canonical site with a LOW SpliceAI score deserves
-        # scrutiny, not automatic Very Strong — so report the score beside the tier.
-        extra = "" if ds is None else f",spliceai_ds={ds:.3g}"
-        out.update(variant_tier="V4",
-                   variant_tier_reason=f"{note}:nmd_status=INDETERMINATE(V5_unreachable){extra}")
-        return out
-
-    # V3 — supporting splice, or a high-CADD missense. The CADD route is a DISCOVERY RANK, not
-    # PP3 evidence: 25.3 is Pejaver 2022's missense-only PP3-supporting value, but ClinGen SVI
-    # says commit to ONE predictor chosen before seeing results, and the calibrated choice is
-    # REVEL (PP3 0.644/0.773/0.932). So the tier carries missense_evidence_source so no
-    # downstream reader mistakes it for a calibrated call.
-    if ds is not None and ds >= sai_sup:
-        out.update(variant_tier="V3", variant_tier_reason=f"spliceai_ds={ds:.3g}>={sai_sup:g}")
-        return out
-    if mec == "missense":
+    # The calibrated missense predictors, factored OUT of the ladder so the SPLICE rungs below
+    # can MERGE with this instead of short-circuiting past it. Returns None for a non-missense.
+    #
+    # Why this is a function and not an inline branch: the splice rungs return early, and once
+    # the missense branch gained a V4 rung (REVEL >= moderate) that early return became a
+    # SCORING INVERSION — a missense with revel=0.9 AND a supporting spliceai_ds=0.25 scored V3
+    # with missense_evidence_source="none", while the SAME variant with ds=0.15 scored V4/revel.
+    # Strictly more evidence, strictly worse tier, and a source column asserting that no
+    # predictor spoke when REVEL had said 0.9. The two signals are independent mechanisms
+    # (amino-acid effect vs splice disruption), so the honest combination is the STRONGER tier
+    # with BOTH reported — never a race between two early returns.
+    def _missense_result():
+        if mec != "missense":
+            return None
         # PREDICTOR PRECEDENCE, and it is deliberate. ClinGen SVI's rule is to commit to ONE
         # predictor chosen BEFORE seeing results — so this consults them in a fixed order and
         # reports which one spoke, rather than taking the max over whatever is available (that
@@ -1007,42 +997,71 @@ def assign_variant_tier(row, cfg=None) -> dict:
             if rev >= rev_sup:
                 # V4 at moderate-or-better: a calibrated predictor above Pejaver's moderate cut
                 # is stronger evidence than the supporting-only rungs that share V3.
-                tier = "V4" if rev >= rev_mod else "V3"
-                out.update(variant_tier=tier, missense_evidence_source="revel",
-                           variant_tier_reason=f"missense&revel={rev:.3g}>={rev_sup:g}"
-                                               f"(ClinGen-calibrated,Pejaver2022)")
-                return out
+                return dict(variant_tier=("V4" if rev >= rev_mod else "V3"),
+                            missense_evidence_source="revel",
+                            variant_tier_reason=f"missense&revel={rev:.3g}>={rev_sup:g}"
+                                                f"(ClinGen-calibrated,Pejaver2022)")
             if rev <= rev_benign:
-                out.update(variant_tier="V1", missense_evidence_source="revel",
-                           variant_tier_reason=f"missense&revel={rev:.3g}<={rev_benign:g}"
-                                               "(calibrated_BP4-supporting_range)")
-                return out
-            out.update(variant_tier="V2", missense_evidence_source="revel",
-                       variant_tier_reason=f"missense&revel={rev:.3g}_between_cuts"
-                                           "(calibrated_but_indeterminate)")
-            return out
+                return dict(variant_tier="V1", missense_evidence_source="revel",
+                            variant_tier_reason=f"missense&revel={rev:.3g}<={rev_benign:g}"
+                                                "(calibrated_BP4-supporting_range)")
+            return dict(variant_tier="V2", missense_evidence_source="revel",
+                        variant_tier_reason=f"missense&revel={rev:.3g}_between_cuts"
+                                            "(calibrated_but_indeterminate)")
         if am is not None:
             if am >= am_sup:
-                out.update(variant_tier="V3", missense_evidence_source="alphamissense",
-                           variant_tier_reason=f"missense&am_pathogenicity={am:.3g}>={am_sup:g}"
-                                               "(REVEL_absent;SVI-endorsed)")
-                return out
+                return dict(variant_tier="V3", missense_evidence_source="alphamissense",
+                            variant_tier_reason=f"missense&am_pathogenicity={am:.3g}>={am_sup:g}"
+                                                "(REVEL_absent;SVI-endorsed)")
             if am <= am_benign:
-                out.update(variant_tier="V1", missense_evidence_source="alphamissense",
-                           variant_tier_reason=f"missense&am_pathogenicity={am:.3g}<={am_benign:g}")
-                return out
-            out.update(variant_tier="V2", missense_evidence_source="alphamissense",
-                       variant_tier_reason=f"missense&am_pathogenicity={am:.3g}_between_cuts")
-            return out
+                return dict(variant_tier="V1", missense_evidence_source="alphamissense",
+                            variant_tier_reason=f"missense&am_pathogenicity={am:.3g}<={am_benign:g}")
+            return dict(variant_tier="V2", missense_evidence_source="alphamissense",
+                        variant_tier_reason=f"missense&am_pathogenicity={am:.3g}_between_cuts")
         if cadd is not None and cadd >= cadd_mis:
-            out.update(variant_tier="V3", missense_evidence_source="cadd_offlabel",
-                       variant_tier_reason=f"missense&cadd={cadd:.3g}>={cadd_mis:g}"
-                                           "(off-label:calibrated_on_missense_but_not_the_"
-                                           "ClinGen-recommended_predictor)")
-            return out
-        out.update(variant_tier="V2", missense_evidence_source="none",
-                   variant_tier_reason="missense_below_cadd_cut(no_calibrated_predictor:"
-                                       "REVEL/AlphaMissense_absent)")
+            return dict(variant_tier="V3", missense_evidence_source="cadd_offlabel",
+                        variant_tier_reason=f"missense&cadd={cadd:.3g}>={cadd_mis:g}"
+                                            "(off-label:calibrated_on_missense_but_not_the_"
+                                            "ClinGen-recommended_predictor)")
+        return dict(variant_tier="V2", missense_evidence_source="none",
+                    variant_tier_reason="missense_below_cadd_cut(no_calibrated_predictor:"
+                                        "REVEL/AlphaMissense_absent)")
+
+    def _merge_splice(splice_tier, splice_reason):
+        """Combine a splice rung with the missense verdict: STRONGER tier, BOTH reasons."""
+        m = _missense_result()
+        if m is None:
+            return dict(variant_tier=splice_tier, variant_tier_reason=splice_reason)
+        merged = dict(m)
+        if VARIANT_TIERS.index(splice_tier) > VARIANT_TIERS.index(m["variant_tier"]):
+            merged["variant_tier"] = splice_tier
+        merged["variant_tier_reason"] = f"{splice_reason}&{m['variant_tier_reason']}"
+        return merged
+
+    # V4 — strong splice, or an NMD-INDETERMINATE pLoF. V5 is defined so the ladder is complete
+    # and the implementation has a target, but it is UNREACHABLE today: every pLoF lands here.
+    if ds is not None and ds >= sai_strong:
+        out.update(_merge_splice("V4", f"spliceai_ds={ds:.3g}>={sai_strong:g}"))
+        return out
+    if mec in ("plof", "canonical_splice") and imp == "HIGH":
+        note = ("canonical_splice_site" if mec == "canonical_splice" else "plof")
+        # Walker 2023 is explicit that a canonical site with a LOW SpliceAI score deserves
+        # scrutiny, not automatic Very Strong — so report the score beside the tier.
+        extra = "" if ds is None else f",spliceai_ds={ds:.3g}"
+        out.update(variant_tier="V4",
+                   variant_tier_reason=f"{note}:nmd_status=INDETERMINATE(V5_unreachable){extra}")
+        return out
+
+    # V3 — supporting splice, or a high-CADD missense. The CADD route is a DISCOVERY RANK, not
+    # PP3 evidence: 25.3 is Pejaver 2022's missense-only PP3-supporting value, but ClinGen SVI
+    # says commit to ONE predictor chosen before seeing results, and the calibrated choice is
+    # REVEL (PP3 0.644/0.773/0.932). So the tier carries missense_evidence_source so no
+    # downstream reader mistakes it for a calibrated call.
+    if ds is not None and ds >= sai_sup:
+        out.update(_merge_splice("V3", f"spliceai_ds={ds:.3g}>={sai_sup:g}"))
+        return out
+    if mec == "missense":
+        out.update(_missense_result())
         return out
 
     # V2 — in-frame indel. No calibrated in-frame predictor exists and the mechanism (in-frame
@@ -1417,7 +1436,8 @@ def default_weights() -> dict:
     **Where the analogy stops**: these are NOT ACMG points and the total must not be read
     against Tavtigian's P >= 10 / LP 6-9 / VUS 0-5 bands. The criteria are not ACMG criteria (a
     CADD-based term is not PP3), no phenotype/segregation/functional evidence exists, the
-    ClinVar term has no review-status gate, and the artifact-penalty terms have no ACMG
+    ClinVar term applies only an uncalibrated review-status damp (positive limb only, not ACMG
+    PP5/BP6), and the artifact-penalty terms have no ACMG
     analogue at all. The column is ``priority_points``, never ``acmg_points``, and no P/LP/VUS
     label is ever emitted from it.
     """

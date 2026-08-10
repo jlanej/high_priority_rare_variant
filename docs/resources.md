@@ -12,7 +12,24 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 
 > **STATUS — the VEP-only contract (read this before you download anything).**
 > The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD and
-> SpliceAI** (see [## ClinVar, REVEL and AlphaMissense
+> SpliceAI, plus REVEL and AlphaMissense** (see [SpliceAI](#spliceai) and
+> [ClinVar, REVEL and AlphaMissense](#clinvar-revel-and-alphamissense)). Step 2 performs exactly
+> **ONE** external `bcftools annotate` transfer: the **ClinVar sites VCF**, supplying `CLNREVSTAT`
+> ⇒ gold stars, which the cache carries at no price. **gnomAD, dbNSFP and LOFTEE data are still
+> not fetched, bind-mounted or read.** The **required** acquisition therefore
+> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB)**
+> — SpliceAI is **required by default** (`resources.vep.spliceai_required: true`), so any run that
+> invokes VEP **halts at preflight** without it (not enforced with `resources.vep.annotated_vcf`
+> set); a bare `fetch` does **not** pull it — use `scripts/download_spliceai.sh`. Missing CADD, by
+> contrast, only warns. ClinVar (~0.18 GB), REVEL (~0.7 GB) and AlphaMissense (~0.65 GB) ARE
+> fetched by a bare `fetch` and each degrades with a warning. Plus two small optional tables for
+> Step-6 ranking.
+> Everything else on this page is retained as the **shopping list for building on top** and is
+> clearly marked *not currently used*. What the reduced set costs the screen — and what each
+> re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
+> truth for every threshold is **[README.md#canonical-defaults](README.md#canonical-defaults)**.
+
+## ClinVar, REVEL and AlphaMissense
 
 All three are **fetched by default** (`prepare_resources.sh --dir DIR fetch`) because steps now
 read them. All three are **optional and graceful**: each missing one produces a loud warning and a
@@ -62,21 +79,9 @@ URL is dead upstream (S3 `NoSuchBucket`, now registration-gated).
   entry copied from the dbNSFP naming produces a plugin that runs and a column that is never
   populated, silently. The prep re-bgzips if upstream ships plain gzip (tabix needs BGZF).
 
-## SpliceAI](#spliceai)). Step 2 performs **no external `bcftools
-> annotate` transfers**. **gnomAD, ClinVar, dbNSFP and LOFTEE data are no longer fetched, bind-mounted
-> or read** — the config keys that pointed at them are gone. The **required** acquisition therefore
-> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB)**
-> — SpliceAI is **required by default** (`resources.vep.spliceai_required: true`), so any run that
-> invokes VEP **halts at preflight** without it (not enforced with `resources.vep.annotated_vcf`
-> set); a bare `fetch` does **not** pull it — use `scripts/download_spliceai.sh`. Missing CADD, by
-> contrast, only warns. Plus two small optional tables for Step-6 ranking.
-> Everything else on this page is retained as the **shopping list for building on top** and is
-> clearly marked *not currently used*. What the reduced set costs the screen — and what each
-> re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
-> truth for thresholds is [Canonical defaults](README.md#canonical-defaults). Neither is restated here.
->
-> `prepare_resources.sh` follows the contract: bare `fetch` prepares only the required set
-> (reference, VEP cache, CADD, constraint) — it will **not** start the ~877 GB gnomAD download —
+> `prepare_resources.sh` follows the contract: bare `fetch` prepares the set the pipeline actually
+> consumes (reference, VEP cache, CADD, constraint, **ClinVar, REVEL, AlphaMissense**) — it will
+> **not** start the ~877 GB gnomAD download —
 > `verify` requires only that set and reports the rest as *not required*, and `emit-env` exports
 > only the `${ENV}` vars the config still has keys for. The retired resources stay reachable
 > behind an explicit `--only gnomad_sites,clinvar,…` so the [roadmap
@@ -162,9 +167,10 @@ image**, not fetched. The `ensemblorg/ensembl-vep:release_115.0` base bundles th
 **LOFTEE is a separate repo** — so our Dockerfile additionally bakes in the **`konradjk/loftee` grch38
 branch** (master is GRCh37-only) at `/plugins` and installs its one missing Perl dep (`DBD::SQLite`;
 `Bio::DB::BigFile`/Kent lib is already compiled into the base). `VEP_PLUGINS` therefore defaults to
-`/plugins` via the image and needs no setup. Under the current contract **only `CADD.pm` is invoked**;
-the rest of the plugin code sits inert in the image, which is what makes re-enabling any of the
-optional resources below a *config* change rather than an image rebuild.
+`/plugins` via the image and needs no setup. Four plugins are invoked — **`CADD.pm`, `SpliceAI.pm`,
+`REVEL.pm` and `AlphaMissense.pm`** — each activating only when its score file is configured and
+present. `LoF.pm` (LOFTEE) sits inert, which is what makes re-enabling it a *config* change rather
+than an image rebuild.
 
 Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../resources/manifest.env)
 (re-pin there). Verified specifics for the **required** set:
@@ -236,11 +242,11 @@ takes the spine. The price, per resource, is honest and bounded:
 | Dropped | What the cache gives instead | The real price |
 |---|---|---|
 | gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | no **faf95** (unrecoverable — no AC/AN), no **nhomalt**. Rarity is a point estimate, erring toward *dropping* |
-| ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | no **CLNREVSTAT** ⇒ no star gate; stale. Over-*retains* |
+| ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | **RESOLVED** — the VCF is transferred in Step 2, supplying `CLNREVSTAT` ⇒ `clinvar_stars`, and un-staling ClinVar. Stars RANK in Step 9; the screen stays star-blind by design |
 | LOFTEE | VEP `IMPACT` | near-zero for *selection*; costs PVS1 tiering |
 
 (SpliceAI was on this list as "the biggest loss" — it is now **wired** as the third functional
-rung; see [## SpliceAI](#spliceai) and [limitations.md §1](limitations.md).)
+rung; see [SpliceAI](#spliceai) and [limitations.md §1](limitations.md).)
 | dbNSFP (REVEL/AM/MPC/MetaRNN) | SIFT/PolyPhen (unused) | **zero selection power** — see below |
 
 **The dbNSFP row is the one that surprises people, so it is worth stating plainly:** REVEL,
@@ -259,18 +265,21 @@ Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host i
 The script ships in the image at `/opt/hprv/scripts/` and is on `PATH`, so call it by name — you do
 not need a checkout of this repo on the host:
 
-> **A bare `fetch` already prepares only the required set** (`reference`, `vep_cache`, `cadd`,
-> `constraint`) — it will **not** start the ~877 GB gnomAD download. The retired resources
-> (`gnomad_sites`, `clinvar`, `loftee`, `dbnsfp`) run **only** when you name them with
-> `--only`, so the roadmap restorations are one flag away. Passing `--only reference,vep_cache,cadd,constraint`
-> (as below) is therefore explicit-but-equivalent to a bare `fetch`.
+> **A bare `fetch` prepares everything the pipeline consumes** — `reference`, `vep_cache`, `cadd`,
+> `constraint`, **`clinvar`, `revel`, `alphamissense`** — and will **not** start the ~877 GB gnomAD
+> download. Only the genuinely unused resources (`gnomad_sites`, `loftee`, `dbnsfp`, and
+> `spliceai`, whose useful files are login-gated) sit behind an explicit `--only`.
+>
+> **Do not narrow this with `--only reference,vep_cache,cadd,constraint`** — that skips ClinVar,
+> REVEL and AlphaMissense. The run still works (each degrades with a loud warning), but you lose
+> gold stars and the calibrated missense tier for no benefit. A bare `fetch` is the right command.
 
 ```bash
-# 1. fetch + prepare what the VEP-only contract reads (bare `fetch` does the same set;
-#    the explicit --only just documents it)
+# 1. fetch + prepare everything the pipeline reads. No --only: narrowing it silently skips
+#    ClinVar/REVEL/AlphaMissense. --accept-license covers CADD and AlphaMissense (both
+#    non-commercial); without it those two are skipped with a warning.
 apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources fetch \
-    --only reference,vep_cache,cadd,constraint --accept-license
+    prepare_resources.sh --dir /data/hprv_resources fetch --accept-license
 
 # 2. emit the export lines your config's ${ENV} placeholders expect
 apptainer exec --bind /data hprv.sif \
@@ -278,8 +287,9 @@ apptainer exec --bind /data hprv.sif \
 source /data/hprv_resources/resources.env      # then run_pipeline.sh --config ...
 ```
 
-Valid `--only` ids: `reference`, `vep_cache`, `gnomad_sites`, `clinvar`, `loftee`, `constraint`,
-`dbnsfp`, `spliceai`, `cadd`.
+Valid `--only` ids: `reference`, `vep_cache`, `cadd`, `constraint`, `mutational_target`,
+`clinvar`, `revel`, `alphamissense`, `spliceai`, `gnomad_sites`, `loftee`, `dbnsfp`.
+The first seven are fetched by a bare `fetch`; the rest are opt-in.
 
 The pinned manifest ships alongside the script at `/opt/hprv/resources/manifest.env`. To re-pin a
 version without rebuilding the image, bind-mount an edited copy and point `HPRV_RESOURCE_MANIFEST`

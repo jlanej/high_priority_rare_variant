@@ -220,7 +220,10 @@ Values marked IMPLEMENTED are **configurable defaults** (`config/config.example.
 The contract-level gaps are catalogued once in **[limitations.md](limitations.md)** — read it before
 interpreting a negative result. The two that bear directly on this document:
 
-- **No review status ⇒ no star gate** ([limitations.md](limitations.md) §6). The gate this document
+- **Stars are available and RANK rather than gate** ([limitations.md](limitations.md) §6): the
+  ClinVar VCF is transferred in Step 2 ⇒ `clinvar_stars` (0-4), which scales the Step-9 clinical
+  term's positive limb only. The SCREEN remains star-blind on purpose — gating it would violate
+  never-drop. The keep/drop gate this document
   treats as the centrepiece of ClinVar consumption cannot be applied at all. Every P/LP is honored
   at face value, so **a `clinvar_plp` keep is not evidence of curated confidence** — it may be one
   submitter with no criteria. Curators must check the star level in ClinVar's web UI by hand. The

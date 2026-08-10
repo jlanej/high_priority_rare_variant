@@ -777,7 +777,7 @@ we are trying to remove.
 **Where the analogy stops, and this must be in the methods.** These are **not ACMG points** and the
 total **must not** be read against Tavtigian's classification bands (P ≥ 10, LP 6–9, VUS 0–5). The
 criteria here are not ACMG criteria (a CADD-based term is not PP3); no phenotype, segregation or
-functional evidence exists at all; the ClinVar term has no review-status gate; and the
+functional evidence exists at all; the ClinVar term applies only an uncalibrated review-status damp (positive limb only), which is not ACMG PP5/BP6; and the
 artifact-penalty terms have no ACMG analogue whatsoever. **The column is named `priority_points`,
 never `acmg_points`, and no P/LP/VUS label is ever emitted from it.**
 
@@ -793,7 +793,12 @@ across many genes, and two carriers of distinct private variants give p ≈ 3e-7
 contaminated sample plus one genuine carrier can manufacture an "exome-wide significant" gene.
 FREEMIX-failing trios must be excluded **upstream** from `TRIOS_FILE`, not down-weighted here.
 
-**The ClinVar term has no star gate.** The VEP cache carries no `CLNREVSTAT`, so a 1★
+**The ClinVar term's star damp is uncalibrated, and it is not ACMG PP5/BP6.** Stars now arrive
+from the Step-2 ClinVar transfer, and the POSITIVE limb only is scaled by `low_star_scale` (0.5)
+below `min_review_stars` (2); a low-star *benign* term is left alone, since shrinking it toward
+zero would promote a poorly-reviewed benign call. Blank stars mean the transfer did not run and
+leave the term at full weight — absent is not 0★. The scale factor is an ordering default, not a
+likelihood ratio. Before the transfer existed a 1★
 single-submitter assertion is indistinguishable from an expert-panel one and is honored
 identically. `clinvar_review_status = UNAVAILABLE` is emitted so the +4 is never mistaken for a
 ≥2★ assertion. The release is pinned by the cache (VEP 115 ⇒ ClinVar 2025-02), not independently.

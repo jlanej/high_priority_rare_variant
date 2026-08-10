@@ -105,10 +105,19 @@ if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
     # reports "already complete" and serves the old annotation forever. (Exactly the staleness
     # Step 9's content key was rewritten to close.) Identity is path+size+mtime, NOT a content
     # hash: these are 0.2-80 GB of static, version-pinned reference data whose bytes never change
-    # in place, and cksum'ing ~80 GB of CADD on every invocation to detect a swap that shows up in
-    # the stat anyway would dominate the step's startup.
+    # in place, and cksum'ing the ~80 GB of CADD on every invocation to detect a swap that shows
+    # up in the stat anyway would dominate the step's startup.
     if [[ -n "$_skey" ]]; then
-        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}"; do
+        # EVERY annotation resource, not just the new ones. SpliceAI matters MOST here and was
+        # the omission that made this a bug rather than a nicety: it is a SELECTION keep-path
+        # (selection.py checks it before CADD), so a run made with spliceai_required:false and
+        # re-run after downloading the scores would hit `is_done`, match the key, and screen
+        # forever against a union that has no SpliceAI — silently, since the "configured but
+        # nothing lifted" warning lives inside the skipped path. CADD has the same shape and
+        # needs no non-default config at all.
+        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" \
+                    "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
+                    "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}"; do
             if is_set "$_res" && [[ -e "$_res" ]]; then
                 _skey+="-$(cksum <<<"$_res$(stat -c '%s-%Y' "$_res" 2>/dev/null \
                           || stat -f '%z-%m' "$_res" 2>/dev/null)" | awk '{print $1}')"

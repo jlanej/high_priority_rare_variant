@@ -292,7 +292,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **`priority_points` is NOT an ACMG score.** Never read a total against Tavtigian's P ≥ 10 /
   LP 6–9 / VUS 0–5 bands and never emit a P/LP/VUS label from it: the criteria are not ACMG criteria
   (a CADD-based term is not PP3), no phenotype/segregation/functional evidence exists at all, the
-  ClinVar term has no review-status gate, and the artifact-penalty terms have no ACMG analogue. The
+  ClinVar term applies only an uncalibrated review-status damp (positive limb only, not ACMG
+  PP5/BP6), and the artifact-penalty terms have no ACMG analogue. The
   column is named `priority_points`, never `acmg_points`.
 - **Three acquisition traps, each of which fails SILENTLY rather than loudly.** All are handled in
   `scripts/prepare_resources.sh`; the point is that none of them errors — each yields a resource
