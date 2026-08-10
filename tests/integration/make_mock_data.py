@@ -464,7 +464,9 @@ def main(argv=None) -> int:
         write_vcf(os.path.join(W, "vcfs", f"file{fk}.vcf"), samples,
                   [v for v in V if v["file"] == fk])
 
-    # No gnomad.sites.vcf / clinvar.vcf: under the VEP-only contract nothing is transferred from
+    # A mock gnomAD joint slim IS written below (it exercises Step 2's real transfer). No
+    # clinvar.vcf: that transfer degrades with a warning, which the run asserts. Otherwise
+    # nothing is transferred from
     # an external sites VCF, so there is nothing to mock. Frequency + CLIN_SIG go into the CSQ
     # (see mock_vep.py), which is where a real `vep --af_gnomade --check_existing` puts them.
 

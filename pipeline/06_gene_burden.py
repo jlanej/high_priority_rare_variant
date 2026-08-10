@@ -172,7 +172,8 @@ def main(argv=None) -> int:
             g["all"].add(trio)
             # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
             # grpmax_af is Step 5's rarity column (annotations.frequency()). It is a point
-            # estimate, not faf95, so it sits ~one CI-width high on low-AC alleles; that makes
+            # estimate whenever faf95 is unavailable, and then sits ~one CI-width high on low-AC
+            # alleles (with the gnomAD slim configured it IS faf95); that makes
             # the recurrence p slightly CONSERVATIVE (a larger q inflates the null probability
             # of seeing carriers), which is the direction to prefer for a discovery claim.
             key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"

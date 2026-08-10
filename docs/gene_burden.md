@@ -169,9 +169,9 @@ AAF tiers **≤ 1e-4** (dominant / de novo) and **≤ 1e-2 / 1e-3** (recessive) 
 
 ### Rarity field for qualifying variants
 
-The rarity field is a **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS), mirroring gnomAD's own grpmax inclusion set.
+The rarity field is real **faf95** when the optional gnomAD joint slim is configured, else a **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS), mirroring gnomAD's own grpmax inclusion set.
 
-It is **not `faf95`**. faf95 is the lower bound of the 95% CI, and computing it requires AC/AN, which the VEP cache does not carry — so it is unrecoverable here, not approximated. A point estimate is always ≥ its own CI lower bound, so **rarity gates fire slightly more often than a faf95 gate would**: the screen errs toward dropping on low-count alleles.
+It is the **fallback** arm of `frequency()`, not faf95 itself: computing faf95 requires AC/AN, which the VEP cache does not carry, so this field can never be CI-corrected. Real faf95 arrives with the optional gnomAD joint slim and takes precedence per variant (`rarity_oracle` reports which fired). On the fallback path a point estimate is always ≥ its own CI lower bound, so **rarity gates fire slightly more often than a faf95 gate would**: the screen errs toward dropping on low-count alleles.
 
 The recurrence null (below) inherits the *opposite* and more comfortable side of that same bias — see [Multiple-testing correction](#multiple-testing-correction).
 
@@ -241,7 +241,8 @@ A recurrent gene is only interesting if it is **intolerant of the class of varia
 
 ```bash
 # 1. Keep PASS sites below the frequency gate.
-#    LIVE, but note the field: the rarity oracle is the grpmax PROXY computed in
+#    LIVE, but note the field: the rarity oracle is faf95 when the gnomAD slim is configured,
+#    else the grpmax PROXY computed in
 #    annotations.grpmax_af() as the max over vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF.
 #    There is no single faf95 INFO field to filter on (see allele_frequency.md), and
 #    vep_MAX_AF is NOT a substitute — it over-counts founder groups.

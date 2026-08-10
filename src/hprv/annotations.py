@@ -2,21 +2,29 @@
 
 **VEP-centric contract.** Every annotation this pipeline reads comes from ONE tool: VEP 115
 (GRCh38) — its cache plus its score plugins — whose CSQ fields Step 2 lifts to INFO with a
-``vep_`` prefix (via ``bcftools +split-vep``), with ONE documented exception. The plugins are CADD
+``vep_`` prefix (via ``bcftools +split-vep``), with TWO documented exceptions. The plugins are CADD
 (genome-wide functional, SNV+indel), SpliceAI (precomputed raw genome-wide splice deltas), and the
 calibrated missense pair REVEL + AlphaMissense; population frequency and ClinVar ``CLIN_SIG`` ride
 in the cache itself.
 
-The exception is ClinVar REVIEW STATUS: the cache carries ``CLIN_SIG`` but no ``CLNREVSTAT`` at
-any price, so gold stars require the ClinVar sites VCF itself, ``bcftools annotate``-transferred
-in Step 2 under a ``clinvar_`` prefix. That third namespace is deliberate — it makes the different
-oracle visible at a glance. No gnomAD, dbNSFP or LOFTEE file is transferred or read.
+Both exceptions exist because the cache cannot supply the field AT ANY PRICE, and both are
+``bcftools annotate`` transfers in Step 2 under their own INFO namespace — deliberately, so which
+oracle a field came from is visible at a glance:
+
+  * ``clinvar_*`` — ClinVar REVIEW STATUS. The cache carries ``CLIN_SIG`` but no ``CLNREVSTAT``,
+    so gold stars require the ClinVar sites VCF itself.
+  * ``gnomad_*``  — **faf95** and **nhomalt**, from the gnomAD v4.1 JOINT slim (optional). faf95's
+    CI correction needs AC/AN, which the cache omits; see ``frequency()`` for the precedence.
+
+No dbNSFP or LOFTEE file is transferred or read.
 
 This module is the single place that knows those field names and how to coerce their (string)
 values, so the selection, inheritance, and burden steps all read them identically.
 
 What the contract still costs is documented in docs/allele_frequency.md and
-docs/functional_annotation.md; in short: no faf95 (no CI correction), no nhomalt, no LOFTEE. Two
+docs/functional_annotation.md. With the optional gnomAD joint slim the rarity oracle IS real
+faf95 and nhomalt is available; without it, rarity falls back to the point-estimate proxy and
+nhomalt is absent. LOFTEE remains unwired either way. Two
 availability caveats travel with the scores: the PRECOMPUTED SpliceAI set does not cover every
 indel (a missing score is NOT evidence of no effect; see spliceai_ds()), and REVEL/AlphaMissense
 are missense-only, so ``None`` on any non-missense is expected rather than a gap. Adding another
@@ -94,7 +102,7 @@ F = {
     # reinstated: stars RANK in Step 9, and gating the screen would violate never-drop.
     # Values are lowercase, '&'-joined (e.g. "pathogenic&likely_pathogenic").
     "clnsig": "vep_CLIN_SIG",
-    # --- ClinVar review status (the ONE bcftools transfer; see 02_annotate_sites.sh) ---
+    # --- ClinVar review status (one of TWO bcftools transfers; see 02_annotate_sites.sh) ---
     # The cache has no CLNREVSTAT at any price, so gold stars require the ClinVar VCF itself.
     # `clinvar_` (not `vep_`) marks it as transferred rather than lifted from the CSQ — a third
     # namespace deliberately, so a reader can tell at a glance which oracle a field came from.
@@ -209,12 +217,19 @@ def _max_float(variant, *keys) -> Optional[float]:
 def grpmax_af(variant) -> Optional[float]:
     """Max gnomAD v4.1 AF over the grpmax-ELIGIBLE ancestry groups (see GRPMAX_POPS).
 
-    A point estimate standing in for gnomAD's published grpmax AF. It is NOT faf95:
-    faf95 is the lower bound of the 95% CI, and computing it needs AC/AN, which the VEP
-    cache does not carry. So this runs ~one CI-width HIGH on low-AC observations, and a
-    rarity gate driven by it fires slightly more often than a faf95 gate would (i.e. it
-    errs toward dropping). Excluding the bottlenecked groups removes the large half of
-    that error; the residual is bounded by AC and documented in docs/allele_frequency.md.
+    A point estimate standing in for gnomAD's published grpmax AF, and the **fallback** arm of
+    ``frequency()`` — the preferred arm is real ``faf95()``, which the gnomAD joint slim supplies
+    when it is configured. This function is what runs when that resource is absent, or (per
+    variant) when gnomAD published no faf95 for the allele.
+
+    It is a point estimate, not a CI lower bound: computing faf95 needs AC/AN, which the VEP
+    cache does not carry, so THIS field cannot be CI-corrected no matter what. It therefore runs
+    ~one CI-width HIGH on low-AC observations, and a rarity gate driven by it fires slightly more
+    often than a faf95 gate would (i.e. it errs toward dropping). That is also precisely why it is
+    the SAFE fallback: proxy >= faf95 wherever both exist, so falling back here can only filter
+    more, never silently retain what faf95 would have caught. Excluding the bottlenecked groups
+    removes the large half of the error; the residual is bounded by AC. See
+    docs/allele_frequency.md.
     """
     return _max_float(variant, *_GRPMAX_KEYS)
 

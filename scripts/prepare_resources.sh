@@ -498,7 +498,7 @@ do_emit() {
         echo "# (login); the auto-fetched SNV is the no-login Ensembl MANE-only subset. See docs/resources.md."
         echo "export SPLICEAI_SNV=$SPLICEAI_SNV_OUT"
         echo "export SPLICEAI_INDEL=$SPLICEAI_INDEL_OUT"
-        echo "# ClinVar sites VCF — the ONE bcftools transfer in Step 2. Without it, review status"
+        echo "# ClinVar sites VCF — one of Step 2's two bcftools transfers. Without it, review status"
         echo "# and therefore GOLD STARS are unavailable and a 1-star single-submitter assertion is"
         echo "# indistinguishable from a 3-star expert-panel one."
         echo "export CLINVAR_VCF=$CLINVAR_OUT"

@@ -55,7 +55,7 @@ Two traps, both handled in `prep_clinvar`:
   also survives ClinVar's periodic renames (the 2024 `conflicting_interpretations` ->
   `conflicting_classifications` change is carried as both).
 
-Stars **rank, they never gate** — see [limitations.md](limitations.md#6).
+Stars **rank, they never gate** — see [limitations.md](limitations.md#6-clinvar-review-status--resolved-via-one-of-the-two-bcftools-transfers).
 
 ### REVEL and AlphaMissense
 
@@ -136,7 +136,8 @@ the entire annotation acquisition story. Two properties of that source are load-
 
 - **Point AFs only.** The cache has **no `faf95`/`fafmax` field and no AC/AN**, so faf95's CI
   correction cannot be recomputed downstream at any price. `frequency()` is a *grpmax proxy* —
-  the max AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — not faf95. See
+  the max AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — the FALLBACK arm; real
+  faf95 comes from the optional gnomAD joint slim. See
   [limitations.md §2](limitations.md).
 - **Cache frequencies exist only for alleles accessioned into dbSNP.** An un-accessioned gnomAD
   variant silently returns *no* frequency and reads as "absent ⇒ rarest". Ensembl itself
@@ -241,7 +242,7 @@ takes the spine. The price, per resource, is honest and bounded:
 
 | Dropped | What the cache gives instead | The real price |
 |---|---|---|
-| gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | no **faf95** (unrecoverable — no AC/AN), no **nhomalt**. Rarity is a point estimate, erring toward *dropping* |
+| gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | **RESOLVED by the opt-in joint slim** ([above](#the-gnomad-joint-slim-faf95)): real **faf95** + **nhomalt**. Without it the cache alone gives a point estimate, erring toward *dropping* |
 | ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | **RESOLVED** — the VCF is transferred in Step 2, supplying `CLNREVSTAT` ⇒ `clinvar_stars`, and un-staling ClinVar. Stars RANK in Step 9; the screen stays star-blind by design |
 | LOFTEE | VEP `IMPACT` | near-zero for *selection*; costs PVS1 tiering |
 

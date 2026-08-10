@@ -13,14 +13,16 @@
 # (--check_existing), and CADD, SpliceAI, REVEL + AlphaMissense from their plugins. A plugin
 # score file is a PLUGIN input, not a bcftools transfer, so those do not breach the contract.
 #
-# There is exactly ONE bcftools transfer: the ClinVar sites VCF -> clinvar_CLNREVSTAT /
-# clinvar_CLNSIG, i.e. review status and GOLD STARS. It has to be a transfer because the cache
-# carries CLIN_SIG but no CLNREVSTAT at any price. It is prefixed `clinvar_` rather than `vep_`
-# so the different oracle is visible at a glance, and it is guarded by a 0-match check below.
+# There are exactly TWO bcftools transfers, both because the cache cannot supply the field at any
+# price, both prefixed with their own namespace so the different oracle is visible at a glance,
+# and both guarded by a 0-match check below:
+#   - clinvar_* : ClinVar review status / GOLD STARS (CLNREVSTAT is absent from the cache).
+#   - gnomad_*  : faf95 + nhomalt from the gnomAD v4.1 JOINT slim (OPTIONAL). faf95's CI
+#                 correction needs AC/AN, which the cache omits. Without it the rarity oracle
+#                 falls back to the grpmax point-estimate proxy — see annotations.frequency().
 #
 # The remaining cost is real and deliberate; see docs/allele_frequency.md for the ledger:
-#   - no faf95 (the cache has no AC/AN, so the CI correction is not reconstructible)
-#   - no nhomalt, no LOFTEE
+#   - no LOFTEE (pLoF confidence), no exome/genome discordance flag
 # Re-adding either = one bcftools annotate here + its INFO field in annotations.F.
 #
 # Already have a VEP VCF? Pass --vep-vcf (or set resources.vep.annotated_vcf) and the

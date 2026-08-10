@@ -90,7 +90,8 @@ is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf
 # ---------------------------------------------------------------------------
 # Resource preflight. The surface is: a VEP 115 GRCh38 cache (transcripts, gnomAD v4.1
 # frequencies, ClinVar CLIN_SIG) + the CADD, SpliceAI, REVEL and AlphaMissense plugin files,
-# plus the ClinVar sites VCF (the one bcftools transfer, for review status/GOLD STARS).
+# plus the two bcftools transfers: the ClinVar sites VCF (review status/GOLD STARS) and the
+# optional gnomAD joint slim (faf95 + nhomalt).
 # No gnomAD / dbNSFP / LOFTEE download exists to check. SpliceAI is checked below (required by
 # default) along with the Step-2b backfill env; the rest warn and degrade.
 # Only enforced when Step 2 actually runs — a `--from 3` re-run reads annotations that are

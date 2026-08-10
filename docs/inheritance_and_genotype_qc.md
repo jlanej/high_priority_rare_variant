@@ -5,11 +5,14 @@ How this pipeline uses GATK genotype-refinement annotations, per-genotype QC gat
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ### ⚠ The rarity field in this document is **not** `faf95`
+> ### ⚠ The rarity field here is `faf95` ONLY when the gnomAD joint slim is configured
 >
-> The pipeline runs a **VEP-only contract**: annotations come from a VEP 115 GRCh38 cache plus the
-> CADD and SpliceAI plugins, and nothing else. The cache carries **no AC/AN**, so `faf95` (a 95% CI lower bound)
-> **cannot be computed at any price** — it is a **TARGET**, not what runs. Every rarity gate below
+> Annotations come from a VEP 115 GRCh38 cache plus the CADD/SpliceAI/REVEL/AlphaMissense plugins,
+> plus two `bcftools annotate` transfers. The cache itself carries **no AC/AN**, so `faf95` (a 95%
+> CI lower bound) can only come from the **optional gnomAD joint slim**
+> (`resources.gnomad.sites_slim`). With it, `frequency()` returns real faf95; without it — and per
+> variant wherever gnomAD published none — it returns the grpmax point-estimate proxy, and
+> `rarity_oracle` records which. Every rarity gate below
 > is applied to the **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the
 > grpmax-eligible groups (`AFR/AMR/EAS/NFE/SAS`), `annotations.frequency()`. The **numbers** are
 > unchanged; the **field** is a point estimate, so the gates run slightly stringent on low-count
