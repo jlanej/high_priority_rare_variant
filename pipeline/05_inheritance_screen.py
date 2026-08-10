@@ -29,7 +29,7 @@ from hprv.ped import parse_ped
 
 COLS = [
     "trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
-    # grpmax_af is THE rarity field (annotations.frequency()); max_af/max_af_pops ride
+    # frequency() prefers faf95 and falls back to grpmax_af; max_af/max_af_pops ride
     # along for review only, so a curator can see when a call is being driven by a
     # founder-group frequency that grpmax deliberately ignores.
     # grpmax_af is the point-estimate PROXY; faf95 is the CI-corrected oracle when the gnomAD
@@ -104,7 +104,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     require_hiconf = bool(get(cfg, "filters.denovo.use_hiconf_tag", True))
     # NB: filters.denovo.require_gnomad_absent_or_singleton is retired — it was implemented as
     # nhomalt > 1 (a HOMOZYGOTE-count test, never the allele-count test its name promised), and
-    # nhomalt does not exist in the VEP cache. Removed rather than silently no-op'd.
+    # nhomalt is absent from the VEP cache; it arrives only with the OPTIONAL gnomAD joint slim
+    # (resources.gnomad.sites_slim). The old de-novo `nhomalt <= 1` condition stays removed: it
+    # would silently no-op whenever the slim is not configured. nhomalt is instead REPORTED per
+    # variant, and Step 9 flags biallelic calls gnomAD already carries homozygotes for.
     crosscheck = bool(get(cfg, "filters.denovo.crosscheck_prerefinement_pl", True))
     # Focus is INHERITED variation. De novo detection is retained for cross-reference
     # only (dedicated de novo filtering/review lives in separate machinery); the

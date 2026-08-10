@@ -165,11 +165,12 @@ The plugin code is still baked into the image, so re-enabling is config, not a r
 
 **Cost to fix:** ~13 GB (mostly the GERP bigwig).
 
-### 6. ClinVar review status — RESOLVED, via the one bcftools transfer
+### 6. ClinVar review status — RESOLVED, via one of the two bcftools transfers
 
 The VEP cache exposes `CLIN_SIG` but **no `CLNREVSTAT`** at any price, so stars cannot come from
 it. They now come from the ClinVar sites VCF itself, transferred in Step 2
-(`resources.clinvar.vcf`) — the single non-CSQ annotation in the pipeline, and the reason the
+(`resources.clinvar.vcf`) — one of only two non-CSQ annotations in the pipeline (the other is the
+gnomAD joint slim, §2), and the reason the
 transfer machinery exists at all. `clinvar_stars` (0-4) rides on every candidate row and into the
 igv.js review table. Transferring the VCF also **un-stales** ClinVar: VEP 115 pins ClinVar
 2025-02, where the VCF ships weekly, and the transferred release is version-pinned and recorded.

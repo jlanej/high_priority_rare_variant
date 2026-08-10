@@ -20,12 +20,14 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 > runtime via `${ENV}` placeholders in the config. The `.gitignore` enforces this — keep it
 > that way.
 
-> 📋 **VEP-only contract — know what the screen cannot see *before* you run it.** Every
-> annotation comes from **one** source: a **VEP 115 GRCh38 cache + the CADD and SpliceAI
-> plugins**. No gnomAD, ClinVar, dbNSFP or LOFTEE file is downloaded or bind-mounted. That buys a
-> simple, sound, reproducible first pass and costs real coverage: **no `faf95`** (rarity is a grpmax
-> point-estimate proxy), **no LOFTEE**, **no ClinVar star ratings**. Every gap is *additive* to fix — one
-> `bcftools annotate` transfer each. The full ledger, with the cost to close each item, is
+> 📋 **VEP-centric contract — know what the screen can and cannot see *before* you run it.**
+> Almost every annotation comes from one source: a **VEP 115 GRCh38 cache + the CADD, SpliceAI,
+> REVEL and AlphaMissense plugins**. Exactly **two** things are `bcftools annotate`-transferred,
+> because the cache cannot supply them at any price: the **ClinVar sites VCF** (review status ⇒
+> gold stars) and the optional **gnomAD v4.1 joint slim** (real **`faf95`** + **`nhomalt`**).
+> Without that slim, rarity falls back to a grpmax point-estimate proxy. What remains missing:
+> **no LOFTEE** (pLoF confidence), no exome/genome discordance flag. Every gap is *additive* to
+> fix — one `bcftools annotate` transfer each. The full ledger, with the cost to close each, is
 > **[docs/limitations.md](docs/limitations.md)**. Read it before you interpret a negative result.
 
 ## What it does
@@ -38,7 +40,7 @@ for the vetted design and the artifact each step produces):
 | resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
 | 0 | Per-trio QC gate (Mendelian error + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
-| 2 | Annotate the union **once** (VEP 115 cache + CADD and SpliceAI plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
+| 2 | Annotate the union **once** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache), then two `bcftools annotate` transfers: ClinVar review status, and the optional gnomAD joint slim for `faf95`/`nhomalt` — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
 | 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
@@ -76,12 +78,19 @@ INFO with a `vep_` prefix (`bcftools +split-vep`); **nothing is transferred in f
 sites VCF**. Already have a VEP 115 VCF? Point `resources.vep.annotated_vcf` at it and Step 2
 skips the VEP call entirely.
 
-**3. Frequency oracle.** Rarity is judged on **gnomAD v4.1**, never on internal counts — as the
-max AF over the **grpmax-eligible** ancestry groups (AFR/AMR/EAS/NFE/SAS), mirroring gnomAD's own
-grpmax inclusion set. This is a **point estimate standing in for `faf95`, not `faf95` itself**:
-the CI lower bound needs AC/AN, which the VEP cache does not carry, so it is unrecoverable rather
-than approximated — the proxy therefore errs slightly toward *dropping* low-count alleles
-([why, and the cost](docs/limitations.md#2-no-faf95--the-rarity-gate-is-a-point-estimate)).
+**3. Frequency oracle.** Rarity is judged on **gnomAD v4.1**, never on internal counts, through a
+single chokepoint (`annotations.frequency()`) with a two-arm precedence:
+
+1. **`faf95`** — gnomAD's published filtering allele frequency, the *lower bound of the 95% CI*
+   and the quantity ACMG/ClinGen specify for frequency filtering. Requires the optional gnomAD
+   joint slim (`resources.gnomad.sites_slim`, ~10 GB, `--only gnomad_sites`).
+2. **grpmax point-estimate proxy** — max AF over the **grpmax-eligible** ancestry groups
+   (AFR/AMR/EAS/NFE/SAS), read from the cache. Used per variant wherever faf95 is absent.
+
+`rarity_oracle` reports which one produced each row. Because faf95 ≤ the point estimate, supplying
+the slim **retains more** at the same cutoffs — it stops discarding low-count alleles whose
+confidence interval never justified the call; the proxy arm errs slightly toward *dropping*
+([the ledger](docs/limitations.md#2-faf95--resolved-by-an-opt-in-resource-the-proxy-remains-the-fallback)).
 VEP's `MAX_AF` and the global AFs are **reporting only, never filter fields** — they fail in
 opposite directions and neither is a safe substitute. Benign-common variants (`≥ 0.05`, ClinGen
 BA1) are dropped and never rescued.
@@ -170,7 +179,7 @@ NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CAD
   variants become interesting when they *stack up across individuals* in the same gene. De novo
   and mtDNA are handled by separate dedicated pipelines.
 - **gnomAD v4.1 is the only population-frequency oracle** (currently a grpmax point-estimate
-  proxy from the VEP cache; `faf95` is the target — see [limitations](docs/limitations.md#2-no-faf95--the-rarity-gate-is-a-point-estimate)).
+  proxy from the VEP cache unless the optional gnomAD joint slim supplies real `faf95` — see [limitations](docs/limitations.md#2-faf95--resolved-by-an-opt-in-resource-the-proxy-remains-the-fallback)).
   Because the trios are not jointly genotyped, internal cohort AC/AN is meaningless
   (absent ≠ hom-ref) and is used only as an artifact/blocklist signal.
 - **Gene lists and constraint are priors/tiers, never hard filters** ("never-drop rule") — so

@@ -281,7 +281,8 @@ synthesized genotype matrix.
 ## Known scope limitations (stated honestly, not hidden)
 
 **The full ledger is [limitations.md](limitations.md)** — what the first pass cannot see, why, and
-what each costs to fix (in short: no faf95 ⇒ point-estimate rarity; no nhomalt, no LOFTEE, no
+what each costs to fix (in short: faf95 + nhomalt need the optional gnomAD joint slim, and
+without it rarity is a point estimate; no LOFTEE, no
 ClinVar stars — SpliceAI is now wired as the splice keep-path). Read it
 before interpreting a negative result. Every one of those gaps is **additive** to fix: the contract
 is a single seam — one `bcftools annotate` in `02_annotate_sites.sh` plus one field in

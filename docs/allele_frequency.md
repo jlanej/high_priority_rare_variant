@@ -45,7 +45,7 @@ This pipeline screens **GMKF Kids First per-trio VCFs** that are GATK Genotype-R
 
 - **No consistent cohort-wide AN.** Each trio is called independently, so a variant's internal frequency reflects only 2–6 chromosomes; there is no shared denominator across trios.
 - **Absence ≠ reference.** In a non-joint merge, a variant missing from another trio may be a no-call or low-depth site, not a confident hom-ref. Internal AC/AN therefore mis-estimates both numerator and denominator.
-- **gnomAD provides the defensible denominator.** It is large, uniformly joint-genotyped, ancestry-resolved, and ships proper filtering-allele-frequency confidence intervals. (This pipeline reaches gnomAD through the VEP cache, which relays the ancestry-resolved frequencies but *not* the confidence intervals — see [below](#faf95-is-unavailable-and-why-a-cache-cannot-supply-it). The argument for an external oracle is unaffected: a point estimate over ~807k uniformly genotyped samples is still categorically better than an AN of 6.)
+- **gnomAD provides the defensible denominator.** It is large, uniformly joint-genotyped, ancestry-resolved, and ships proper filtering-allele-frequency confidence intervals. (This pipeline reaches gnomAD through the VEP cache, which relays the ancestry-resolved frequencies but *not* the confidence intervals — see [below](#the-two-oracles-faf95-and-the-grpmax-proxy). The argument for an external oracle is unaffected: a point estimate over ~807k uniformly genotyped samples is still categorically better than an AN of 6.)
 
 Internal data still has one legitimate frequency-adjacent use: **artifact detection**. A variant recurring across many unrelated trios is more likely a systematic sequencing/mapping artifact than a truly common allele. Use that as a panel-of-normals-style **blocklist** signal (tune the recurrence count `N` empirically), never as a population AF. See [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md) and [cohort_construction.md](cohort_construction.md).
 
@@ -218,7 +218,8 @@ vep \
   --assembly GRCh38 --fasta "${REF_FASTA}" \
   --vcf --compress_output bgzip \
   --input_file "${IN_VCF}" --output_file "${OUT_VCF}" \
-  --af_gnomade --af_gnomadg          # per-population + global point AFs. No faf95 exists.
+  --af_gnomade --af_gnomadg          # per-population + global point AFs (the FALLBACK oracle).
+                                     # faf95 does not come from here — see the joint slim above.
 ```
 
 There is **no** `bcftools annotate` transfer from a gnomAD sites VCF — that is the whole VEP-only
@@ -248,7 +249,8 @@ frequency source, add it here — nothing else in the codebase reaches around th
 
 ## Known limitations
 
-The frequency-specific gaps — **no faf95** (§2), **the MAX_AF trap** (§2a), **no nhomalt** (§3) —
+The frequency-specific entries — **faf95** (§2, resolved by the opt-in slim), **the MAX_AF trap**
+(§2a, still live), **nhomalt** (§3, resolved by the same slim) —
 are documented once, in **[limitations.md](limitations.md)**, with the cost to fix each. Summarised
 above rather than restated here. What is specific to this layer:
 

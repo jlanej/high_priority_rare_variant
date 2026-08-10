@@ -28,8 +28,9 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    jointly genotyped, so internal cohort AC/AN is meaningless (absent ≠ hom-ref). Never `bcftools
    merge` the trios into a genotype matrix and never compute population frequency from internal
    counts; internal recurrence is valid only as an artifact/blocklist signal.
-   The rarity field is a **grpmax proxy** — max AF over the grpmax-*eligible* groups
-   (`annotations.GRPMAX_POPS` = AFR/AMR/EAS/NFE/SAS) — read from the CSQ. Two hard rules:
+   The **fallback** rarity field is a **grpmax proxy** — max AF over the grpmax-*eligible* groups
+   (`annotations.GRPMAX_POPS` = AFR/AMR/EAS/NFE/SAS) — read from the CSQ; the preferred field is
+   real `faf95` (below). Two hard rules that bind BOTH arms:
    - **Never substitute VEP's `MAX_AF`.** It maxes over the bottlenecked founder groups grpmax
      deliberately excludes (ami AN≈900, asj, fin, mid) and over tiny 1000G populations; one allele
      there reads as AF≈1e-3 and silently kills dominant candidates at the 1e-4 gate.
@@ -57,7 +58,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    `CLNREVSTAT` at any price; it is prefixed `clinvar_` rather than `vep_` precisely so the
    different oracle is visible. **REVEL and AlphaMissense are plugins** (dedicated files, never
    dbNSFP — 32 GB for 5 columns and a dead URL). Remaining accepted losses (see
-   [docs/README.md](docs/README.md#canonical-defaults)): no faf95 CI, no nhomalt, no LOFTEE. Below MODERATE impact there are now TWO keep-paths: **SpliceAI** (max delta
+   [docs/README.md](docs/README.md#canonical-defaults)): no LOFTEE, and no exome/genome discordance
+   flag. faf95 + nhomalt are RESTORED by the optional gnomAD joint slim (rule 2). Below MODERATE impact there are now TWO keep-paths: **SpliceAI** (max delta
    ≥ `spliceai_ds_min`, default 0.2 — the deep-intronic/synonymous splice signal; checked first) and
    **CADD** (≥ `cadd_phred_supporting`, default 25.3 — everything else non-coding). SpliceAI is a
    VEP plugin over the precomputed RAW scores (`resources.vep.spliceai_snv`/`spliceai_indel`); the

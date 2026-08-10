@@ -5,14 +5,16 @@ How this pipeline recognizes and tiers germline cancer-predisposition-syndrome (
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ### ⚠ Status: this overlay is a **TARGET**, and its rarity field is not `faf95`
+> ### ⚠ Status: this overlay is a **TARGET**; its rarity field depends on one optional resource
 >
 > The CPS tiering described here (gene-list union, second-hit boost, graded PVS1) is **not wired
-> into the pipeline** — it is the design for a reporting overlay. Two corrections to the rarity
-> statements below, from the **VEP-only contract** (VEP 115 cache + CADD and SpliceAI plugins,
+> into the pipeline** — it is the design for a reporting overlay. Corrections to the rarity
+> statements below, from the **VEP-centric contract** (VEP 115 cache + CADD/SpliceAI/REVEL/
+> AlphaMissense plugins, plus two `bcftools` transfers,
 > nothing else):
 > the shared rarity gate reads a gnomAD v4.1 **grpmax point-estimate proxy**, **not** `faf95` (the
-> cache has no AC/AN ⇒ faf95 is unrecoverable, a TARGET); and **`nhomalt` does not exist**, so
+> cache has no AC/AN, so faf95 needs the optional gnomAD joint slim); and **`nhomalt` likewise
+> requires that slim**, so
 > every "absent-or-singleton + low `nhomalt`" condition below is a TARGET, not a live gate.
 > Likewise LOFTEE HC, REVEL/AlphaMissense and ClinVar **stars** are unavailable — a
 > "ClinVar P/LP at ≥ 2★" rule is currently **unimplementable**. **SpliceAI IS available** (a VEP

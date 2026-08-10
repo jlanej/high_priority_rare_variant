@@ -46,7 +46,10 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 >
 > Every annotation the pipeline reads comes from **one** tool: VEP 115 GRCh38 — its cache plus its
 > plugins (CADD, and **SpliceAI** — required by default, `resources.vep.spliceai_required: true`).
-> Exactly ONE file is bcftools-transferred in — the **ClinVar sites VCF** (`resources.clinvar.vcf`),
+> Exactly TWO files are bcftools-transferred in — the **ClinVar sites VCF** (`resources.clinvar.vcf`),
+> supplying `CLNREVSTAT` ⇒ `clinvar_stars`, and the optional **gnomAD v4.1 joint slim**
+> (`resources.gnomad.sites_slim`), supplying real **faf95** + **nhomalt**. Both exist because the
+> cache cannot supply those fields at any price.
 > supplying `CLNREVSTAT` ⇒ `clinvar_stars`, which the cache carries at no price. No gnomAD / dbNSFP / LOFTEE file is
 > bcftools-transferred in. Several rows below therefore describe **targets and reference science, not
 > what runs** — each is marked. The **IMPLEMENTED** column is what the code does.

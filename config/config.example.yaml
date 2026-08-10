@@ -40,15 +40,19 @@ reference:
 # Provide the ones you have; steps that need a missing resource fail loudly with a
 # clear message rather than silently skipping annotation.
 # VEP-CENTRIC CONTRACT. The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS
-# (CADD, SpliceAI, REVEL, AlphaMissense) plus EXACTLY ONE bcftools transfer — the ClinVar sites
-# VCF, which supplies CLNREVSTAT (gold stars) that the cache carries at no price. Population
+# (CADD, SpliceAI, REVEL, AlphaMissense) plus EXACTLY TWO bcftools transfers — the ClinVar sites
+# VCF (CLNREVSTAT -> gold stars) and the optional gnomAD v4.1 joint slim (faf95 + nhomalt). Both
+# exist because the cache cannot supply those fields at any price. Population
 # frequency (gnomAD v4.1 per-population AFs) and ClinVar CLIN_SIG come out of the cache itself via
 # --af_gnomade/--af_gnomadg and --check_existing. What the contract still costs, in one place
 # (details in docs/allele_frequency.md):
-#   * no faf95        — the cache has no AC/AN, so the 95% CI correction cannot be computed at
-#                       any price. Rarity uses a grpmax-PROXY point estimate instead, which runs
-#                       slightly stringent on low-count alleles (errs toward dropping).
-#   * no nhomalt      — the gnomAD-homozygote sanity check on de novo calls is gone.
+#   * faf95: WIRED (OPT-IN) — via resources.gnomad.sites_slim. The cache has no AC/AN, so the
+#                       95% CI correction can only come from the gnomAD data itself. WITHOUT the
+#                       slim, rarity falls back to a grpmax-PROXY point estimate, which runs
+#                       slightly stringent on low-count alleles (errs toward dropping). WITH it,
+#                       the same cutoffs RETAIN MORE. `rarity_oracle` reports which one fired.
+#   * nhomalt: WIRED (same slim) — reported per variant, and biallelic calls whose allele gnomAD
+#                       already carries homozygotes for raise nhomalt_recessive_conflict.
 #   * SpliceAI: WIRED  — precomputed raw splice deltas via the SpliceAI plugin (resources.vep.
 #                       spliceai_snv/indel) restore deep-intronic + exonic-synonymous splice
 #                       detection. Caveat: the PRECOMPUTED set does not score every indel/context,
@@ -162,7 +166,8 @@ resources:
     # `faf95` is inert until the slim is actually configured, so setting it early is harmless.
     oracle: faf95                   # faf95 | grpmax_proxy
   clinvar:
-    # The ONE bcftools-transferred annotation in Step 2 — everything else arrives as a CSQ field
+    # One of Step 2's TWO bcftools-transferred annotations (the other is the gnomAD joint slim
+    # above) — everything else arrives as a CSQ field
     # from VEP. It has to be a transfer: the VEP cache exposes CLIN_SIG but carries NO CLNREVSTAT,
     # so review status and therefore GOLD STARS are unavailable from the cache at any price.
     # WITH the transfer, Step 9's clinical term scales its POSITIVE limb by low_star_scale below
@@ -236,11 +241,14 @@ inputs:
 # --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
 filters:
   rarity:
-    # THE rarity field is a gnomAD v4.1 grpmax PROXY: max AF over the grpmax-eligible ancestry
-    # groups (AFR/AMR/EAS/NFE/SAS) read from the VEP CSQ. Fixed in annotations.frequency() —
-    # this block sets the cutoffs, not the field. Two things to hold onto:
-    #  * It is a POINT ESTIMATE, not faf95. faf95 needs AC/AN; the cache has neither. So these
-    #    gates sit ~one CI-width stringent on low-count alleles (they err toward dropping).
+    # THE rarity field is chosen per variant in annotations.frequency(): real faf95 (from the
+    # optional gnomAD joint slim) first, else a gnomAD v4.1 grpmax PROXY — max AF over the
+    # grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS) read from the VEP CSQ. This block sets
+    # the CUTOFFS, not the field. Two things to hold onto:
+    #  * WHICH oracle these cutoffs are applied to is per variant: real faf95 when
+    #    resources.gnomad.sites_slim is configured and gnomAD published one, else the grpmax
+    #    POINT ESTIMATE (the cache has no AC/AN, so that arm can never be CI-corrected). On the
+    #    point-estimate arm the gates sit ~one CI-width stringent (they err toward dropping).
     #  * It deliberately EXCLUDES asj/fin/mid/ami/remaining, exactly as gnomAD's own grpmax does.
     #    VEP's MAX_AF does not, and using it here would let one allele in a ~900-AN founder group
     #    read as AF ~1e-3 and silently kill dominant candidates ten-fold under this cutoff.
@@ -667,8 +675,9 @@ prioritization:
     nhomalt_recessive_max: 0
     rarity:
       # Rarity strength bands on the grpmax-PROXY AF. TWO CAVEATS TRAVEL WITH THIS COLUMN.
-      # (1) It is a POINT ESTIMATE, not faf95 — the cache has no AC/AN, so the CI correction is
-      # unrecoverable at any price. Do NOT present these bands as ACMG PM2 (hprv applies PM2 at
+      # (1) WHICH oracle produced the value is per variant and is reported in `rarity_oracle`:
+      # real faf95 with the gnomAD slim, else the grpmax POINT ESTIMATE. Do NOT present these
+      # bands as ACMG PM2 on either arm (hprv applies PM2 at
       # Supporting only, and PM2 is evidence, not the gate). (2) Audit A-4, a validity AND equity
       # problem: the proxy is the MAX over grpmax-eligible groups REGARDLESS of the cohort's
       # actual ancestry composition, so in a multi-ancestry cohort like GMKF the effective
