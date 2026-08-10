@@ -58,13 +58,14 @@ def build_classifier(cfg):
         return None
 
     def classify(v):
-        fr = A.frequency(v)
+        fr = A.frequency(v, cfg)
         if fr is not None and fr >= ba1:            # ClinGen BA1 — never rescue
             return False, "ba1"
-        # ClinVar P/LP override. Previously gated on >= 2 review stars; the VEP cache carries
-        # no review status, so an unstarred assertion is all we get and the gate is gone. This
-        # admits 1-star single-submitter P/LP calls — i.e. it over-retains rather than
-        # over-drops, which is the safe direction for a screen but adds curation load.
+        # ClinVar P/LP override, deliberately STAR-BLIND. Review status IS available now
+        # (clinvar_stars, from the Step-2 ClinVar transfer) but is not consulted here: a
+        # keep/drop gate on it would violate never-drop. A 1-star single-submitter assertion is
+        # kept and reviewed, and RANKED below a 3-star one by Step 9. Over-retention rather than
+        # over-dropping — the safe direction for a screen, at the cost of curation load.
         plp = A.clnsig_is_plp(v)
         rarity_ok = (fr is None) or (fr < rec_max) or plp
         if not rarity_ok:

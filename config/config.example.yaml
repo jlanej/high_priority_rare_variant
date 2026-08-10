@@ -137,13 +137,38 @@ resources:
     # Tip: the CADD plugin's per-variant tabix reads into the ~81 GB file are the per-shard
     # bottleneck; if it lives on a network/FUSE mount, stage it to node-local disk first.
     shard_by_contig: true
+  gnomad:
+    # The gnomAD v4.1 JOINT (exomes+genomes) sites slim — 5 of ~664 INFO fields, ~10 GB prepared.
+    # OPT-IN: `prepare_resources.sh --only gnomad_sites fetch`. It is not in the default set
+    # because preparing it streams ~877 GB (the slim is all that lands, and GCS egress is free).
+    #
+    # WHAT IT CHANGES, and it is the most consequential resource in the pipeline: it upgrades the
+    # rarity oracle from a grpmax point-estimate PROXY to gnomAD's real **faf95** — the 95% CI
+    # LOWER bound, which is the quantity ACMG/ClinGen actually specify for frequency filtering
+    # (Whiffin 2017). Because faf95 <= the point estimate, the SAME cutoff RETAINS MORE, not
+    # fewer: it stops discarding low-count alleles whose confidence interval never justified the
+    # call. Expect a larger candidate list, not a smaller one. See docs/allele_frequency.md.
+    #
+    # Verified against the real v4.1 joint header: the FAF group set is afr/amr/eas/mid/nfe/sas —
+    # i.e. GRPMAX_POPS plus `mid`, and it EXCLUDES the bottlenecked ami/asj/fin that golden rule 2
+    # exists to keep out. So faf95 does NOT reintroduce the MAX_AF trap. `mid` is the one
+    # deviation, so the group that produced the max rides along as `faf95_group` for review.
+    sites_slim: ${GNOMAD_SITES}     # gnomad.joint.v4.1.sites.slim.vcf.gz (+ .tbi)
+    # Which oracle annotations.frequency() reads. THE single chokepoint every rarity gate uses.
+    #   faf95        - prefer faf95, fall back to the grpmax proxy per-variant when absent
+    #                  (absent faf95 means no group has a confidently non-zero AF, so the proxy
+    #                  is the more STRINGENT of the two there — the safe direction).
+    #   grpmax_proxy - ignore faf95 entirely; the pre-transfer behaviour, bit-for-bit.
+    # `faf95` is inert until the slim is actually configured, so setting it early is harmless.
+    oracle: faf95                   # faf95 | grpmax_proxy
   clinvar:
     # The ONE bcftools-transferred annotation in Step 2 — everything else arrives as a CSQ field
     # from VEP. It has to be a transfer: the VEP cache exposes CLIN_SIG but carries NO CLNREVSTAT,
     # so review status and therefore GOLD STARS are unavailable from the cache at any price.
-    # Without stars, a single-submitter no-criteria "Pathogenic" assertion and a 3-star expert
-    # panel one are indistinguishable — which is why Step 9's clinical term is deliberately
-    # ungated today and why `priority_points` must never be read as ACMG points.
+    # WITH the transfer, Step 9's clinical term scales its POSITIVE limb by low_star_scale below
+    # min_review_stars (below). WITHOUT it, stars are blank, the term stays at full weight, and a
+    # single-submitter no-criteria "Pathogenic" is indistinguishable from a 3-star expert-panel
+    # one. Either way `priority_points` must never be read as ACMG points.
     #
     # Optional and graceful: unset (or a missing file) and Step 2 skips the transfer with a
     # warning; clinvar_stars then reads UNAVAILABLE everywhere, exactly as it does now. The
@@ -249,11 +274,11 @@ filters:
     cadd_phred_supporting: 25.3
 
   clinvar:
-    # NOTE: the >=2-star auto_promote_min_stars gate is RETIRED. It needed CLNREVSTAT, which the
-    # VEP cache does not carry (it exposes CLIN_SIG only), so review status is simply unavailable
-    # and a 1-star single-submitter P/LP is now indistinguishable from an expert-panel one. The
-    # override therefore fires on ANY unstarred P/LP assertion — over-retention (more to review),
-    # not over-dropping. ClinVar here is also as stale as the cache (VEP 115 = ClinVar 2025-02),
+    # NOTE: the >=2-star auto_promote_min_stars gate stays RETIRED **by choice**, not by
+    # necessity. Stars ARE available now (resources.clinvar.vcf -> clinvar_stars), but a keep/drop
+    # gate on review status would violate never-drop: a 1-star assertion must still reach review.
+    # Stars instead RANK, in Step 9. So this override fires on ANY P/LP assertion regardless of
+    # stars — over-retention (more to review), not over-dropping. ClinVar here is also as stale as the cache (VEP 115 = ClinVar 2025-02),
     # where a ClinVar VCF would have been monthly.
     promote_sigs: ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]  # [reserved]
     flag_sigs: ["Conflicting_classifications_of_pathogenicity", "Uncertain_significance"]  # [reserved]
@@ -636,6 +661,10 @@ prioritization:
     # call. This fires only when BOTH REVEL and AlphaMissense are absent for the variant —
     # either the resources are not configured, or (expected) neither scored this substitution.
     cadd_missense_supporting: 25.3
+    # gnomAD homozygote count above which a BIALLELIC call is flagged
+    # nhomalt_recessive_conflict. Requires the gnomAD joint slim (resources.gnomad.sites_slim);
+    # without it nhomalt is absent and the flag never fires — absent is NOT 0.
+    nhomalt_recessive_max: 0
     rarity:
       # Rarity strength bands on the grpmax-PROXY AF. TWO CAVEATS TRAVEL WITH THIS COLUMN.
       # (1) It is a POINT ESTIMATE, not faf95 — the cache has no AC/AN, so the CI correction is
@@ -713,9 +742,15 @@ prioritization:
       # credit. Blank NHF means NOBODY LOOKED (the member is not an ALT carrier, has no
       # mini-CRAM, or Step 8b never ran); 0.0 means screened and clean. Scoring blank as clean
       # would silently promote exactly the calls nobody examined.
-      quality: {gt_fail: -2, nhf_flagged: -3, nhf_not_screened: 0, partner_unknown: -0.5}
-      # No star gate is possible (no CLNREVSTAT in the cache), so clinvar_review_status is
-      # emitted as UNAVAILABLE and the +4 must never be mistaken for a >=2-star assertion.
+      # nhomalt_conflict is 0.0 ON PURPOSE: a biallelic call in a gene where gnomAD already
+      # carries homozygotes of that allele is usually not the diagnosis, but how many should
+      # disqualify it depends on penetrance/onset/prevalence, none of which hprv knows. The flag
+      # (nhomalt_recessive_conflict) is reported and filterable; set a negative value to charge it.
+      quality: {gt_fail: -2, nhf_flagged: -3, nhf_not_screened: 0, partner_unknown: -0.5,
+                nhomalt_conflict: 0.0}
+      # The +4 is scaled by resources.clinvar.low_star_scale when clinvar_stars is below
+      # min_review_stars (positive limb only). Blank stars = the ClinVar transfer did not run =
+      # UNAVAILABLE = full weight; absent is NOT 0 stars.
       clinical: {p_lp: 4, conflicting_vus: 0, benign: -4}
       # moi unknown MUST be exactly 0. Any penalty there converts the score into a KNOWN-GENE
       # FILTER and destroys novel-gene discovery, violating the never-drop rule in spirit.

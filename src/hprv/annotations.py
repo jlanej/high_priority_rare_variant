@@ -104,6 +104,25 @@ F = {
     # CLNSIG from the VCF too, so a run can compare the pinned release against the cache's
     # (possibly older) CLIN_SIG. Reporting only — clnsig_is_plp still reads the cache field.
     "clnsig_clinvar": "clinvar_CLNSIG",
+    # --- gnomAD v4.1 JOINT slim (the SECOND bcftools transfer; see 02_annotate_sites.sh) ---
+    # faf95 is the real filtering allele frequency: the LOWER bound of the 95% Poisson CI, which
+    # is the quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017). The VEP cache
+    # cannot supply it at any price — the CI correction needs AC/AN, which the cache omits — so
+    # this is a transfer, prefixed `gnomad_` as a third-party namespace beside vep_/clinvar_.
+    #
+    # VERIFIED against the real v4.1 joint header + data: the FAF group set is
+    # afr/amr/eas/mid/nfe/sas, i.e. GRPMAX_POPS plus `mid`, EXCLUDING the bottlenecked ami/asj/fin.
+    # So it does not reintroduce the MAX_AF trap golden rule 2 forbids. `mid` is the single
+    # deviation, which is why the producing group rides along and is reported per variant.
+    "faf95": "gnomad_faf95",
+    "faf95_group": "gnomad_faf95_group",
+    # Homozygote count in gnomAD. The recessive false-positive tell: a "rare" homozygous call in a
+    # gene where gnomAD already carries homozygotes is usually not the diagnosis.
+    "nhomalt": "gnomad_nhomalt",
+    # Global + grpmax joint AF: REPORTING ONLY, never a filter field (golden rule 2). Carried so a
+    # reviewer can see the point estimate beside the CI-corrected value and judge the gap.
+    "gnomad_af_joint": "gnomad_AF_joint",
+    "gnomad_af_grpmax": "gnomad_AF_grpmax",
     # --- population frequency (gnomAD v4.1, cached; --af_gnomade / --af_gnomadg) ---
     # POINT ESTIMATES. The cache carries no AC/AN, so faf95's CI correction is not
     # reconstructible from them at any cost — it is simply absent, not approximated.
@@ -200,16 +219,69 @@ def grpmax_af(variant) -> Optional[float]:
     return _max_float(variant, *_GRPMAX_KEYS)
 
 
-def frequency(variant) -> Optional[float]:
+def faf95(variant) -> Optional[float]:
+    """gnomAD v4.1 joint **faf95** — the 95%-CI-corrected filtering allele frequency, or None.
+
+    The quantity ACMG/ClinGen actually specify for frequency filtering (Whiffin 2017): the LOWER
+    bound of the Poisson 95% CI on the population AF, maximised over the FAF-eligible genetic
+    ancestry groups. Available only when the gnomAD joint slim is transferred in Step 2.
+
+    **None is not "AF = 0".** gnomAD emits fafmax only where some group's CI lower bound is above
+    zero; on a chr22 sample 74% of records carried none, and where it was present it was always
+    > 0. So None means "no group has a confidently non-zero frequency" — which for a rarity gate
+    is the rarest case, and is why `frequency()` falls back to the point-estimate proxy there
+    (the proxy is the MORE stringent of the two, the safe direction).
+    """
+    return _max_float(variant, "faf95")
+
+
+def faf95_group(variant) -> Optional[str]:
+    """Which genetic ancestry group produced faf95 (afr/amr/eas/mid/nfe/sas), or None.
+
+    Reported for the same reason `max_af_pops` rides beside `max_af`: the FAF group set is
+    GRPMAX_POPS **plus `mid`**, so this is how a reviewer sees the one case where the rarity call
+    rests on a group hprv's own proxy would have excluded.
+    """
+    return _str(variant, "faf95_group")
+
+
+def nhomalt(variant) -> Optional[int]:
+    """Homozygote count in gnomAD joint, or None if the transfer did not run.
+
+    None and 0 are DIFFERENT: None = nobody looked, 0 = gnomAD has this allele and observed no
+    homozygotes. A hom-recessive call in a gene where gnomAD already carries homozygotes is
+    usually not the diagnosis; that check is only meaningful when the value is actually present.
+    """
+    v = _max_float(variant, "nhomalt")
+    return None if v is None else int(v)
+
+
+def frequency(variant, cfg=None) -> Optional[float]:
     """The rarity field every gate reads — the single chokepoint for population frequency.
 
-    None => no grpmax-eligible group reports this allele => treat as rarest. Note that
-    under the VEP-cache contract, absence is weaker evidence than it was with a gnomAD
-    sites VCF: the cache only carries frequencies for alleles accessioned into dbSNP, so
-    an un-accessioned gnomAD variant silently returns no AF and reads as 'absent'. That
-    biases toward retention (extra review), not toward missed calls.
+    **Precedence: faf95, then the grpmax point-estimate proxy.** Never MAX_AF, never a global AF —
+    those fail in opposite directions and there is no safe single fallback (golden rule 2).
+
+    faf95 is preferred because it is the quantity the frequency filter is *supposed* to use: a CI
+    lower bound, so a gate on it only fires when the allele is confidently common. The proxy is a
+    point estimate and therefore sits ~one CI-width HIGH on low-count alleles, discarding
+    candidates the interval never justified discarding. Consequence to expect when the gnomAD slim
+    is first supplied: the SAME cutoffs RETAIN MORE, not fewer.
+
+    Falling back to the proxy when faf95 is absent is deliberate and is the STRINGENT direction:
+    absent faf95 means no group has a confidently non-zero AF, and the proxy is >= faf95 wherever
+    both exist, so the fallback can only ever filter more — never silently retain something faf95
+    would have caught.
+
+    `cfg` selects the oracle (`resources.gnomad.oracle`: faf95 | grpmax_proxy) and defaults to
+    faf95. Passing None keeps faf95 precedence, which is inert when the transfer did not run.
     """
-    return grpmax_af(variant)
+    if cfg is not None:
+        from .config import get as _get
+        if str(_get(cfg, "resources.gnomad.oracle", "faf95")).lower() == "grpmax_proxy":
+            return grpmax_af(variant)
+    f = faf95(variant)
+    return grpmax_af(variant) if f is None else f
 
 
 # --- functional predictors ---------------------------------------------------

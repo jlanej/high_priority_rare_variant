@@ -42,6 +42,8 @@ bash "$REPO/pipeline/run_pipeline.sh" --config "$CFG" --from 0 --to 1
 python3 "$HERE/mock_vep.py" --in "$WORK/cohort.sites.vcf.gz" \
     --lookup "$W/annot.tsv" --out "$W/cohort.sites.vep.vcf"
 bgzip -f "$W/cohort.sites.vep.vcf"; tabix -f -p vcf "$W/cohort.sites.vep.vcf.gz"
+# The mock gnomAD joint slim -> Step 2's second bcftools transfer (faf95 + nhomalt).
+bgzip -f "$W/gnomad.slim.vcf"; tabix -f -p vcf "$W/gnomad.slim.vcf.gz"
 
 # --- Steps 2-9 for real. Step 2 ingests the VEP VCF above (resources.vep.annotated_vcf in the
 #     mock config), so its build checks + split-vep + selector + frequency guard all execute.

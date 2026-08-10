@@ -32,7 +32,13 @@ COLS = [
     # grpmax_af is THE rarity field (annotations.frequency()); max_af/max_af_pops ride
     # along for review only, so a curator can see when a call is being driven by a
     # founder-group frequency that grpmax deliberately ignores.
-    "consequence", "impact", "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds",
+    # grpmax_af is the point-estimate PROXY; faf95 is the CI-corrected oracle when the gnomAD
+    # slim was transferred. BOTH ride along so a reviewer can see the gap the CI correction
+    # closed — and frequency() (the chokepoint) prefers faf95 and falls back to the proxy.
+    # faf95_group names the ancestry group that produced it: the FAF set is GRPMAX_POPS + `mid`,
+    # so this is how the one deviation stays visible. nhomalt is the recessive false-positive tell.
+    "consequence", "impact", "grpmax_af", "faf95", "faf95_group", "nhomalt",
+    "max_af", "max_af_pops", "cadd", "spliceai_ds",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
     # IMPACT=MODERATE and selection.py returns at the impact rung), carried here purely so
     # Step 9's missense tier can be calibrated rather than an off-label CADD rank.
@@ -70,7 +76,9 @@ def base_row(trio_id, v, gt, mode, pair_id=""):
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
-        "grpmax_af": fmt(A.grpmax_af(v)), "max_af": fmt(A._max_float(v, "max_af")),
+        "grpmax_af": fmt(A.grpmax_af(v)), "faf95": fmt(A.faf95(v)),
+        "faf95_group": A.faf95_group(v) or "", "nhomalt": fmt(A.nhomalt(v)),
+        "max_af": fmt(A._max_float(v, "max_af")),
         "max_af_pops": A._str(v, "max_af_pops") or "", "cadd": fmt(A.cadd(v)),
         "spliceai_ds": fmt(A.spliceai_ds(v)),   # max SpliceAI delta score, for reviewer tiering
         "revel": fmt(A.revel(v)), "alphamissense": fmt(A.alphamissense(v)),
@@ -107,7 +115,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     rec_strict = float(get(cfg, "filters.rarity.recessive_strict", 1e-3))
 
     def rare(v, limit):
-        fr = A.frequency(v)
+        fr = A.frequency(v, cfg)
         return fr is None or fr < limit
 
     def tag_strict(r, v):
@@ -117,7 +125,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         directly; the two previously disagreed (this read faf95 with no grpmax fallback,
         so a variant with only a grpmax AF silently never earned the flag).
         """
-        fr = A.frequency(v)
+        fr = A.frequency(v, cfg)
         if fr is not None and fr < rec_strict:
             r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "high_conf_rarity"
         return r
@@ -144,7 +152,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         c, d, m = gt.c, gt.d, gt.m
         gc, gd, gmm = v.gt_types[c], v.gt_types[d], v.gt_types[m]
         if gc in (G.HET, G.HOM_ALT) and A.clnsig_is_plp(v):
-            _fr = A.frequency(v)
+            _fr = A.frequency(v, cfg)
             if _fr is not None and _fr >= rec_max:
                 n_plp_inert += 1   # P/LP the child carries, dropped by every mode's rarity gate
 

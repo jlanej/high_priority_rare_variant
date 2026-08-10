@@ -115,6 +115,10 @@ if run_step 2; then
         # ClinVar's CLIN_SIG still comes from the cache, and the two missense predictors are inert
         # at selection by construction. So they warn rather than halt. Reported here anyway so an
         # operator sees which evidence will be live BEFORE a multi-hour VEP pass, not after.
+        # The gnomAD joint slim is the single most consequential optional resource: with it the
+        # rarity oracle is real faf95, without it a grpmax point-estimate proxy. Warn, never halt
+        # — the proxy is the documented, currently-shipping behaviour, not a broken state.
+        _opt HPRV_GNOMAD_SITES    "gnomAD joint slim (resources.gnomad.sites_slim) — rarity falls back to the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward DROPPING); no faf95, no nhomalt"
         _opt HPRV_CLINVAR_VCF     "ClinVar sites VCF (resources.clinvar.vcf) — no review status/GOLD STARS; a 1-star and a 3-star assertion will be indistinguishable"
         _opt HPRV_REVEL           "REVEL (resources.vep.revel) — Step 9's missense tier falls back to an off-label CADD rank"
         _opt HPRV_ALPHAMISSENSE   "AlphaMissense (resources.vep.alphamissense) — no SVI-endorsed missense predictor"
