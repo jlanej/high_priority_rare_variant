@@ -55,6 +55,8 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > |--------|-------------|
 > | `faf95` | The cache has no AC/AN, so the 95% CI correction **cannot be computed at any price**. Rarity uses a grpmax **point-estimate proxy**, which runs slightly stringent on low-count alleles. |
 > | `nhomalt` | No gnomAD-homozygote sanity check on de novo calls. |
+> | ~~ClinVar stars~~ | **RESTORED.** The ClinVar sites VCF is now transferred in Step 2 (`resources.clinvar.vcf`), so `CLNREVSTAT` -> `clinvar_stars` (0-4) is available. It is a Step-9 RANKING input, never a keep/drop gate. Absent transfer = blank, which is *not* 0 stars. |
+> | ~~REVEL / AlphaMissense~~ | **RESTORED** as VEP plugins (dedicated files, not dbNSFP). Still **no effect on selection** — see the note under the functional table; they make Step 9's missense tier calibrated instead of an off-label CADD rank. |
 > | LOFTEE | No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for the planned tiering step. |
 > | ClinVar stars | No `CLNREVSTAT` ⇒ the ≥2★ gate is unimplementable; unstarred P/LP is honored. ClinVar is also as stale as the cache (VEP 115 ⇒ ClinVar 2025-02). |
 > | REVEL / AlphaMissense / MPC | **No loss to selection** — see the note under the functional table. |
@@ -123,20 +125,30 @@ Two honest caveats on that CADD 25.3:
   Read it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3 evidence.
 - There is no ClinGen-endorsed non-coding CADD threshold to replace it with.
 
-**Why REVEL / AlphaMissense / MPC are not listed — they never did anything.** They are
-missense-only scores; every missense is `IMPACT=MODERATE`; rung 1 keeps it and returns *before*
-any predictor is consulted. So those branches were **unreachable even when the code contained
-them** — removing dbNSFP cost the screen exactly zero discrimination. This is asserted in CI
-(`assert_integration.py`: no site may be kept via `revel`/`alphamissense`/`mpc`).
+**Why REVEL / AlphaMissense / MPC are not listed as SELECTION evidence — they cannot be.** They
+are missense-only scores; every missense is `IMPACT=MODERATE`; rung 1 keeps it and returns
+*before* any predictor is consulted. So those branches are **unreachable regardless of whether
+the resource is configured** — this is a property of the ladder, not of the annotation contract.
+Asserted in CI (`assert_integration.py`: no site may be kept via `revel`/`alphamissense`/`mpc`).
+
+REVEL and AlphaMissense **are** wired now (VEP plugins, dedicated files — see
+[resources.md](resources.md)), and that changes nothing above: they add and remove no candidates.
+Their consumer is **Step 9's missense tier**, which without them can only report an off-label
+CADD rank (`missense_evidence_source=cadd_offlabel`). Configuring them makes that tier calibrated.
+If you expected a sharper screen, this is not it — see [prioritization.md](prioritization.md).
 
 **On "never stack correlated tools":** the ladder is an OR, but with one live functional rung
 there is nothing to stack. If you ever narrow `keep_impacts` to `[HIGH]`, missense would fall
 through to CADD alone — coherent, but note ClinGen's one-tool rule governs **PP3/BP4 evidence
 assignment**, and this screen assigns no ACMG weight.
 
-*TARGET (not implemented — needs resources this contract does not have):* LOFTEE HC-no-flags +
-Abou-Tayoun PVS1 grading; REVEL PP3 0.644/0.773/0.932 + BP4 ≤0.290/≤0.183; AlphaMissense
-≥0.564; MPC ≥2. These specify the
+*Status:* REVEL PP3 0.644/0.773/0.932 + BP4 ≤0.290 and AlphaMissense ≥0.564 are **implemented as
+Step-9 tier cut points** (`prioritization.variant_tier.revel_*` / `alphamissense_*`), consulted in
+a fixed precedence — REVEL, then AlphaMissense, then off-label CADD — never as a max over whatever
+is available, because best-of-N is an uncalibrated cherry-pick. hprv still assigns **no ACMG
+weight**: the same cut points are used to ORDER candidates.
+*Still NOT implemented (needs resources this contract does not have):* LOFTEE HC-no-flags +
+Abou-Tayoun PVS1 grading; MPC ≥2. These specify the
 planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one** predictor
 (REVEL is the ClinGen-calibrated choice), chosen before seeing results.
 

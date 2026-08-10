@@ -142,33 +142,51 @@ The plugin code is still baked into the image, so re-enabling is config, not a r
 
 **Cost to fix:** ~13 GB (mostly the GERP bigwig).
 
-### 6. No ClinVar review status — the ≥2★ gate is retired
+### 6. ClinVar review status — RESOLVED, via the one bcftools transfer
 
-The cache exposes `CLIN_SIG` but **no `CLNREVSTAT`**, so star ratings do not exist. A 1★
-single-submitter P/LP assertion is now indistinguishable from an expert-panel one, and the
-override honors any unstarred P/LP. This **over-retains** (more to review) rather than
-over-dropping — the safe direction for a screen, but it does admit known-noisy assertions.
+The VEP cache exposes `CLIN_SIG` but **no `CLNREVSTAT`** at any price, so stars cannot come from
+it. They now come from the ClinVar sites VCF itself, transferred in Step 2
+(`resources.clinvar.vcf`) — the single non-CSQ annotation in the pipeline, and the reason the
+transfer machinery exists at all. `clinvar_stars` (0-4) rides on every candidate row and into the
+igv.js review table. Transferring the VCF also **un-stales** ClinVar: VEP 115 pins ClinVar
+2025-02, where the VCF ships weekly, and the transferred release is version-pinned and recorded.
 
-ClinVar is also **as stale as the cache**: VEP 115 pins ClinVar 2025-02, where a ClinVar VCF
-ships monthly. Reclassification is real; treat P/LP as a triage prior, never an answer.
+Three properties worth stating, because each is a place this could have gone wrong:
 
-**Cost to fix:** ~0.18 GB — the cheapest item on this list by a wide margin, and it also
-un-stales ClinVar.
+- **Stars RANK, they never gate.** The screen (Step 3) is deliberately star-blind: a 1★ assertion
+  still reaches review, it is merely ranked below a 3★ one. Reinstating the old ≥2★ keep/drop gate
+  would violate never-drop.
+- **Blank is not zero.** Absent = the transfer did not run (nobody looked); `0` = ClinVar has a
+  record whose submitter provided no assertion criteria. Conflating them would silently damp every
+  P/LP assertion in a run with no ClinVar resource, so an absent star count leaves the Step-9
+  clinical term at **full** weight.
+- **Only the positive limb is damped.** A low-star *benign* assertion is not shrunk toward zero —
+  that would promote a poorly-reviewed benign call, the opposite of the intent.
 
-### 7. No REVEL / AlphaMissense / MPC — and this costs the screen nothing
+Reclassification is still real; treat P/LP as a triage prior, never an answer.
 
-Listed for completeness, because it looks alarming and isn't.
+**Cost:** ~0.18 GB.
+
+### 7. REVEL / AlphaMissense change the SCREEN by nothing — and that is structural
+
+Listed because it looks alarming and isn't, and because the conclusion survives having wired them.
 
 These are **missense-only** scores. Every missense is `IMPACT=MODERATE`. `selection.py` keeps
 MODERATE at the impact rung and **returns before any predictor is consulted**. So these branches
-were **unreachable even when the code contained them and dbNSFP was configured** — their
-calibrated cutoffs did none of the discriminative work the docs advertised. Removing dbNSFP cost
-exactly zero selection power, and CI now asserts these keep-reasons never fire.
+are **unreachable whether or not the resource is configured** — a property of the ladder, not of
+the annotation contract. CI asserts these keep-reasons never fire.
 
-The genuine loss is **reporting/tiering**: a curator no longer sees a REVEL score next to a
-missense candidate, and the planned ACMG PP3/BP4 step will need one. If that step is built,
-ClinGen SVI says commit to **one** predictor chosen before seeing results — REVEL is the
-ClinGen-calibrated option (AlphaMissense postdates the 2022 calibration).
+**Both are now wired** (VEP plugins over the dedicated files, not dbNSFP — see
+[resources.md](resources.md)), and the sentence above is unchanged by that: they add and remove no
+candidates. What they buy is the thing this section used to call the genuine loss — **reporting
+and tiering**. A curator now sees REVEL/AlphaMissense next to a missense candidate, and Step 9's
+missense tier is consulted in a fixed precedence (REVEL -> AlphaMissense -> off-label CADD ->
+none) that always reports which predictor spoke, in `missense_evidence_source`. Fixed order, not a
+max: ClinGen SVI says commit to **one** predictor chosen before seeing results, so best-of-N would
+be an uncalibrated cherry-pick. REVEL leads because its cut points are the ones Pejaver 2022
+calibrated; AlphaMissense follows (SVI now endorses it on par, and it postdates that calibration).
+
+hprv still assigns **no ACMG weight** — the cut points ORDER candidates. MPC remains unwired.
 
 **Cost to fix:** ~1.3 GB via the *dedicated* files (`AlphaMissense_hg38.tsv.gz` 643 MB,
 `revel-v1.3_all_chromosomes.zip` 667 MB) — **not** dbNSFP, whose 30 GB delivered 5 columns we

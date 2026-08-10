@@ -988,6 +988,52 @@ def assign_variant_tier(row, cfg=None) -> dict:
         out.update(variant_tier="V3", variant_tier_reason=f"spliceai_ds={ds:.3g}>={sai_sup:g}")
         return out
     if mec == "missense":
+        # PREDICTOR PRECEDENCE, and it is deliberate. ClinGen SVI's rule is to commit to ONE
+        # predictor chosen BEFORE seeing results — so this consults them in a fixed order and
+        # reports which one spoke, rather than taking the max over whatever is available (that
+        # would be a best-of-N cherry-pick with no calibration behind it). REVEL first because
+        # its PP3/BP4 cut points are the ones Pejaver 2022 calibrated; AlphaMissense next (SVI
+        # endorses it on par, and it reaches Strong where REVEL sits at Supporting); CADD last
+        # and explicitly labelled off-label. A missing score falls through to the next source —
+        # both are missense-only and neither covers every substitution.
+        rev = _num(row.get("revel"))
+        am = _num(row.get("alphamissense"))
+        rev_sup = _f(cfg, f"{pfx}.revel_supporting", 0.644)
+        rev_mod = _f(cfg, f"{pfx}.revel_moderate", 0.773)
+        rev_benign = _f(cfg, f"{pfx}.revel_benign_max", 0.290)
+        am_sup = _f(cfg, f"{pfx}.alphamissense_supporting", 0.564)
+        am_benign = _f(cfg, f"{pfx}.alphamissense_benign_max", 0.34)
+        if rev is not None:
+            if rev >= rev_sup:
+                # V4 at moderate-or-better: a calibrated predictor above Pejaver's moderate cut
+                # is stronger evidence than the supporting-only rungs that share V3.
+                tier = "V4" if rev >= rev_mod else "V3"
+                out.update(variant_tier=tier, missense_evidence_source="revel",
+                           variant_tier_reason=f"missense&revel={rev:.3g}>={rev_sup:g}"
+                                               f"(ClinGen-calibrated,Pejaver2022)")
+                return out
+            if rev <= rev_benign:
+                out.update(variant_tier="V1", missense_evidence_source="revel",
+                           variant_tier_reason=f"missense&revel={rev:.3g}<={rev_benign:g}"
+                                               "(calibrated_BP4-supporting_range)")
+                return out
+            out.update(variant_tier="V2", missense_evidence_source="revel",
+                       variant_tier_reason=f"missense&revel={rev:.3g}_between_cuts"
+                                           "(calibrated_but_indeterminate)")
+            return out
+        if am is not None:
+            if am >= am_sup:
+                out.update(variant_tier="V3", missense_evidence_source="alphamissense",
+                           variant_tier_reason=f"missense&am_pathogenicity={am:.3g}>={am_sup:g}"
+                                               "(REVEL_absent;SVI-endorsed)")
+                return out
+            if am <= am_benign:
+                out.update(variant_tier="V1", missense_evidence_source="alphamissense",
+                           variant_tier_reason=f"missense&am_pathogenicity={am:.3g}<={am_benign:g}")
+                return out
+            out.update(variant_tier="V2", missense_evidence_source="alphamissense",
+                       variant_tier_reason=f"missense&am_pathogenicity={am:.3g}_between_cuts")
+            return out
         if cadd is not None and cadd >= cadd_mis:
             out.update(variant_tier="V3", missense_evidence_source="cadd_offlabel",
                        variant_tier_reason=f"missense&cadd={cadd:.3g}>={cadd_mis:g}"
@@ -996,7 +1042,7 @@ def assign_variant_tier(row, cfg=None) -> dict:
             return out
         out.update(variant_tier="V2", missense_evidence_source="none",
                    variant_tier_reason="missense_below_cadd_cut(no_calibrated_predictor:"
-                                       "REVEL/AlphaMissense/MPC_absent)")
+                                       "REVEL/AlphaMissense_absent)")
         return out
 
     # V2 — in-frame indel. No calibrated in-frame predictor exists and the mechanism (in-frame
@@ -1149,13 +1195,17 @@ def nhf_state(row, threshold: float = 0.5, min_reads: int = 5):
 
 
 def clinvar_strength(clin_sig) -> str:
-    """``p_lp_no_star_gate`` | ``conflicting`` | ``vus`` | ``benign`` | ``absent``.
+    """``p_lp`` | ``conflicting`` | ``vus`` | ``benign`` | ``absent``.
 
-    The suffix on the P/LP value is not decoration: the VEP cache carries no ``CLNREVSTAT``, so
-    a 1-star single-submitter assertion is indistinguishable from an expert-panel one and is
-    honored identically. The release is pinned by the cache (VEP 115 => ClinVar 2025-02), not
-    independently. Matches both the VEP form (lowercase, ``&``-joined) and the ClinVar-VCF form
-    (Capitalised, ``/``- or ``,``-joined), like ``annotations.clnsig_is_plp``.
+    Classifies the SIGNIFICANCE string only. Review status is a separate axis and arrives on its
+    own column (``clinvar_stars``, from the ClinVar VCF transfer in Step 2) — the caller applies
+    the star gate. This value used to be named ``p_lp_no_star_gate`` because no star count
+    existed at any price under the cache-only contract; it does now, so the name no longer
+    encodes that limitation. When the transfer has not run, ``clinvar_stars`` is blank and the
+    clinical term stays at full weight rather than being damped as if unreviewed.
+
+    Matches both the VEP form (lowercase, ``&``-joined) and the ClinVar-VCF form (Capitalised,
+    ``/``- or ``,``-joined), like ``annotations.clnsig_is_plp``.
     """
     s = _s(clin_sig).lower()
     if not s:
@@ -1163,7 +1213,7 @@ def clinvar_strength(clin_sig) -> str:
     if "conflicting" in s:
         return "conflicting"
     if "pathogenic" in s and "likely_benign" not in s and "benign/likely" not in s:
-        return "p_lp_no_star_gate"
+        return "p_lp"
     if "benign" in s:
         return "benign"
     if "uncertain" in s:
@@ -1517,10 +1567,29 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
     # --- 1.6 clinical ---
     cs = clinvar_strength(row.get("clin_sig"))
     out["clinvar_strength"] = cs
-    out["clinvar_review_status"] = "UNAVAILABLE"   # no CLNREVSTAT in the VEP cache
-    out["pts_clinical"] = {"p_lp_no_star_gate": float(w["clinical"]["p_lp"]),
-                           "benign": float(w["clinical"]["benign"])}.get(
-                               cs, float(w["clinical"]["conflicting_vus"]))
+    # GOLD STARS. Blank/absent = the ClinVar VCF transfer did not run, which is NOT the same as
+    # 0 stars ("submitter provided no assertion criteria"). Conflating them would let a run with
+    # no ClinVar resource damp every P/LP assertion as though it were unreviewed, so an absent
+    # star count leaves the term at FULL weight and merely reports UNAVAILABLE — the same
+    # never-drop logic the NHF three-state rule uses.
+    stars = _num(row.get("clinvar_stars"))
+    min_stars = _f(cfg, "resources.clinvar.min_review_stars", 2.0)
+    low_scale = _f(cfg, "resources.clinvar.low_star_scale", 0.5)
+    base = {"p_lp": float(w["clinical"]["p_lp"]),
+            "benign": float(w["clinical"]["benign"])}.get(
+                cs, float(w["clinical"]["conflicting_vus"]))
+    if stars is None:
+        out["clinvar_review_status"] = "UNAVAILABLE"
+        out["clinvar_stars"] = ""
+        out["pts_clinical"] = base
+    else:
+        out["clinvar_review_status"] = f"{int(stars)}_star"
+        out["clinvar_stars"] = int(stars)
+        # Damp, never zero by default: a 1-star P/LP assertion is weaker evidence than a 3-star
+        # one but it is still evidence, and this layer re-ranks rather than filters. Only the
+        # POSITIVE limb is gated — a low-star BENIGN call should not have its (negative) weight
+        # shrunk toward zero, because that would PROMOTE a poorly-reviewed benign assertion.
+        out["pts_clinical"] = base * low_scale if (stars < min_stars and base > 0) else base
 
     # --- 1.7 inheritance-model coherence ---
     long_bp = _f(cfg, "prioritization.variant_tier.moi.long_gene_cds_bp", 10000.0)

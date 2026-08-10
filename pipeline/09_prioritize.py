@@ -88,13 +88,15 @@ VARIANT_COLUMNS = [
     "priority_points_prior", "rank_prior", "rank_delta", "cap_applied",
     "variant_tier", "variant_tier_reason", "molecular_effect_class",
     "nmd_status", "plof_confidence", "spliceai_status", "spliceai_ds",
-    "missense_evidence_source", "cadd", "consequence", "impact",
+    "missense_evidence_source", "revel", "alphamissense", "alphamissense_class",
+    "cadd", "consequence", "impact",
     "rarity_strength", "grpmax_af", "max_af", "max_af_pops", "rarity_driven_by_single_group",
     "constraint_gate",
     "gt_qc_pass", "gt_qc_fail_reason", "partner_leg_quality_unknown",
     "child_gt", "child_GQ", "child_DP", "child_AB",
     "nhf_status", "nhf_max_fraction", "nhf_max_reads",
-    "moi_coherence", "moi_caveat", "clinvar_strength", "clinvar_review_status", "clin_sig",
+    "moi_coherence", "moi_caveat", "clinvar_strength", "clinvar_review_status",
+    "clinvar_stars", "clin_sig",
     "gene_tier", "gene_artifact_penalty", "excess_ratio", "E_expected", "E_source",
     "n_observed", "q_nb", "per_trio", "corroboration_count",
     "sig_constraint_flag", "sig_oe_syn", "sig_caf_low", "sig_segdup", "sig_family",
@@ -814,9 +816,14 @@ def main(argv=None) -> int:
         # lookup is by SYMBOL ALONE — never routed by MOI (see parse_gene_prior_overlay).
         sc = P.score_variant(norm, grow, cfg,
                              gene_prior=prior_overlay.get(P._s(grow.get("gene")).upper()))
+        # Pass-through evidence columns. revel/alphamissense are read by score_variant for the
+        # missense tier but not re-emitted by it, so they are carried from the input row here;
+        # clinvar_stars IS re-emitted by score_variant (normalised to int or ''), so it comes
+        # from `sc` below and must NOT be listed here or the raw value would win.
         row = {c: norm.get(c) for c in ("chrom", "pos", "ref", "alt", "trio_id", "origin",
                                         "pair_id", "consequence", "impact", "spliceai_ds",
-                                        "cadd", "max_af", "max_af_pops", "child_gt",
+                                        "cadd", "revel", "alphamissense", "alphamissense_class",
+                                        "max_af", "max_af_pops", "child_gt",
                                         "child_GQ", "child_DP", "child_AB", "clin_sig",
                                         "grpmax_af", "inheritance")}
         row["gene"] = g

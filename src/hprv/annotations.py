@@ -53,6 +53,17 @@ F = {
     # v1.6+ ingests SpliceAI/MMSplice as input features, so it carries a lossy
     # re-encoding of the splice signal the SpliceAI plugin would have supplied.
     "cadd": "vep_CADD_PHRED",
+    # --- calibrated MISSENSE predictors (REVEL + AlphaMissense plugins) ---
+    # Missense-only, so they are INERT AT THE SCREEN by construction: every missense is
+    # IMPACT=MODERATE and selection.py keeps it at the impact rung before any predictor is
+    # consulted (docs/limitations.md #7). They exist for Step 9's missense tier, where they
+    # replace an off-label CADD rank with a ClinGen-calibrated one. Adding them does not change
+    # which variants are kept — only how the kept missense variants are ranked.
+    # `am_pathogenicity`/`am_class` are the PLUGIN's key names; dbNSFP's name for the same
+    # quantity is `AlphaMissense_score`, and using that would populate nothing.
+    "revel": "vep_REVEL",
+    "alphamissense": "vep_am_pathogenicity",
+    "alphamissense_class": "vep_am_class",
     # --- splice prediction (SpliceAI plugin; precomputed raw genome-wide scores) ---
     # Four per-event delta scores in [0,1]: Acceptor/Donor Gain/Loss. spliceai_ds() takes the MAX
     # = the standard SpliceAI "delta score" used for thresholding. DP_* are the predicted cryptic-
@@ -73,6 +84,16 @@ F = {
     # ratings are unavailable and the >=2-star auto-promote gate cannot be applied.
     # Values are lowercase, '&'-joined (e.g. "pathogenic&likely_pathogenic").
     "clnsig": "vep_CLIN_SIG",
+    # --- ClinVar review status (the ONE bcftools transfer; see 02_annotate_sites.sh) ---
+    # The cache has no CLNREVSTAT at any price, so gold stars require the ClinVar VCF itself.
+    # `clinvar_` (not `vep_`) marks it as transferred rather than lifted from the CSQ — a third
+    # namespace deliberately, so a reader can tell at a glance which oracle a field came from.
+    # Absent when the transfer did not run; clinvar_stars() then returns None (= UNAVAILABLE),
+    # which is NOT the same as 0 stars ("no assertion criteria provided"). Never conflate them.
+    "clnrevstat": "clinvar_CLNREVSTAT",
+    # CLNSIG from the VCF too, so a run can compare the pinned release against the cache's
+    # (possibly older) CLIN_SIG. Reporting only — clnsig_is_plp still reads the cache field.
+    "clnsig_clinvar": "clinvar_CLNSIG",
     # --- population frequency (gnomAD v4.1, cached; --af_gnomade / --af_gnomadg) ---
     # POINT ESTIMATES. The cache carries no AC/AN, so faf95's CI correction is not
     # reconstructible from them at any cost — it is simply absent, not approximated.
@@ -191,6 +212,29 @@ def cadd(variant) -> Optional[float]:
     return _max_float(variant, "cadd")
 
 
+def revel(variant) -> Optional[float]:
+    """REVEL score 0-1, or None. Missense-only — None on any non-missense is EXPECTED, not a gap.
+
+    ClinGen SVI's calibrated thresholds (Pejaver 2022) are PP3 >= 0.644 supporting / 0.773
+    moderate / 0.932 strong, BP4 <= 0.290 supporting / 0.183 moderate / 0.016 strong. hprv does
+    not assign ACMG weight; Step 9 uses the same cut points to ORDER candidates.
+    """
+    return _max_float(variant, "revel")
+
+
+def alphamissense(variant) -> Optional[float]:
+    """AlphaMissense pathogenicity 0-1, or None. Missense-only, same caveat as revel().
+
+    Note this reads the PLUGIN field (`am_pathogenicity`), not dbNSFP's `AlphaMissense_score`.
+    """
+    return _max_float(variant, "alphamissense")
+
+
+def alphamissense_class(variant) -> Optional[str]:
+    """AlphaMissense's own call: likely_benign / ambiguous / likely_pathogenic, or None."""
+    return _str(variant, "alphamissense_class")
+
+
 def spliceai_ds(variant) -> Optional[float]:
     """Max SpliceAI delta score over the four events (acceptor/donor gain/loss), or None.
 
@@ -245,6 +289,60 @@ def clnsig_is_plp(variant) -> bool:
     if "conflicting" in s:
         return False
     return "pathogenic" in s and "likely_benign" not in s and "benign/likely" not in s
+
+
+# ClinVar review status -> gold stars. Keys are CANONICALISED (see _canon_revstat): lowercase
+# with every non-alphanumeric character stripped. That is deliberate, not lazy. The VCF value
+# carries commas INSIDE it ("criteria_provided,_multiple_submitters,_no_conflicts") while the
+# field is declared Number=., so the comma is also the array separator — cyvcf2 hands it back as
+# a tuple, bcftools query joins it with commas, and a plain string compare against any one of
+# those forms breaks on the others. Canonicalising collapses all of them to one key, and it also
+# survives ClinVar's periodic renames of the separator style. The 2024 rename of
+# "conflicting_interpretations" -> "conflicting_classifications" is carried as BOTH keys, because
+# a pinned older release is still a legitimate input.
+_REVSTAT_STARS = {
+    "practiceguideline": 4,
+    "reviewedbyexpertpanel": 3,
+    "criteriaprovidedmultiplesubmittersnoconflicts": 2,
+    "criteriaprovidedsinglesubmitter": 1,
+    "criteriaprovidedconflictingclassifications": 1,
+    "criteriaprovidedconflictinginterpretations": 1,      # pre-2024 spelling
+    "noassertioncriteriaprovided": 0,
+    "noclassificationprovided": 0,
+    "noassertionprovided": 0,                             # pre-2024 spelling
+    "noclassificationsfromunflaggedrecords": 0,
+    "noassertionfromunflaggedrecords": 0,                 # pre-2024 spelling
+    "noclassificationforthesinglevariant": 0,
+    "noassertionforthesinglevariant": 0,                  # pre-2024 spelling
+}
+
+
+def _canon_revstat(value) -> str:
+    """Collapse any CLNREVSTAT rendering to a single comparable key. See _REVSTAT_STARS."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = ",".join(str(v) for v in value)
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def clnrevstat(variant) -> Optional[str]:
+    """Raw ClinVar review status, or None when the ClinVar transfer did not run."""
+    return _str(variant, "clnrevstat")
+
+
+def clinvar_stars(variant) -> Optional[int]:
+    """ClinVar gold stars 0-4, or None when unavailable.
+
+    **None and 0 are different facts and must never be merged.** None = the ClinVar transfer did
+    not run (nobody looked); 0 = ClinVar has a record whose submitter provided no assertion
+    criteria. Collapsing them would let an un-transferred run read as "every assertion is
+    unreviewed", which silently damps every ClinVar-supported candidate in Step 9.
+
+    An unrecognised status also returns None rather than 0 — a status string this table does not
+    know is an unknown, not a zero-star assertion, and ClinVar has renamed these before.
+    """
+    return _REVSTAT_STARS.get(_canon_revstat(clnrevstat(variant)))
 
 
 # --- GATK de novo tags (child-membership aware) ------------------------------

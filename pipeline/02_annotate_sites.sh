@@ -8,16 +8,20 @@
 #
 # Pipeline: VEP (cache + CADD and SpliceAI plugins) -> bcftools +split-vep (lift CSQ -> INFO).
 #
-# **VEP-only contract.** Everything downstream reads comes out of the VEP cache: the
+# **VEP-centric contract.** Almost everything downstream reads comes out of the VEP cache: the
 # gnomAD v4.1 per-population AFs (--af_gnomade/--af_gnomadg), ClinVar CLIN_SIG
-# (--check_existing), and CADD + SpliceAI from their plugins. NOTHING is transferred in
-# from an external sites VCF — no gnomAD, ClinVar, dbNSFP or LOFTEE download exists.
-# (SpliceAI DOES have a download — the precomputed raw score files the plugin reads —
-#  but it is a PLUGIN input, not a bcftools transfer, so the contract holds.)
-# The cost is real and deliberate; see docs/allele_frequency.md for the ledger:
+# (--check_existing), and CADD, SpliceAI, REVEL + AlphaMissense from their plugins. A plugin
+# score file is a PLUGIN input, not a bcftools transfer, so those do not breach the contract.
+#
+# There is exactly ONE bcftools transfer: the ClinVar sites VCF -> clinvar_CLNREVSTAT /
+# clinvar_CLNSIG, i.e. review status and GOLD STARS. It has to be a transfer because the cache
+# carries CLIN_SIG but no CLNREVSTAT at any price. It is prefixed `clinvar_` rather than `vep_`
+# so the different oracle is visible at a glance, and it is guarded by a 0-match check below.
+#
+# The remaining cost is real and deliberate; see docs/allele_frequency.md for the ledger:
 #   - no faf95 (the cache has no AC/AN, so the CI correction is not reconstructible)
-#   - no nhomalt, no LOFTEE, no ClinVar review status/stars
-# Re-adding any of them = one bcftools annotate here + its INFO field in annotations.F.
+#   - no nhomalt, no LOFTEE
+# Re-adding either = one bcftools annotate here + its INFO field in annotations.F.
 #
 # Already have a VEP VCF? Pass --vep-vcf (or set resources.vep.annotated_vcf) and the
 # VEP call is skipped entirely; the file is split-vep'd as-is. It must be VEP 115
@@ -95,6 +99,24 @@ if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
     # --vep-vcf (where --sites is not required at all, so $SITES may be empty).
     _kin="$SITES"; is_set "$PRE_VEP" && _kin="$PRE_VEP"
     _skey=""; [[ -f "$_kin" ]] && _skey="$(cksum < "$_kin" | awk '{print $1"-"$2}')"
+    # The ANNOTATION RESOURCES are part of the key, not just the input sites. A new ClinVar
+    # release reclassifies variants and a newly-supplied REVEL/AlphaMissense file adds columns —
+    # both change this output while leaving the sites union byte-identical, so a sites-only key
+    # reports "already complete" and serves the old annotation forever. (Exactly the staleness
+    # Step 9's content key was rewritten to close.) Identity is path+size+mtime, NOT a content
+    # hash: these are 0.2-80 GB of static, version-pinned reference data whose bytes never change
+    # in place, and cksum'ing ~80 GB of CADD on every invocation to detect a swap that shows up in
+    # the stat anyway would dominate the step's startup.
+    if [[ -n "$_skey" ]]; then
+        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}"; do
+            if is_set "$_res" && [[ -e "$_res" ]]; then
+                _skey+="-$(cksum <<<"$_res$(stat -c '%s-%Y' "$_res" 2>/dev/null \
+                          || stat -f '%z-%m' "$_res" 2>/dev/null)" | awk '{print $1}')"
+            else
+                _skey+="-0"   # absent is itself a state: supplying the file later must invalidate
+            fi
+        done
+    fi
     # An unreadable input leaves the key empty -> never skip; recomputing is the safe direction
     # (the missing input then fails loudly below rather than silently reusing a stale annotation).
     if [[ -n "$_skey" ]] && is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_skey" ]]; then
@@ -107,7 +129,8 @@ outdir="$(abspath_dir "$OUT")"; mkdir -p "$outdir"
 binds="$outdir"
 for r in "$SITES" "$REF" "$PRE_VEP" "${HPRV_VEP_CACHE:-}" "${HPRV_VEP_PLUGINS:-}" \
          "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
-         "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}"; do
+         "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
+         "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_CLINVAR_VCF:-}"; do
     is_set "$r" && [[ -e "$r" ]] && binds+=" $(abspath_dir "$r")"
 done
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
@@ -252,6 +275,27 @@ else
         vep_args+=(--plugin "SpliceAI,snv=${HPRV_SPLICEAI_SNV},indel=${HPRV_SPLICEAI_INDEL}")
     else warn "SpliceAI plugin inactive (score files unset or not present) — deep-intronic and exonic-synonymous splice-disrupting variants that VEP's positional terms miss will be invisible (CADD is only a weak, lossy proxy for the splice signal). See docs/resources.md to add spliceai_snv/spliceai_indel."; fi
 
+    # --- calibrated MISSENSE predictors (optional + graceful, same contract as CADD) -----------
+    # These change the SCREEN by nothing at all — missense is IMPACT=MODERATE and selection.py
+    # keeps it at the impact rung before any predictor runs (docs/limitations.md #7). They exist
+    # for Step 9's missense TIER, which without them can only report an off-label CADD rank.
+    #
+    # REVEL emits the CSQ key `REVEL` -> vep_REVEL. The score file must be sorted on the GRCh38
+    # column and tabix'd -s 1 -b 3 -e 3; a file sorted on the GRCh37 column indexes without
+    # complaint and then matches NOTHING — see scripts/prepare_resources.sh (prep_revel).
+    if is_set "${HPRV_REVEL:-}" && [[ -e "$HPRV_REVEL" ]]; then
+        vep_args+=(--plugin "REVEL,${HPRV_REVEL}")
+    else warn "REVEL plugin inactive — Step 9's missense tier falls back to an OFF-LABEL CADD rank (missense_evidence_source=cadd_offlabel). No effect on the screen. See docs/resources.md#revel."; fi
+    # AlphaMissense takes `file=` (unlike REVEL's bare path) and emits `am_pathogenicity`/`am_class`
+    # — NOT `AlphaMissense_score`, which is dbNSFP's column name for the same quantity. Copying the
+    # dbNSFP name into the want list below yields a plugin that runs and a column that is never
+    # populated. transcript_match=1 makes the plugin require the CSQ transcript to match the row's
+    # transcript instead of taking any row at the position: AlphaMissense is per-transcript, and
+    # without it a variant can be scored against a transcript VEP did not pick.
+    if is_set "${HPRV_ALPHAMISSENSE:-}" && [[ -e "$HPRV_ALPHAMISSENSE" ]]; then
+        vep_args+=(--plugin "AlphaMissense,file=${HPRV_ALPHAMISSENSE},transcript_match=1")
+    else warn "AlphaMissense plugin inactive — no effect on the screen; Step 9's missense tier loses the SVI-endorsed predictor that reaches Strong on constrained genes. See docs/resources.md#alphamissense."; fi
+
     if is_set "$SHARD_CONTIG"; then
         # --- scatter (one SLURM array task): annotate a single contig -> shard + .done, then stop.
         # No split-vep, no gather, no $OUT — the dependent gather job assembles the whole. Idempotent
@@ -310,8 +354,11 @@ GRPMAX_AF_FIELDS="gnomADe_AFR_AF gnomADe_AMR_AF gnomADe_EAS_AF gnomADe_NFE_AF gn
 SPLICEAI_FIELDS="SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
                  SpliceAI_pred_DP_AG SpliceAI_pred_DP_AL SpliceAI_pred_DP_DG SpliceAI_pred_DP_DL \
                  SpliceAI_pred_SYMBOL"
+# NB `am_pathogenicity`/`am_class` are the AlphaMissense PLUGIN's key names. dbNSFP calls the same
+# quantity `AlphaMissense_score`; using that name here would lift nothing, silently.
 want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT \
-      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS"
+      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS \
+      REVEL am_pathogenicity am_class"
 have_fields=""
 for w in $want; do
     [[ "|$csq_fmt|" == *"|$w|"* ]] && have_fields+="${have_fields:+,}$w"
@@ -414,7 +461,51 @@ hprv_run -- bcftools +split-vep -c "$have_fields" -s "$sel" -p vep_ \
 rm -f "$split_vcf".tbi "$split_vcf".csi
 index_vcf "$split_vcf"
 
-# --- no external transfers: gnomAD/ClinVar came from the cache with the CSQ above ---
+# --- ClinVar review status: the ONE external transfer -----------------------------------------
+# Everything else on this VCF is a CSQ field lifted by split-vep. This is not, and cannot be: the
+# VEP cache exposes CLIN_SIG but carries NO CLNREVSTAT, so gold stars are unreachable from the
+# cache at any price. Transferred under a `clinvar_` prefix (not `vep_`) so a reader can tell at a
+# glance which oracle a field came from.
+#
+# Optional and graceful: no configured/present ClinVar VCF -> skip with a warning, and
+# clinvar_stars reads UNAVAILABLE downstream exactly as it did before this existed.
+if is_set "${HPRV_CLINVAR_VCF:-}" && [[ -e "${HPRV_CLINVAR_VCF:-}" ]]; then
+    cv_out="$HPRV_TMPDIR/clinvar_annotated.vcf.gz"
+    # -c with `:=` renames on transfer. CLNREVSTAT is Number=. and its VALUES contain commas
+    # ("criteria_provided,_multiple_submitters,_no_conflicts"), so it arrives as an array; the
+    # canonicalising parser in annotations._canon_revstat is what makes that harmless.
+    if hprv_run -- bcftools annotate -a "$HPRV_CLINVAR_VCF" \
+            -c "INFO/clinvar_CLNREVSTAT:=INFO/CLNREVSTAT,INFO/clinvar_CLNSIG:=INFO/CLNSIG" \
+            --threads "$THREADS" -Oz -o "$cv_out" "$split_vcf"; then
+        rm -f "$cv_out".tbi "$cv_out".csi
+        index_vcf "$cv_out"
+        # THE 0-MATCH GUARD. This is the whole reason the transfer is not a one-liner. A ClinVar
+        # VCF on the wrong build, with the wrong contig naming (chr1 vs 1), or simply not indexed
+        # transfers ZERO records while bcftools exits 0 — leaving a fully-populated header over
+        # entirely empty values. Every star then reads UNAVAILABLE and the run looks like a
+        # cohort ClinVar happens to know nothing about. A cohort union always overlaps ClinVar
+        # somewhere, so 0 is a broken join, not a rare cohort. Same class of silent catastrophe
+        # as the frequency guard below, and it dies the same way.
+        n_cv="$(hprv_run -- bcftools query -i 'INFO/clinvar_CLNREVSTAT!="."' -f '\n' "$cv_out" \
+                | wc -l | tr -d '[:space:]')"
+        log "Step 2: ClinVar review status transferred to $n_cv / $n_sites sites"
+        if [[ "$n_cv" -eq 0 && "$n_sites" -gt 0 ]]; then
+            die "0/$n_sites sites received a ClinVar review status from $HPRV_CLINVAR_VCF — the \
+transfer matched NOTHING. A cohort union always overlaps ClinVar somewhere, so this is a broken join, \
+not a rare cohort. Check: (a) the ClinVar VCF is GRCh38, (b) its contig naming matches this cohort \
+(ClinVar ships bare '1', a GRCh38 cohort union is usually 'chr1' — see docs/resources.md#clinvar), \
+(c) it is tabix-indexed. Set resources.clinvar.vcf to '' to run without ClinVar stars."
+        fi
+        split_vcf="$cv_out"
+    else
+        warn "ClinVar transfer failed (bcftools annotate returned non-zero) — continuing WITHOUT review status; clinvar_stars will read UNAVAILABLE and Step 9's clinical term stays ungated"
+        rm -f "$cv_out" "$cv_out".tbi "$cv_out".csi
+    fi
+else
+    warn "no ClinVar VCF configured (resources.clinvar.vcf) — review status/GOLD STARS unavailable, so a 1-star single-submitter assertion and a 3-star expert-panel one are indistinguishable downstream. See docs/resources.md#clinvar"
+fi
+
+# --- no other external transfers: gnomAD came from the cache with the CSQ above ---
 # Presence of the FIELD only proves VEP emitted the column, not that the cache actually had
 # frequencies to put in it. A cache built without the frequency data, or an input whose alleles
 # are all un-accessioned, yields a fully-populated header over entirely empty values — and every

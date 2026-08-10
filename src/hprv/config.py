@@ -80,6 +80,15 @@ SH_MAP = {
     # SpliceAI plugin score files (precomputed raw genome-wide splice deltas). Optional, like CADD.
     "HPRV_SPLICEAI_SNV": "resources.vep.spliceai_snv",
     "HPRV_SPLICEAI_INDEL": "resources.vep.spliceai_indel",
+    # Calibrated MISSENSE predictors, both VEP plugins. They buy the SCREEN nothing (every missense
+    # is IMPACT=MODERATE and selection.py keeps it at the impact rung before any predictor runs —
+    # docs/limitations.md #7); their consumer is Step 9's missense tier, which without them can
+    # only report an off-label CADD rank. Optional, like CADD.
+    "HPRV_REVEL": "resources.vep.revel",
+    "HPRV_ALPHAMISSENSE": "resources.vep.alphamissense",
+    # ClinVar sites VCF. The ONE bcftools-transferred annotation: the VEP cache exposes CLIN_SIG
+    # but no CLNREVSTAT, so review status / gold stars are unavailable from the cache at any price.
+    "HPRV_CLINVAR_VCF": "resources.clinvar.vcf",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
     # kraken2 DB for Step-8b non-human-fraction screening (bind-mounted DATA, never baked).

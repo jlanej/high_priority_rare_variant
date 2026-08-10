@@ -88,10 +88,11 @@ is_set "${HPRV_TRIOS_FILE:-}"  || die "inputs.trios_file is unresolved — set t
 is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf_dir and/or inputs.vcf_list"
 
 # ---------------------------------------------------------------------------
-# Resource preflight. Under the VEP-only contract the entire surface is: a VEP 115 GRCh38
-# cache (which carries gnomAD v4.1 frequencies + ClinVar itself) and the CADD plugin files.
-# No gnomAD / ClinVar / dbNSFP / LOFTEE download exists to check; SpliceAI IS checked below
-# (required by default) along with the Step-2b backfill env.
+# Resource preflight. The surface is: a VEP 115 GRCh38 cache (transcripts, gnomAD v4.1
+# frequencies, ClinVar CLIN_SIG) + the CADD, SpliceAI, REVEL and AlphaMissense plugin files,
+# plus the ClinVar sites VCF (the one bcftools transfer, for review status/GOLD STARS).
+# No gnomAD / dbNSFP / LOFTEE download exists to check. SpliceAI is checked below (required by
+# default) along with the Step-2b backfill env; the rest warn and degrade.
 # Only enforced when Step 2 actually runs — a `--from 3` re-run reads annotations that are
 # already in the VCF and needs none of this. If resources.vep.annotated_vcf is set, VEP is
 # not invoked at all, so only that file has to exist.
@@ -110,6 +111,13 @@ if run_step 2; then
         # an impact-only screen is still a coherent (if narrower) run.
         _opt HPRV_CADD_SNV   "CADD SNV (primary non-coding functional evidence)"
         _opt HPRV_CADD_INDEL "CADD indel (indel-capable functional score)"
+        # ClinVar / REVEL / AlphaMissense: optional, and their absence costs the SCREEN nothing —
+        # ClinVar's CLIN_SIG still comes from the cache, and the two missense predictors are inert
+        # at selection by construction. So they warn rather than halt. Reported here anyway so an
+        # operator sees which evidence will be live BEFORE a multi-hour VEP pass, not after.
+        _opt HPRV_CLINVAR_VCF     "ClinVar sites VCF (resources.clinvar.vcf) — no review status/GOLD STARS; a 1-star and a 3-star assertion will be indistinguishable"
+        _opt HPRV_REVEL           "REVEL (resources.vep.revel) — Step 9's missense tier falls back to an off-label CADD rank"
+        _opt HPRV_ALPHAMISSENSE   "AlphaMissense (resources.vep.alphamissense) — no SVI-endorsed missense predictor"
         # SpliceAI is part of the DEFAULT screen (resources.vep.spliceai_required, default true):
         # it is the only signal reaching deep-intronic cryptic sites + exonic-synonymous splice
         # disruption, so its silent absence is a materially weaker screen, not a cosmetic loss.

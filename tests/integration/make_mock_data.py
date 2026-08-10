@@ -73,6 +73,9 @@ V = []
 def add(**k):
     k.setdefault("cadd", ""); k.setdefault("af", None); k.setdefault("af_pop", "gnomADe_NFE_AF")
     k.setdefault("spliceai", "")
+    # Calibrated missense predictors. Default ABSENT (not 0.0) so most rows exercise the
+    # fall-through to CADD/none, and the few that set them exercise the calibrated limbs.
+    k.setdefault("revel", ""); k.setdefault("alphamissense", "")
     k.setdefault("clnsig", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
     V.append(k)
 
@@ -83,12 +86,15 @@ add(file="A", chrom="chr1", pos=5000, gene="GENE1", csq="stop_gained", impact="H
     hidenovo="CH_A",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
 # 2) homozygous recessive, MODERATE missense, rare -> mode=hom_recessive
+# REVEL >= 0.773 (Pejaver moderate) with a LOW cadd: the ladder must report revel, not cadd,
+# and must reach V4 — this is the whole point of adding a calibrated predictor.
 add(file="A", chrom="chr1", pos=8000, gene="GENE2", csq="missense_variant", impact="MODERATE",
-    af=5e-4,
+    af=5e-4, cadd="3", revel="0.85",
     gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/1", 99, 40)})
 # 3+4) compound het in GENE3 (var3 maternal, var4 paternal) -> mode=compound_het
+# AlphaMissense only (REVEL absent): the ladder must fall through to it rather than to CADD.
 add(file="A", chrom="chr2", pos=5000, gene="GENE3", csq="missense_variant", impact="MODERATE",
-    af=1e-3,
+    af=1e-3, alphamissense="0.9",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
 add(file="A", chrom="chr2", pos=6000, gene="GENE3", csq="missense_variant", impact="MODERATE",
     af=1e-3,
@@ -466,7 +472,8 @@ def main(argv=None) -> int:
     # BOTH alleles here or the second leg reaches Step 3 with no CSQ and is dropped as
     # not_functional, quietly destroying the very comp-het the multiallelic case exists to test.
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
-        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\tspliceai\n")
+        fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\t"
+                 "spliceai\trevel\talphamissense\n")
         seen = set()
         for v in V:
             alts = [altbase(v["pos"])]
@@ -480,7 +487,8 @@ def main(argv=None) -> int:
                 af = "" if v["af"] is None else f"{v['af']:.6g}"
                 fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{a}\t"
                          f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
-                         f"{v['af_pop']}\t{v['clnsig']}\t{v['spliceai']}\n")
+                         f"{v['af_pop']}\t{v['clnsig']}\t{v['spliceai']}\t"
+                         f"{v['revel']}\t{v['alphamissense']}\n")
 
     # Step-6 tables
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:

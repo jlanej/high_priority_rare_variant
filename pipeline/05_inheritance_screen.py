@@ -33,7 +33,13 @@ COLS = [
     # along for review only, so a curator can see when a call is being driven by a
     # founder-group frequency that grpmax deliberately ignores.
     "consequence", "impact", "grpmax_af", "max_af", "max_af_pops", "cadd", "spliceai_ds",
-    "clnsig", "child_gt", "child_gq", "child_dp", "child_ab",
+    # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
+    # IMPACT=MODERATE and selection.py returns at the impact rung), carried here purely so
+    # Step 9's missense tier can be calibrated rather than an off-label CADD rank.
+    "revel", "alphamissense", "alphamissense_class",
+    # clnsig is the VEP cache's CLIN_SIG; clinvar_stars comes from the ClinVar VCF transfer and
+    # is BLANK when that transfer did not run. Blank != 0 stars — see annotations.clinvar_stars.
+    "clnsig", "clinvar_stars", "child_gt", "child_gq", "child_dp", "child_ab",
     "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck", "flags",
 ]
 
@@ -67,7 +73,12 @@ def base_row(trio_id, v, gt, mode, pair_id=""):
         "grpmax_af": fmt(A.grpmax_af(v)), "max_af": fmt(A._max_float(v, "max_af")),
         "max_af_pops": A._str(v, "max_af_pops") or "", "cadd": fmt(A.cadd(v)),
         "spliceai_ds": fmt(A.spliceai_ds(v)),   # max SpliceAI delta score, for reviewer tiering
+        "revel": fmt(A.revel(v)), "alphamissense": fmt(A.alphamissense(v)),
+        "alphamissense_class": A.alphamissense_class(v) or "",
         "clnsig": A.clnsig(v) or "",
+        # fmt() maps None -> "" which is exactly right: blank means the ClinVar transfer did not
+        # run (nobody looked), and must never be read as 0 stars ("no assertion criteria").
+        "clinvar_stars": fmt(A.clinvar_stars(v)),
         "child_gt": (v.gt_bases[gt.c] if v.gt_bases is not None else ""),
         "child_gq": fmt(G.gq(v, gt.c)), "child_dp": fmt(G.dp(v, gt.c)),
         "child_ab": fmt(G.allele_balance(v, gt.c)),
