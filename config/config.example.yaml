@@ -158,18 +158,27 @@ resources:
     # exists to keep out. So faf95 does NOT reintroduce the MAX_AF trap. `mid` is the one
     # deviation, so the group that produced the max rides along as `faf95_group` for review.
     sites_slim: ${GNOMAD_SITES}     # gnomad.joint.v4.1.sites.slim.vcf.gz (+ .tbi)
-    # Which oracle annotations.frequency() reads. THE single chokepoint every rarity gate uses.
-    #   faf95        - prefer faf95. When it is absent, WHICH fallback applies depends on whether
-    #                  gnomAD has a record for the allele at all (gnomad_AF_joint is the witness):
-    #                    * gnomAD HAS it  -> faf95 is 0 -> RAREST. gnomAD emits fafmax as missing,
-    #                      never as 0, wherever no group's CI lower bound clears zero. 96.5% of
-    #                      that class are AC <= 2, so consulting the point estimate there would
-    #                      filter a singleton on its inflated AF — the error faf95 prevents.
-    #                    * gnomAD has NO record -> the grpmax proxy is the only estimate there is.
-    #                  rarity_oracle reports faf95 / faf95_zero / grpmax_proxy / absent per row.
-    #   grpmax_proxy - ignore faf95 entirely; the pre-transfer behaviour, bit-for-bit.
-    # `faf95` is inert until the slim is actually configured, so setting it early is harmless.
-    oracle: faf95                   # faf95 | grpmax_proxy
+    # THE frequency oracle — ONE quantity for the whole run, never a per-variant blend. Both arms
+    # are gnomAD v4.1; they differ in WHICH quantity and how it is reached, so mixing them would
+    # make two variants in one run incomparable and undescribable in a methods section.
+    #
+    #   grpmax_proxy (DEFAULT) - a POINT ESTIMATE from the VEP cache: max AF over the
+    #       grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS). Needs no extra resource. The
+    #       cache carries no AC/AN, so no CI correction is possible on this arm; it therefore sits
+    #       ~one CI-width high on low-count alleles and errs toward DROPPING them.
+    #
+    #   faf95 - the published FILTERING allele frequency from the joint slim above: the lower
+    #       bound of the 95% Poisson CI, i.e. what ACMG/ClinGen actually specify (Whiffin 2017).
+    #       REQUIRES sites_slim; run_pipeline.sh HALTS at preflight if it is missing rather than
+    #       quietly running on the other quantity. Within this arm, an allele gnomAD HAS but
+    #       published no fafmax for resolves to 0.0 (rarest) — gnomAD emits fafmax as missing
+    #       rather than as 0 wherever no group's CI clears zero, and 96.5% of that class are
+    #       AC <= 2. `rarity_basis` records measured / zero_ci / absent per variant; the ORACLE
+    #       itself is constant and is recorded once in audit/counts.tsv.
+    #
+    # Switching to faf95 makes the candidate list BIGGER: faf95 <= the point estimate, so the same
+    # cutoffs stop discarding low-count alleles whose interval never justified the call.
+    oracle: grpmax_proxy            # grpmax_proxy | faf95
   clinvar:
     # One of Step 2's TWO bcftools-transferred annotations (the other is the gnomAD joint slim
     # above) — everything else arrives as a CSQ field

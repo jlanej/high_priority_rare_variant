@@ -80,22 +80,30 @@ is about. So faf95 does **not** reintroduce that failure mode. `mid` is the sing
 hprv's own proxy, which is why the producing group rides along as `faf95_group` on every row —
 the same reason `max_af_pops` rides beside `max_af`.
 
-**Absent faf95 means two different things.** gnomAD emits `fafmax` as **missing**, never as `0`,
-wherever no group's CI lower bound clears zero — **80%** of a chr22 sample. The two cases demand
-opposite handling, and `gnomad_AF_joint` is the witness that separates them:
+**ONE oracle per run — the arms never cross.** `resources.gnomad.oracle` picks the quantity for
+the whole run (`grpmax_proxy` by default, `faf95` when the slim is prepared), it is recorded once
+in `audit/counts.tsv`, and `annotations.frequency()` never consults the other arm. An earlier
+design preferred faf95 per variant and fell back to the proxy, which made two rows in one run
+comparable on different quantities — undescribable in a methods section — and got the fallback
+direction wrong (below). `rarity_basis` records the per-variant provenance *within* the chosen
+oracle: `measured` | `zero_ci` | `absent`.
 
-| gnomAD record? | faf95 | `frequency()` | `rarity_oracle` |
-|---|---|---|---|
-| yes, with a FAF | the value | the value | `faf95` |
-| **yes, no FAF** | **effectively 0** | **0.0 — rarest** | `faf95_zero` |
-| no record | — | the grpmax proxy | `grpmax_proxy` |
-| no record, no proxy | — | `None` — rarest | `absent` |
+**Both arms are gnomAD v4.1.** The proxy is the VEP cache's own gnomAD AFs, so this is a choice of
+QUANTITY (CI lower bound vs point estimate), never of database. There is no such thing as "absent
+from gnomAD but has a proxy".
 
-The middle row is the one that matters. Of the records with no faf95 but a proxy ≥ 1e-4,
-**96.5% are AC ≤ 2** — gnomAD singletons and doubletons, whose point estimate is inflated by a
-small group's AN (AC=1 / AN≈4,500 reads as 2.2e-4). Filtering those on the point estimate is
-exactly the error faf95 exists to prevent, and it would drop ~8% of gnomAD-observed alleles at the
-dominant gate. So the proxy is consulted **only** when gnomAD has no record at all.
+**`zero_ci`: an absent faf95 on an allele gnomAD HAS is 0, not unknown.** gnomAD emits `fafmax` as
+**missing**, never as `0`, wherever no group's CI lower bound clears zero — 80% of a chr22 sample.
+Of the records with no faf95 but a proxy ≥ 1e-4, **96.5% are AC ≤ 2**: singletons whose point
+estimate is inflated by a small group's AN (AC=1 / AN≈4,500 reads as 2.2e-4). Resolving those to 0
+(rarest) is the whole point of a filtering allele frequency. `gnomad_AF_joint` is the witness that
+distinguishes "gnomAD looked and could not bound it" from "gnomAD has no record".
+
+**The two arms differ on `mid`, and this is the one behavioural difference to state in a methods
+section.** The grpmax proxy excludes `mid` (mirroring gnomAD's own grpmax); the FAF group set
+**includes** it. So an allele enriched only in the Middle Eastern group is invisible to the proxy
+and *is* seen by faf95 — the arms can reach opposite conclusions on exactly that class.
+`faf95_group` reports the producing group so those rows are identifiable.
 
 **Expect a LARGER candidate list.** faf95 ≤ the point estimate, so the same cutoffs stop
 discarding low-count alleles whose confidence interval never justified the call. If supplying the

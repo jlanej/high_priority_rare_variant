@@ -34,7 +34,8 @@ COLUMNS = [
     # frequency is driven by a founder group grpmax excludes (see annotations.GRPMAX_POPS).
     # faf95 (CI-corrected, the oracle when the gnomAD slim is transferred) beside grpmax_af (the
     # point-estimate proxy), so a reviewer can see the gap. faf95_group flags the `mid` case.
-    "rarity_af", "rarity_oracle", "grpmax_af", "faf95", "faf95_group", "nhomalt",
+    "rarity_af", "rarity_oracle", "rarity_basis", "grpmax_af", "faf95", "faf95_group",
+    "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
     # Calibrated missense predictors (REVEL / AlphaMissense plugins). Filterable in igv.js like
     # every other extra column. Blank on non-missense is EXPECTED — these are missense-only
@@ -178,6 +179,7 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "child_DP": r.get("child_dp"), "child_AB": r.get("child_ab"),
                 "grpmax_af": r.get("grpmax_af"), "max_af": r.get("max_af"),
                 "rarity_af": r.get("rarity_af"), "rarity_oracle": r.get("rarity_oracle"),
+                "rarity_basis": r.get("rarity_basis"),
                 "faf95": r.get("faf95"), "faf95_group": r.get("faf95_group"),
                 "nhomalt": r.get("nhomalt"),
                 "max_af_pops": r.get("max_af_pops"), "cadd": r.get("cadd"),

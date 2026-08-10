@@ -1543,25 +1543,28 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
     # it carried the higher point estimate. `rarity_oracle` records which one was actually used,
     # per variant — the two coexist in one run (faf95 is absent wherever no ancestry group has a
     # confidently non-zero AF), so a single run-level label would be wrong.
-    # PREFER the value the SCREEN actually resolved (Step 5 writes rarity_af/rarity_oracle from
-    # annotations.frequency(), the one chokepoint). Re-deriving it here from the raw columns is
-    # what let the two diverge: a gnomAD-observed variant with no faf95 has faf95 = 0 (rarest),
-    # but the raw columns look identical to "not in gnomAD", so a local re-derivation reads the
-    # point estimate and penalises the variant for the very interval that retained it.
-    # The raw-column path below is the fallback for a Step-8 table produced before those columns
-    # existed, and reproduces the old behaviour rather than guessing.
-    if row.get("rarity_af") not in (None, ""):
+    # The SCREEN resolved this once (Step 5 writes rarity_af/rarity_oracle/rarity_basis from
+    # annotations.frequency(), the single chokepoint). Step 9 CONSUMES it and never re-derives:
+    # the raw columns for "gnomAD published no faf95" and "gnomAD has no record" are identical,
+    # so a local re-derivation is structurally unable to tell them apart, and re-deriving also
+    # risks ranking on a different quantity than the screen gated on.
+    # The raw-column path is only for a Step-8 table produced before these columns existed.
+    # Key on rarity_ORACLE, not rarity_af: the screen writes the oracle for EVERY row, but
+    # rarity_af is legitimately EMPTY when the oracle has no value for the allele (absent =>
+    # rarest). Keying on the value made those rows look like a legacy table and fall through to
+    # the re-derivation below, which then reported a per-row oracle — reintroducing exactly the
+    # mixed-oracle output this design removes.
+    if _s(row.get("rarity_oracle")):
         af_col = row.get("rarity_af")
-        oracle = _s(row.get("rarity_oracle")) or "unknown"
+        oracle = _s(row.get("rarity_oracle"))
+    elif row.get("faf95") not in (None, ""):
+        af_col, oracle = row.get("faf95"), "faf95"
+    elif row.get("grpmax_af") not in (None, ""):
+        af_col, oracle = row.get("grpmax_af"), "grpmax_proxy"
     else:
-        _faf = row.get("faf95")
-        if _faf not in (None, ""):
-            af_col, oracle = _faf, "faf95"
-        elif row.get("grpmax_af") not in (None, ""):
-            af_col, oracle = row.get("grpmax_af"), "grpmax_proxy"
-        else:
-            af_col, oracle = row.get("frequency"), ("grpmax_proxy" if row.get("frequency")
-                                                    not in (None, "") else "absent")
+        af_col, oracle = row.get("frequency"), ("grpmax_proxy" if row.get("frequency")
+                                                not in (None, "") else "unknown")
+    out["rarity_basis"] = _s(row.get("rarity_basis")) or ""
     out["rarity_oracle"] = oracle
     rs = rarity_strength(af_col, cfg)
     out["rarity_strength"] = rs

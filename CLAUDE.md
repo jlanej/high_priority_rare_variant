@@ -37,6 +37,24 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    - **Never substitute the global AF.** It dilutes ancestry-enriched variants and fails the
      opposite way (retaining benign polymorphisms). The two wrong substitutions err in opposite
      directions — there is no single safe fallback.
+   **ONE ORACLE PER RUN — the arms NEVER cross, and `annotations.frequency()` is the single
+   chokepoint.** `resources.gnomad.oracle` selects it for the whole run (`grpmax_proxy` default;
+   `faf95` requires the gnomAD joint slim and HALTS at preflight without it), it is recorded once
+   in `audit/counts.tsv`, and neither arm ever consults the other. A per-variant blend was tried
+   and removed: it made two rows in one run comparable on different quantities. `rarity_basis`
+   gives the per-variant provenance WITHIN the oracle (`measured` | `zero_ci` | `absent`).
+   BOTH ARMS ARE gnomAD v4.1 — the proxy is the cache's own gnomAD AFs — so this is a choice of
+   QUANTITY (CI lower bound vs point estimate), never of database.
+   The FAF group set is afr/amr/eas/**mid**/nfe/sas, EXCLUDING the bottlenecked ami/asj/fin, so
+   faf95 does not reintroduce the MAX_AF trap. **`mid` is the one behavioural difference between
+   the arms**: the proxy excludes it, faf95 includes it, so a mid-enriched allele can be gated by
+   one arm and not the other. `faf95_group` makes those rows identifiable.
+   - **Never substitute VEP's `MAX_AF`.** It maxes over the bottlenecked founder groups grpmax
+     deliberately excludes (ami AN≈900, asj, fin, mid) and over tiny 1000G populations; one allele
+     there reads as AF≈1e-3 and silently kills dominant candidates at the 1e-4 gate.
+   - **Never substitute the global AF.** It dilutes ancestry-enriched variants and fails the
+     opposite way (retaining benign polymorphisms). The two wrong substitutions err in opposite
+     directions — there is no single safe fallback.
    **TWO ORACLES, chosen per variant, and `annotations.frequency()` is the one chokepoint —
    never a field getter directly.** It prefers real **faf95** (`gnomad_faf95`, from the gnomAD
    v4.1 JOINT slim transferred in Step 2; `resources.gnomad.sites_slim`, opt-in ~10 GB) and falls
@@ -344,10 +362,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
     and would have dropped ~8% of gnomAD-observed alleles at the dominant gate.
   - **gnomAD has NO record** -> the cache proxy is the only estimate available; use it.
   `gnomad_AF_joint` is the WITNESS that separates them — the reason a "reporting only" field is
-  actually load-bearing. `rarity_oracle` reports `faf95` / `faf95_zero` / `grpmax_proxy` /
-  `absent` PER VARIANT; a run-level label would be wrong, because all of them occur in one run.
-  Step 5 resolves this ONCE (`rarity_af` + `rarity_oracle`) and Step 9 consumes it rather than
-  re-deriving from the raw columns — a local re-derivation cannot tell the two cases apart.
+  actually load-bearing. `rarity_oracle` is the RUN-level constant; `rarity_basis` is the
+  per-variant provenance (`measured` / `zero_ci` / `absent`).
+  Step 5 resolves this ONCE (`rarity_af` + `rarity_oracle` + `rarity_basis`) and Step 9 consumes
+  it rather than re-deriving — a local re-derivation cannot tell `zero_ci` from `absent`, because
+  the raw columns are identical. **Step 9 keys on `rarity_oracle`, NOT on `rarity_af`**: the value
+  is legitimately empty when the oracle has none for the allele, and keying on it made those rows
+  look like a legacy table and fall through to a per-row re-derivation — reintroducing the mixed
+  output the design removes.
 - **Enabling the gnomAD slim makes the candidate list BIGGER.** faf95 <= the point estimate, so
   the same cutoffs stop discarding low-count alleles whose CI never justified the call. If the
   list got SMALLER after supplying it, the join is broken — check Step 2's
