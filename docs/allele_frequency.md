@@ -80,11 +80,22 @@ is about. So faf95 does **not** reintroduce that failure mode. `mid` is the sing
 hprv's own proxy, which is why the producing group rides along as `faf95_group` on every row —
 the same reason `max_af_pops` rides beside `max_af`.
 
-**Absent faf95 is not AF = 0.** gnomAD emits `fafmax` only where some group's CI lower bound
-exceeds zero; on a chr22 sample **74%** of records carried none, and where present it was always
-> 0. So absence means "no group has a confidently non-zero frequency", and `frequency()` falls
-back to the proxy there — which is the *more stringent* of the two, so the fallback can only ever
-filter more, never silently retain something faf95 would have caught.
+**Absent faf95 means two different things.** gnomAD emits `fafmax` as **missing**, never as `0`,
+wherever no group's CI lower bound clears zero — **80%** of a chr22 sample. The two cases demand
+opposite handling, and `gnomad_AF_joint` is the witness that separates them:
+
+| gnomAD record? | faf95 | `frequency()` | `rarity_oracle` |
+|---|---|---|---|
+| yes, with a FAF | the value | the value | `faf95` |
+| **yes, no FAF** | **effectively 0** | **0.0 — rarest** | `faf95_zero` |
+| no record | — | the grpmax proxy | `grpmax_proxy` |
+| no record, no proxy | — | `None` — rarest | `absent` |
+
+The middle row is the one that matters. Of the records with no faf95 but a proxy ≥ 1e-4,
+**96.5% are AC ≤ 2** — gnomAD singletons and doubletons, whose point estimate is inflated by a
+small group's AN (AC=1 / AN≈4,500 reads as 2.2e-4). Filtering those on the point estimate is
+exactly the error faf95 exists to prevent, and it would drop ~8% of gnomAD-observed alleles at the
+dominant gate. So the proxy is consulted **only** when gnomAD has no record at all.
 
 **Expect a LARGER candidate list.** faf95 ≤ the point estimate, so the same cutoffs stop
 discarding low-count alleles whose confidence interval never justified the call. If supplying the

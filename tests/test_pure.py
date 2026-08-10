@@ -106,23 +106,47 @@ def test_frequency_prefers_faf95_then_proxy_never_max_af():
         v.INFO.get = info.get           # noqa: E731
         return v
 
-    def freq(cfg=None, **info):
+    def _v(**info):
         class I(dict):
             def get(self, k, d=None): return dict.get(self, k, d)
         o = type("V", (), {})()
         o.INFO = I(info)
-        return AN.frequency(o, cfg)
+        return o
+
+    def freq(cfg=None, **info):
+        return AN.frequency(_v(**info), cfg)
+
+    DOM = 1.0e-4
+    keep = lambda f: f is None or f < DOM        # noqa: E731
 
     F = AN.F
     # faf95 present -> used, even though the proxy is 4x higher
     assert freq(**{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
-    # faf95 absent -> proxy (the more stringent of the two here)
+    # faf95 absent AND gnomAD has no record -> the proxy is the only estimate there is
     assert freq(**{F["gnomade_nfe_af"]: "9e-05"}) == 9e-05
+
+    # THE CASE THAT MATTERS. gnomAD HAS the variant but published no faf95 -> faf95 is 0, not
+    # unknown: gnomAD emits fafmax as MISSING (never as 0) wherever no group's CI lower bound
+    # clears zero, and of the rows with no faf95 but a proxy >= 1e-4, 96.5% are AC <= 2. Falling
+    # back to the point estimate there filters a variant on one or two observed alleles — exactly
+    # what faf95 exists to prevent. gnomad_AF_joint is the witness that gnomAD looked.
+    singleton = {F["gnomad_af_joint"]: "8.25e-05",      # present => gnomAD has a record
+                 F["gnomade_nfe_af"]: "0.00022"}       # a singleton's inflated point estimate
+    assert freq(**singleton) == 0.0, \
+        "a gnomAD-observed variant with no faf95 must resolve to 0 (rarest), not to the proxy"
+    assert keep(freq(**singleton)) and not keep(0.00022), \
+        "the singleton must survive the dominant gate; the point estimate would have dropped it"
+    assert AN.rarity_oracle(_v(**singleton)) == "faf95_zero", \
+        "faf95_zero must be distinguishable from a measured faf95 and from the proxy"
+    # ...and with NO gnomAD record the same proxy value still gates normally
+    assert freq(**{F["gnomade_nfe_af"]: "0.00022"}) == 0.00022
     # both absent -> None (rarest); an absent AF is never a measured zero
     assert freq() is None
     # MAX_AF must NEVER be consulted, at any precedence
     assert freq(**{F["max_af"]: "0.02"}) is None, "MAX_AF leaked into the rarity oracle"
-    assert freq(**{F["gnomad_af_joint"]: "0.02"}) is None, "a global AF leaked into the oracle"
+    # gnomad_AF_joint is a WITNESS (gnomAD has a record), never a frequency VALUE. Present with
+    # no faf95 => faf95_zero => 0.0. If its value ever leaked through this would read 0.02.
+    assert freq(**{F["gnomad_af_joint"]: "0.02"}) == 0.0, "a global AF leaked into the oracle"
     # the config switch pins the pre-transfer behaviour bit-for-bit
     proxy_cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
     assert freq(proxy_cfg, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 0.00025
@@ -130,8 +154,6 @@ def test_frequency_prefers_faf95_then_proxy_never_max_af():
     assert freq(None, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
 
     # THE DIRECTIONAL CLAIM, pinned: at the dominant gate the same cutoff RETAINS MORE on faf95.
-    DOM = 1.0e-4
-    keep = lambda f: f is None or f < DOM        # noqa: E731
     both = {F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}
     assert keep(freq(**both)) and not keep(freq(proxy_cfg, **both)), \
         "faf95 must retain a variant the point-estimate proxy would drop"

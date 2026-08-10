@@ -44,9 +44,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    fired is reported per variant as `rarity_oracle`. Verified against the real v4.1 data: the FAF
    group set is afr/amr/eas/**mid**/nfe/sas — GRPMAX_POPS plus `mid`, EXCLUDING ami/asj/fin, so
    faf95 does not reintroduce the MAX_AF trap; `faf95_group` reports the producing group.
-   **Absent faf95 is not AF 0** (gnomAD emits fafmax only where a CI lower bound exceeds zero —
-   74% of a chr22 sample had none), and the proxy fallback is the MORE STRINGENT of the two, so it
-   can only ever filter more. **Supplying the slim RETAINS MORE**: faf95 <= the point estimate, so
+   **Absent faf95 splits in two, and the halves demand OPPOSITE fallbacks.** gnomAD emits fafmax
+   as MISSING, never as 0, wherever no group's CI lower bound clears zero (80% of a chr22 sample).
+   If gnomAD HAS the allele, faf95 IS 0 -> rarest, and the proxy must NOT be consulted: of the
+   records with no faf95 but a proxy >= 1e-4, **96.5% are AC <= 2**, so using the point estimate
+   there filters on one or two observed alleles — precisely what faf95 exists to prevent. Only
+   when gnomAD has NO record is the proxy the right answer. `gnomad_AF_joint` is the witness that
+   distinguishes them, which is why it is transferred. **Supplying the slim RETAINS MORE**: faf95 <= the point estimate, so
    the same cutoffs stop discarding low-count alleles the interval never justified discarding — a
    SMALLER list after enabling it means a broken join, not a better filter.
 6. **VEP-centric contract.** The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS:
@@ -330,14 +334,20 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   POSITIVE limb is damped — shrinking a low-star BENIGN term toward zero would promote a
   poorly-reviewed benign call. And the screen stays star-blind: reinstating the old >=2-star
   keep/drop gate would violate never-drop.
-- **Absent `faf95` is NOT AF = 0, and the fallback direction is load-bearing.** gnomAD emits
-  `fafmax` only where some ancestry group's 95% CI lower bound exceeds zero — 74% of a chr22
-  sample carried none. So `frequency()` falling back to the grpmax proxy there is not a
-  compromise, it is the STRINGENT choice: proxy >= faf95 wherever both exist, so the fallback can
-  only ever filter MORE, never silently retain what faf95 would have caught. Inverting this (treat
-  absent faf95 as rarest, skip the proxy) would silently retain every common-in-proxy allele
-  gnomAD declined to compute a FAF for. `rarity_oracle` reports which one fired PER VARIANT —
-  a run-level label would be wrong, because both occur in one run.
+- **Absent `faf95` means TWO different things, and conflating them is a real defect (this bit us).**
+  gnomAD emits `fafmax` as MISSING, never as `0`, wherever no ancestry group's 95% CI lower bound
+  clears zero — 80% of a chr22 sample. So:
+  - **gnomAD HAS the allele** -> faf95 IS 0 -> **rarest, keep**. Do NOT consult the proxy. Of the
+    records with no faf95 but a proxy >= 1e-4, **96.5% are AC <= 2** — gnomAD singletons, whose
+    point estimate is inflated by a small group AN. Filtering those on the point estimate is
+    exactly the error faf95 exists to prevent (Whiffin 2017). The first implementation did this
+    and would have dropped ~8% of gnomAD-observed alleles at the dominant gate.
+  - **gnomAD has NO record** -> the cache proxy is the only estimate available; use it.
+  `gnomad_AF_joint` is the WITNESS that separates them — the reason a "reporting only" field is
+  actually load-bearing. `rarity_oracle` reports `faf95` / `faf95_zero` / `grpmax_proxy` /
+  `absent` PER VARIANT; a run-level label would be wrong, because all of them occur in one run.
+  Step 5 resolves this ONCE (`rarity_af` + `rarity_oracle`) and Step 9 consumes it rather than
+  re-deriving from the raw columns — a local re-derivation cannot tell the two cases apart.
 - **Enabling the gnomAD slim makes the candidate list BIGGER.** faf95 <= the point estimate, so
   the same cutoffs stop discarding low-count alleles whose CI never justified the call. If the
   list got SMALLER after supplying it, the join is broken — check Step 2's

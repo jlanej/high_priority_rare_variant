@@ -90,7 +90,8 @@ VARIANT_COLUMNS = [
     "nmd_status", "plof_confidence", "spliceai_status", "spliceai_ds",
     "missense_evidence_source", "revel", "alphamissense", "alphamissense_class",
     "cadd", "consequence", "impact",
-    "rarity_strength", "rarity_oracle", "grpmax_af", "faf95", "faf95_group", "nhomalt",
+    "rarity_strength", "rarity_oracle", "rarity_af", "grpmax_af", "faf95",
+    "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "rarity_driven_by_single_group",
     "constraint_gate",
     "gt_qc_pass", "gt_qc_fail_reason", "partner_leg_quality_unknown",
@@ -824,7 +825,7 @@ def main(argv=None) -> int:
         row = {c: norm.get(c) for c in ("chrom", "pos", "ref", "alt", "trio_id", "origin",
                                         "pair_id", "consequence", "impact", "spliceai_ds",
                                         "cadd", "revel", "alphamissense", "alphamissense_class",
-                                        "faf95", "faf95_group", "nhomalt",
+                                        "faf95", "faf95_group", "nhomalt", "rarity_af",
                                         "max_af", "max_af_pops", "child_gt",
                                         "child_GQ", "child_DP", "child_AB", "clin_sig",
                                         "grpmax_af", "inheritance")}
