@@ -115,7 +115,8 @@ if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
         # forever against a union that has no SpliceAI — silently, since the "configured but
         # nothing lifted" warning lives inside the skipped path. CADD has the same shape and
         # needs no non-default config at all.
-        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" \
+        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_GNOMAD_SITES:-}" \
+                    "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" \
                     "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
                     "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}"; do
             if is_set "$_res" && [[ -e "$_res" ]]; then
@@ -139,7 +140,8 @@ binds="$outdir"
 for r in "$SITES" "$REF" "$PRE_VEP" "${HPRV_VEP_CACHE:-}" "${HPRV_VEP_PLUGINS:-}" \
          "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
          "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
-         "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_CLINVAR_VCF:-}"; do
+         "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_CLINVAR_VCF:-}" \
+         "${HPRV_GNOMAD_SITES:-}"; do
     is_set "$r" && [[ -e "$r" ]] && binds+=" $(abspath_dir "$r")"
 done
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"; export HPRV_BIND
@@ -514,7 +516,58 @@ else
     warn "no ClinVar VCF configured (resources.clinvar.vcf) — review status/GOLD STARS unavailable, so a 1-star single-submitter assertion and a 3-star expert-panel one are indistinguishable downstream. See docs/resources.md#clinvar"
 fi
 
-# --- no other external transfers: gnomAD came from the cache with the CSQ above ---
+# --- gnomAD joint slim: faf95 + nhomalt (the SECOND external transfer) ---------------------
+# THE most consequential optional resource. It replaces the rarity oracle's grpmax point-estimate
+# PROXY with gnomAD's real faf95 (the 95% CI lower bound), which is the quantity ACMG/ClinGen
+# specify for frequency filtering. The cache cannot supply it at any price: the CI correction
+# needs AC/AN, which the cache omits. Prefixed `gnomad_`.
+#
+# EXPECT MORE CANDIDATES, not fewer. faf95 <= the point estimate, so the same cutoffs stop
+# discarding low-count alleles whose confidence interval never justified the call.
+if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "${HPRV_GNOMAD_SITES:-}" ]]; then
+    gn_out="$HPRV_TMPDIR/gnomad_annotated.vcf.gz"
+    # Renamed on transfer so the INFO names are stable regardless of which gnomAD release the
+    # slim came from (v4.1 spells them *_joint; a future release may not).
+    _gn_cols="INFO/gnomad_faf95:=INFO/fafmax_faf95_max_joint"
+    _gn_cols+=",INFO/gnomad_faf95_group:=INFO/fafmax_faf95_max_gen_anc_joint"
+    _gn_cols+=",INFO/gnomad_nhomalt:=INFO/nhomalt_joint"
+    _gn_cols+=",INFO/gnomad_AF_joint:=INFO/AF_joint"
+    _gn_cols+=",INFO/gnomad_AF_grpmax:=INFO/AF_grpmax_joint"
+    if hprv_run -- bcftools annotate -a "$HPRV_GNOMAD_SITES" -c "$_gn_cols" \
+            --threads "$THREADS" -Oz -o "$gn_out" "$split_vcf"; then
+        rm -f "$gn_out".tbi "$gn_out".csi
+        index_vcf "$gn_out"
+        # 0-MATCH GUARD. Same class as ClinVar's, and it matters more here because this feeds the
+        # rarity gate: a slim on the wrong build or with the wrong contig naming transfers ZERO
+        # records and exits 0, every faf95 reads absent, frequency() silently falls back to the
+        # proxy for EVERY variant, and the run looks like a successful faf95 run that never was.
+        #
+        # NB the denominator is deliberately "sites with ANY gnomAD INFO", not "sites with faf95".
+        # A faf95 count of 0 is legitimate on a small/rare cohort — gnomAD emits fafmax only where
+        # some group's CI lower bound exceeds 0, and on a chr22 sample 74% of records had none.
+        # Guarding on faf95 alone would abort correct runs; guarding on the JOIN proves the join.
+        n_gn="$(hprv_run -- bcftools query -i 'INFO/gnomad_AF_joint!="."' -f '\n' "$gn_out" \
+                | wc -l | tr -d '[:space:]')"
+        n_faf="$(hprv_run -- bcftools query -i 'INFO/gnomad_faf95!="."' -f '\n' "$gn_out" \
+                 | wc -l | tr -d '[:space:]')"
+        log "Step 2: gnomAD joint matched $n_gn / $n_sites sites (faf95 present on $n_faf; absent faf95 = no group has a confidently non-zero AF, NOT an error)"
+        if [[ "$n_gn" -eq 0 && "$n_sites" -gt 0 ]]; then
+            die "0/$n_sites sites matched the gnomAD joint slim ($HPRV_GNOMAD_SITES) — the transfer \
+matched NOTHING, so faf95 would be absent everywhere and every rarity gate would silently fall back to \
+the grpmax proxy while the run looked like a faf95 run. A cohort union always overlaps gnomAD, so this \
+is a broken join: check the slim is GRCh38, its contigs match this cohort (chr-prefixed), and it is \
+tabix-indexed. Set resources.gnomad.sites_slim to '' to run on the proxy deliberately."
+        fi
+        split_vcf="$gn_out"
+    else
+        warn "gnomAD joint transfer failed (bcftools annotate returned non-zero) — continuing on the grpmax PROXY oracle; faf95/nhomalt will be absent"
+        rm -f "$gn_out" "$gn_out".tbi "$gn_out".csi
+    fi
+else
+    warn "no gnomAD joint slim configured (resources.gnomad.sites_slim) — rarity uses the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward dropping). No faf95, no nhomalt. See docs/allele_frequency.md"
+fi
+
+# --- no other external transfers ---
 # Presence of the FIELD only proves VEP emitted the column, not that the cache actually had
 # frequencies to put in it. A cache built without the frequency data, or an input whose alleles
 # are all un-accessioned, yields a fully-populated header over entirely empty values — and every

@@ -1090,9 +1090,12 @@ def assign_variant_tier(row, cfg=None) -> dict:
 def rarity_strength(af, cfg=None) -> str:
     """``strong`` | ``moderate`` | ``supporting`` | ``permissive`` | ``fail`` | ``unknown``.
 
-    Two caveats that must travel with this column. (1) The oracle is a **point estimate, not
-    faf95** — the VEP cache carries no AC/AN, so the CI correction is unrecoverable at any
-    price; do not present these bands as ACMG PM2. (2) Audit A-4: the proxy is the MAX over
+    Two caveats that must travel with this column. (1) WHICH oracle produced the value is
+    per-variant and is reported in ``rarity_oracle``: real **faf95** when the gnomAD joint slim
+    was transferred AND gnomAD published a non-zero CI lower bound for this allele, otherwise the
+    grpmax **point-estimate proxy**, which sits ~one CI-width high. Even on faf95 these bands are
+    not ACMG PM2 — PM2 is Supporting-only evidence, not a gate, and hprv assigns no ACMG weight.
+    (2) Audit A-4: the proxy is the MAX over
     grpmax-eligible groups regardless of the cohort's ancestry composition, so effective
     stringency varies with the proband's ancestry and the loss is unevenly distributed across
     ancestry groups, in the silent false-negative direction. An absent AF reads as ``unknown``
@@ -1448,7 +1451,12 @@ def default_weights() -> dict:
         "gene_constraint": 1.0,
         "recurrence": {"distinct_2": 1.0, "distinct_3plus": 2.0, "same_variant": 0.5},
         "quality": {"gt_fail": -2.0, "nhf_flagged": -3.0, "nhf_not_screened": 0.0,
-                    "partner_unknown": -0.5},
+                    "partner_unknown": -0.5,
+                    # 0.0 ON PURPOSE — see the nhomalt_recessive_conflict block in score_variant.
+                    # The flag is reported and filterable; there is no calibration for how many
+                    # gnomAD homozygotes should disqualify a recessive candidate, so hprv ships
+                    # no number rather than an invented one.
+                    "nhomalt_conflict": 0.0},
         "clinical": {"p_lp": 4.0, "conflicting_vus": 0.0, "benign": -4.0},
         "moi": {"discordant": -1.0, "unknown": 0.0, "coherent": 0.0},
         "gene_artifact": {"T0_no_downweight": 0.0, "T1_watch": -0.5,
@@ -1529,7 +1537,21 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
     out["pts_molecular"] = float(w["molecular"].get(vt, 0.0))
 
     # --- 1.2 rarity ---
-    af_col = row.get("grpmax_af") if row.get("grpmax_af") not in (None, "") else row.get("frequency")
+    # THE SAME PRECEDENCE annotations.frequency() applies at the screen: faf95 first, the grpmax
+    # point-estimate proxy second. Step 9 must not rank on a different quantity than the screen
+    # gated on, or a variant kept because its CI lower bound was low would then be scored as if
+    # it carried the higher point estimate. `rarity_oracle` records which one was actually used,
+    # per variant — the two coexist in one run (faf95 is absent wherever no ancestry group has a
+    # confidently non-zero AF), so a single run-level label would be wrong.
+    _faf = row.get("faf95")
+    if _faf not in (None, ""):
+        af_col, oracle = _faf, "faf95"
+    elif row.get("grpmax_af") not in (None, ""):
+        af_col, oracle = row.get("grpmax_af"), "grpmax_proxy"
+    else:
+        af_col, oracle = row.get("frequency"), ("grpmax_proxy" if row.get("frequency") not in
+                                                (None, "") else "absent")
+    out["rarity_oracle"] = oracle
     rs = rarity_strength(af_col, cfg)
     out["rarity_strength"] = rs
     out["pts_rarity"] = float(w["rarity"].get(rs, 0.0))
@@ -1580,6 +1602,26 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
         # Parental GQ/DP/AB are absent from variants.tsv, so the leg that establishes trans
         # phase for a comp-het cannot be quality-assessed. Flag it; do not assume it passed.
         q += float(w["quality"]["partner_unknown"])
+    # gnomAD HOMOZYGOTE conflict — the recessive false-positive tell, available only when the
+    # gnomAD joint slim was transferred. A biallelic call in a gene where gnomAD already carries
+    # homozygotes of that very allele is usually not the diagnosis.
+    #
+    # It is REPORTED and charges 0.0 by default, deliberately. There is no calibration for how
+    # many gnomAD homozygotes should disqualify a recessive candidate — it depends on the
+    # condition's penetrance, age of onset and prevalence, none of which hprv knows. Inventing a
+    # penalty would be exactly the uncalibrated number this codebase refuses to ship. Set
+    # `prioritization.composite.weights.quality.nhomalt_conflict` to charge one deliberately; the flag is
+    # filterable in the review table either way.
+    #
+    # None (no transfer) and 0 (gnomAD has the allele, no homozygotes) are DIFFERENT: only a
+    # present, non-zero count can raise this flag.
+    _nh = _num(row.get("nhomalt"))
+    _nh_min = _f(cfg, "prioritization.variant_tier.nhomalt_recessive_max", 0.0)
+    nh_conflict = bool(_nh is not None and _nh > _nh_min
+                       and _s(row.get("inheritance")) in RECESSIVE_MODES)
+    if nh_conflict:
+        q += float(w["quality"].get("nhomalt_conflict", 0.0))
+    out["nhomalt_recessive_conflict"] = nh_conflict
     out.update(pts_quality=q, gt_qc_pass=gt_ok, gt_qc_fail_reason=gt_reason,
                nhf_status=nhf, nhf_max_fraction=nhf_frac, nhf_max_reads=nhf_reads,
                partner_leg_quality_unknown=partner_unknown)

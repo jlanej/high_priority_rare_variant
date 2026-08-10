@@ -426,6 +426,35 @@ def main(argv=None) -> int:
                   for r in am),
               "am_class rides along (the PLUGIN's key name, not dbNSFP's AlphaMissense_score)")
 
+        # --- faf95: the gnomAD joint transfer, the rarity oracle, and the nhomalt tell.
+        # The mock ships a real (tiny) gnomAD slim, so this exercises the actual `bcftools
+        # annotate` transfer, the 0-match guard, and the faf95-before-proxy precedence — not a
+        # faked INFO field. GENE2 carries faf95=8e-05 against a proxy of 5e-04: the CI-corrected
+        # value is the RARER one, which is the whole point (a point estimate sits ~one CI-width
+        # high and discards candidates the interval never justified discarding). ---
+        faf = [r for r in pv if r["faf95"]]
+        check(faf, "the gnomAD joint transfer reached Step 9 (faf95 populated)")
+        check(all(r["rarity_oracle"] == "faf95" for r in faf),
+              "a variant WITH faf95 is ranked on faf95, not on the point-estimate proxy")
+        check(all(float(r["faf95"]) < float(r["grpmax_af"]) for r in faf if r["grpmax_af"]),
+              "faf95 (a CI LOWER bound) is below the point estimate, as it must be")
+        check(all(r["faf95_group"] in ("afr", "amr", "eas", "mid", "nfe", "sas") for r in faf),
+              "faf95_group names a FAF-eligible ancestry group (GRPMAX_POPS + mid)")
+        # the fallback is the majority case and must be labelled, not silently conflated
+        prox = [r for r in pv if not r["faf95"] and r["grpmax_af"]]
+        check(prox and all(r["rarity_oracle"] == "grpmax_proxy" for r in prox),
+              "a variant with NO faf95 falls back to the proxy and SAYS so (rarity_oracle)")
+        none = [r for r in pv if not r["faf95"] and not r["grpmax_af"]]
+        check(all(r["rarity_oracle"] == "absent" and r["rarity_strength"] == "unknown"
+                  for r in none),
+              "absent on both oracles reads unknown — never a measured zero")
+        # nhomalt: the recessive false-positive tell, reported and costing nothing by default
+        nh = [r for r in pv if r["nhomalt_recessive_conflict"] == "1"]
+        check(nh, "a biallelic call with gnomAD homozygotes raises nhomalt_recessive_conflict")
+        check(all(r["inheritance"] in ("compound_het", "hom_recessive", "x_linked_recessive")
+                  for r in nh),
+              "the nhomalt conflict fires ONLY on biallelic modes")
+
         # --- ClinVar stars: the mock configures NO ClinVar VCF, so every row must read
         # UNAVAILABLE — and crucially NOT 0. Blank/absent means nobody looked; 0 means ClinVar
         # has a record whose submitter provided no assertion criteria. If a future change ever

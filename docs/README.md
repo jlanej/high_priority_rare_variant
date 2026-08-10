@@ -54,8 +54,8 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > Not available under this contract, and what each costs:
 > | Absent | Consequence |
 > |--------|-------------|
-> | `faf95` | The cache has no AC/AN, so the 95% CI correction **cannot be computed at any price**. Rarity uses a grpmax **point-estimate proxy**, which runs slightly stringent on low-count alleles. |
-> | `nhomalt` | No gnomAD-homozygote sanity check on de novo calls. |
+> | ~~`faf95`~~ | **RESTORED** via the gnomAD v4.1 joint slim (`resources.gnomad.sites_slim`, opt-in, ~10 GB). `frequency()` prefers real faf95 and falls back **per variant** to the grpmax point-estimate proxy; `rarity_oracle` reports which fired. Without the slim, the proxy is all there is and runs slightly stringent on low-count alleles. |
+> | ~~`nhomalt`~~ | **RESTORED** with the same slim. A biallelic call whose allele gnomAD already carries homozygotes for raises `nhomalt_recessive_conflict` — reported and filterable, charging 0 points by default (no calibration exists for how many homozygotes should disqualify a recessive candidate). |
 > | ~~ClinVar stars~~ | **RESTORED.** The ClinVar sites VCF is now transferred in Step 2 (`resources.clinvar.vcf`), so `CLNREVSTAT` -> `clinvar_stars` (0-4) is available. It is a Step-9 RANKING input, never a keep/drop gate. Absent transfer = blank, which is *not* 0 stars. |
 > | ~~REVEL / AlphaMissense~~ | **RESTORED** as VEP plugins (dedicated files, not dbNSFP). Still **no effect on selection** — see the note under the functional table; they make Step 9's missense tier calibrated instead of an off-label CADD rank. |
 > | LOFTEE | No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for the planned tiering step. |
@@ -67,7 +67,7 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 - Filter field = **grpmax proxy** = max AF over the grpmax-**eligible** ancestry groups only:
   `AFR, AMR, EAS, NFE, SAS` (`src/hprv/annotations.py:GRPMAX_POPS`).
 - Two things this is deliberately **not**:
-  - **Not `faf95`.** It is a point estimate. faf95 needs AC/AN; the cache carries neither.
+  - **`faf95` when the gnomAD joint slim is configured**, else the point estimate. The cache alone carries no AC/AN, so the proxy is the no-resource path; `rarity_oracle` records which one each variant used.
   - **Not VEP's `MAX_AF`.** MAX_AF maximises over the bottlenecked founder groups gnomAD's own
     grpmax *excludes* (`ami` AN≈900, `asj`, `fin`, `mid`) **and** the tiny 1000 Genomes
     populations. One allele in `ami` reads as AF≈1.1e-3 — ten-fold over the dominant gate — so
@@ -83,7 +83,7 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 ### Rarity gates (grpmax proxy AF) — IMPLEMENTED. A screening gate, distinct from ACMG **PM2**
 | Mode | Keep candidate if AF < | Notes |
 |------|----------------------|-------|
-| Dominant / de novo | **1e-4** | the old `nhomalt ≤ 1` de novo condition is **removed** (no nhomalt) |
+| Dominant / de novo | **1e-4** | applied to `faf95` when the gnomAD slim is configured, else to the grpmax proxy. Because faf95 ≤ the point estimate, the SAME cutoff **retains more** — that is the correction, not a regression. The old `nhomalt ≤ 1` de novo condition stays removed; `nhomalt` is now reported and flags biallelic conflicts instead. |
 | Recessive / comp-het | **1e-2** per allele (permissive); **1e-3** high-confidence tier | applied per variant, not per gene |
 | Benign, all modes | drop if AF ≥ **0.05** (ClinGen BA1) | never rescue |
 

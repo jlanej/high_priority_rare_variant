@@ -68,16 +68,31 @@ tiering. It is **keep-only** (a missing/None score never drops a variant, it onl
 - CADD v1.6+ also ingests SpliceAI as an input feature, so it remains a weak backstop for splice
   signal below the SpliceAI keep threshold.
 
-### 2. No faf95 — the rarity gate is a point estimate
+### 2. faf95 — RESOLVED by an opt-in resource; the proxy remains the fallback
 
-`frequency()` returns a **grpmax proxy**: the max AF across the grpmax-eligible ancestry groups
-(AFR/AMR/EAS/NFE/SAS). gnomAD's published `faf95` is the *lower bound of the 95% CI* of that
-frequency. Computing it requires AC/AN. **The VEP cache carries neither**, so faf95 is not
-approximated here — it is unrecoverable at any price.
+`frequency()` now prefers gnomAD's published **faf95** (the lower bound of the 95% Poisson CI),
+transferred in Step 2 from the gnomAD v4.1 **joint** slim (`resources.gnomad.sites_slim`,
+`prepare_resources.sh --only gnomad_sites fetch`, ~10 GB). It falls back **per variant** to the
+grpmax **point-estimate proxy** — the max AF across AFR/AMR/EAS/NFE/SAS — wherever gnomAD
+published no faf95. `rarity_oracle` reports which one fired on every row. The VEP cache itself
+still carries no AC/AN, so without the slim the proxy is all there is; that path is unchanged.
 
-**Consequence:** since a point estimate is always ≥ its own CI lower bound, every rarity gate
-fires slightly *more* often than a faf95 gate would. The pipeline therefore **errs toward
-dropping** on low-count alleles — a false-negative direction. The error shrinks as the group's
+Three properties worth stating, each verified against the real v4.1 data rather than assumed:
+
+- **The FAF group set is afr/amr/eas/mid/nfe/sas** — `GRPMAX_POPS` plus `mid`, and it EXCLUDES the
+  bottlenecked ami/asj/fin. So faf95 does not reintroduce the `MAX_AF` trap of §2a. `mid` is the
+  one deviation, so `faf95_group` reports the producing group on every row.
+- **Absent faf95 ≠ AF 0.** gnomAD emits `fafmax` only where a group's CI lower bound exceeds zero
+  (74% of a chr22 sample carried none). The proxy fallback there is the *more stringent* of the
+  two, so it can only ever filter more — never silently retain what faf95 would have caught.
+- **Supplying the slim RETAINS MORE.** faf95 ≤ the point estimate, so the same cutoffs stop
+  discarding low-count alleles the interval never justified discarding. A smaller candidate list
+  after enabling it means a broken join, not a better filter — check Step 2's match count.
+
+**Consequence of the fallback path** (no slim configured): since a point estimate is always ≥ its
+own CI lower bound, every rarity gate fires slightly *more* often than a faf95 gate would. That
+path **errs toward dropping** on low-count alleles — a false-negative direction. The error shrinks
+as the group's
 AN grows, so excluding the small bottlenecked groups (which the proxy does by construction, §2a)
 removes the large half of it; the residual is bounded by AC and is worst for singletons in the
 smaller eligible groups.
@@ -98,11 +113,19 @@ polymorphism across the whole cohort and retain it. **The two wrong substitution
 directions; there is no single safe fallback.** Guarded by
 `tests/test_pure.py::test_frequency_excludes_bottlenecked_pops` and the `GENEFND` integration case.
 
-### 3. No nhomalt — no homozygote sanity check
+### 3. nhomalt — AVAILABLE with the gnomAD slim, reported rather than scored
 
 gnomAD's homozygote count is the classic tell for a false recessive call: an allele with many
-homozygotes in a population reference is unlikely to cause severe recessive disease. It is
-unavailable, so `hom_recessive` / `compound_het` / `x_linked_recessive` calls carry no such check.
+homozygotes in a population reference is unlikely to cause severe recessive disease. It rides in
+with the faf95 slim (§2), so a `hom_recessive` / `compound_het` / `x_linked_recessive` call whose
+allele gnomAD already carries homozygotes for now raises **`nhomalt_recessive_conflict`**.
+
+The flag charges **0 points by default**, deliberately: how many homozygotes should disqualify a
+recessive candidate depends on the condition's penetrance, age of onset and prevalence, none of
+which hprv knows. Shipping a number would be exactly the uncalibrated value this document
+criticises elsewhere. The flag is reported and filterable in the review table, and
+`prioritization.composite.weights.quality.nhomalt_conflict` charges it if you decide on one.
+Without the slim `nhomalt` is absent — which is NOT 0, and never raises the flag.
 
 Note this gate was **never** applied to the biallelic modes anyway — the retired
 `filters.denovo.require_gnomad_absent_or_singleton` only touched de novo (secondary here), and

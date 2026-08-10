@@ -81,6 +81,107 @@ def test_annotations_frequency_and_predictors():
     assert A.frequency(FakeVar({})) is None               # absent = rarest
 
 
+def test_frequency_prefers_faf95_then_proxy_never_max_af():
+    """The rarity chokepoint's precedence: faf95 -> grpmax proxy. Never MAX_AF, never global AF.
+
+    faf95 is the quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017) — the LOWER
+    bound of the 95% CI — so a gate on it fires only when the allele is confidently common. The
+    proxy is a point estimate and sits ~one CI-width HIGH, discarding candidates the interval
+    never justified discarding. Verified against the real gnomAD v4.1 joint data: the FAF group
+    set is afr/amr/eas/mid/nfe/sas, which EXCLUDES the bottlenecked ami/asj/fin, so faf95 does not
+    reintroduce the MAX_AF trap.
+
+    Falling back to the proxy when faf95 is absent is the STRINGENT direction and is deliberate:
+    absent faf95 means no group has a confidently non-zero AF, and proxy >= faf95 wherever both
+    exist, so the fallback can only ever filter MORE — never silently retain something faf95
+    would have caught.
+    """
+    from hprv import annotations as AN
+
+    class V:
+        def __init__(self, **info): self.INFO = info
+        # cyvcf2's INFO.get semantics
+    def mk(**info):
+        v = V(); v.INFO = dict(info)
+        v.INFO.get = info.get           # noqa: E731
+        return v
+
+    def freq(cfg=None, **info):
+        class I(dict):
+            def get(self, k, d=None): return dict.get(self, k, d)
+        o = type("V", (), {})()
+        o.INFO = I(info)
+        return AN.frequency(o, cfg)
+
+    F = AN.F
+    # faf95 present -> used, even though the proxy is 4x higher
+    assert freq(**{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
+    # faf95 absent -> proxy (the more stringent of the two here)
+    assert freq(**{F["gnomade_nfe_af"]: "9e-05"}) == 9e-05
+    # both absent -> None (rarest); an absent AF is never a measured zero
+    assert freq() is None
+    # MAX_AF must NEVER be consulted, at any precedence
+    assert freq(**{F["max_af"]: "0.02"}) is None, "MAX_AF leaked into the rarity oracle"
+    assert freq(**{F["gnomad_af_joint"]: "0.02"}) is None, "a global AF leaked into the oracle"
+    # the config switch pins the pre-transfer behaviour bit-for-bit
+    proxy_cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+    assert freq(proxy_cfg, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 0.00025
+    # ...and the default (no cfg) prefers faf95
+    assert freq(None, **{F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}) == 6e-05
+
+    # THE DIRECTIONAL CLAIM, pinned: at the dominant gate the same cutoff RETAINS MORE on faf95.
+    DOM = 1.0e-4
+    keep = lambda f: f is None or f < DOM        # noqa: E731
+    both = {F["faf95"]: "6e-05", F["gnomade_nfe_af"]: "0.00025"}
+    assert keep(freq(**both)) and not keep(freq(proxy_cfg, **both)), \
+        "faf95 must retain a variant the point-estimate proxy would drop"
+
+
+def test_prioritize_rarity_oracle_matches_the_screen():
+    """Step 9 must RANK on the same quantity the screen GATED on, and say which per variant.
+
+    If Step 9 read the proxy while the screen gated on faf95, a variant kept because its CI lower
+    bound was low would then be scored as though it carried the higher point estimate — penalised
+    for the very reason it was (correctly) retained.
+    """
+    from hprv import prioritize as PR
+    base = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T",
+            "inheritance": "dominant", "child_gt": "0/1"}
+    r = PR.score_variant({**base, "faf95": "6e-05", "grpmax_af": "0.00025"}, {}, {})
+    assert r["rarity_oracle"] == "faf95"
+    assert r["rarity_strength"] == PR.rarity_strength("6e-05", {}), "ranked on the wrong quantity"
+    r = PR.score_variant({**base, "grpmax_af": "9e-05"}, {}, {})
+    assert r["rarity_oracle"] == "grpmax_proxy"
+    r = PR.score_variant(dict(base), {}, {})
+    assert r["rarity_oracle"] == "absent" and r["rarity_strength"] == "unknown"
+
+
+def test_prioritize_nhomalt_conflict_is_reported_and_costs_nothing_by_default():
+    """nhomalt flags a biallelic call gnomAD already carries homozygotes for — reported, not
+    penalised, because no calibration exists for how many should disqualify one.
+
+    And None (no gnomAD transfer) must never behave like 0 (transfer ran, no homozygotes).
+    """
+    from hprv import prioritize as PR
+    base = {"consequence": "missense_variant", "impact": "MODERATE", "ref": "A", "alt": "T",
+            "child_gt": "1/1", "grpmax_af": "1e-4"}
+    hit = PR.score_variant({**base, "inheritance": "hom_recessive", "nhomalt": "12"}, {}, {})
+    assert hit["nhomalt_recessive_conflict"] is True
+    clean = PR.score_variant({**base, "inheritance": "hom_recessive", "nhomalt": "0"}, {}, {})
+    assert clean["nhomalt_recessive_conflict"] is False
+    absent = PR.score_variant({**base, "inheritance": "hom_recessive"}, {}, {})
+    assert absent["nhomalt_recessive_conflict"] is False, "absent nhomalt must not flag"
+    # a DOMINANT call is not a recessive conflict however many homozygotes exist
+    dom = PR.score_variant({**base, "inheritance": "dominant", "nhomalt": "12"}, {}, {})
+    assert dom["nhomalt_recessive_conflict"] is False
+    # default charges nothing; the flag is the deliverable
+    assert hit["pts_quality"] == clean["pts_quality"]
+    # ...but the knob works when set deliberately
+    cfg = {"prioritization": {"composite": {"weights": {"quality": {"nhomalt_conflict": -1.5}}}}}
+    charged = PR.score_variant({**base, "inheritance": "hom_recessive", "nhomalt": "12"}, {}, cfg)
+    assert charged["pts_quality"] == clean["pts_quality"] - 1.5
+
+
 def test_frequency_excludes_bottlenecked_pops():
     """The whole point of the grpmax proxy: a founder-group-only allele must NOT drive rarity.
 

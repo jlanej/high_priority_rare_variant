@@ -16,8 +16,8 @@ How this pipeline decides whether a variant is rare enough to be a high-priority
 > | Why an external oracle, not internal AC/AN | **IMPLEMENTED** — and structural; it is why gnomAD is read at all |
 > | The gnomAD v4.1 reference dataset | **IMPLEMENTED**, but read from the **VEP cache**, not a sites VCF — so only the *point* AFs of it exist here |
 > | Rarity field = **grpmax proxy** (max AF over AFR/AMR/EAS/NFE/SAS) | **IMPLEMENTED** (`src/hprv/annotations.py:frequency`) |
-> | Rarity field = **grpmax `faf95`** | **TARGET, not implemented.** The cache carries no AC/AN, so the CI lower bound is *unrecoverable* — see [§ faf95 is unavailable](#faf95-is-unavailable-and-why-a-cache-cannot-supply-it) |
-> | `nhomalt` conditions (de novo absent-or-singleton, homozygote sanity check) | **TARGET, not implemented** — no `nhomalt` field exists |
+> | Rarity field = **grpmax `faf95`** | **IMPLEMENTED**, via the gnomAD joint slim transferred in Step 2 (`resources.gnomad.sites_slim`, opt-in). Without that resource the oracle falls back to the grpmax point-estimate **proxy**, per variant — see [§ the two oracles](#the-two-oracles-faf95-and-the-grpmax-proxy) |
+> | `nhomalt` conditions | **PARTIAL.** `nhomalt` is transferred with the slim and reported per variant, and a biallelic call in a gene where gnomAD carries homozygotes raises `nhomalt_recessive_conflict`. The flag costs **0 points by default** — there is no calibration for how many homozygotes should disqualify a recessive candidate, so hprv reports it rather than inventing a penalty. |
 > | Whiffin/Ware maximum credible AF; ClinGen VCEP gene-specific BA1/BS1 | **TARGET, not implemented** — no gene-specific override table is wired |
 > | Exome/genome discordance flag | **TARGET, not implemented** — not a cache field |
 > | Why `MAX_AF` and global AF must never be substituted | **IMPLEMENTED and test-enforced** — [read this before "simplifying" the rarity field](#the-max_af-trap-the-most-dangerous-simplification-in-this-pipeline) |
@@ -30,7 +30,7 @@ How this pipeline decides whether a variant is rare enough to be a high-priority
 
 - **Oracle = gnomAD v4.1 (GRCh38)**, read from the **VEP cache** (`--af_gnomade` / `--af_gnomadg`). External, never internal.
 - **The rarity field is a grpmax _proxy_:** the max **point-estimate AF** across the grpmax-**eligible** ancestry groups only — `AFR, AMR, EAS, NFE, SAS`. One function owns it for the whole pipeline: `annotations.frequency()`.
-- **It is not `faf95`.** faf95 (the 95% CI lower bound) is the *target* and remains the right field; it needs AC/AN, which the cache does not carry, so it is **absent — not approximated**. The proxy therefore runs ~one CI-width **high** on low-count alleles, i.e. the gates err toward **dropping**.
+- **Two oracles, chosen per variant.** `annotations.frequency()` prefers real **faf95** (the 95% CI lower bound, from the gnomAD joint slim) and falls back to the grpmax **point-estimate proxy** where gnomAD published no faf95. Which one fired is reported per variant as `rarity_oracle`. The proxy runs ~one CI-width **high** on low-count alleles, i.e. it errs toward **dropping**; faf95 removes that error, so supplying the slim **retains more** at the same cutoffs. Never `MAX_AF`, never a global AF.
 - **It is not `MAX_AF` and must never become `MAX_AF`.** MAX_AF maxes over the bottlenecked founder groups grpmax deliberately excludes; global AF fails in the *opposite* direction. [Neither is a safe fallback.](#the-max_af-trap-the-most-dangerous-simplification-in-this-pipeline)
 - **Dominant / de novo:** keep if proxy AF `< 1e-4` (applied at Step 5, per mode).
 - **Recessive / compound-het:** keep if proxy AF `< 1e-2` (permissive discovery default), with a `< 1e-3` **high-confidence tier** that *flags* (`high_conf_rarity`) rather than drops; applied **per variant**, not per gene.
@@ -53,9 +53,9 @@ Internal data still has one legitimate frequency-adjacent use: **artifact detect
 
 - **Composition:** 730,947 exomes (416,555 UK Biobank + 314,392 non-UKB) plus 76,215 genomes, all unrelated, aligned to GRCh38/hg38. v4.1 is the current release (Apr 2024). The union callset is ~807k samples, but exome vs genome N differs per site.
 - **v4.1 key fixes:** corrects the v4.0 allele-number (AN) bug; adds a **joint (combined exome + genome) AN and AF** at every site called in either data type; adds a **discordant-frequency flag** where a contingency/CMH test between exomes and genomes gives p < 1e-4 (~2.5% of variants).
-- **Practical rule (TARGET):** prefer the joint AF/AN and heed the discordance flag before trusting a single subset. Not implemented — joint AF/AN and the discordance flag are sites-VCF fields. The cache exposes exome and genome AFs separately, and `frequency()` simply takes the max across both, which is the conservative reading (it cannot under-call a frequency) but is **not** the joint estimate and knows nothing about exome/genome discordance.
+- **Practical rule:** prefer the joint AF/AN. **Now satisfied for the rarity gate**: `faf95` is read from the gnomAD **joint** release (`fafmax_faf95_max_joint`), so the primary oracle *is* the joint estimate. The fallback proxy is still a max over the cache's separate exome/genome per-population AFs — conservative (it cannot under-call) but not the joint estimate. The exome/genome **discordance flag** remains unwired (it is a sites-VCF field the slim does not keep).
 
-### faf95 is unavailable, and why a cache cannot supply it
+### The two oracles: faf95 and the grpmax proxy
 
 VEP release r113 (Oct 2024) updated its built-in gnomAD annotation to **v4.1** for both genomes
 and exomes, and this pipeline reads it (`--af_gnomade` / `--af_gnomadg`). But be precise about
@@ -67,9 +67,28 @@ and exomes, and this pipeline reads it (`--af_gnomade` / `--af_gnomadg`). But be
   denominator, it cannot be recomputed downstream. **faf95 is not approximated here; it is
   unrecoverable at any price** — no amount of post-processing recovers a confidence interval from
   a point estimate that arrived with no counts attached.
-- Restoring it means the **actual gnomAD data**: slim the 24 v4.1 joint chromosome VCFs down to
-  `fafmax_faf95_max_joint` + `nhomalt_joint` (~10 GB kept, GCS egress free). See
-  [limitations.md §2](limitations.md).
+- **So faf95 comes from the actual gnomAD data**, and now does: `prepare_resources.sh --only
+  gnomad_sites fetch` stream-slims the 24 v4.1 **joint** chromosome VCFs to 5 of their ~664 INFO
+  fields (~10 GB lands, GCS egress is free, nothing raw is staged), and Step 2 `bcftools
+  annotate`-transfers them as `gnomad_faf95` / `gnomad_faf95_group` / `gnomad_nhomalt` (+ two
+  reporting-only AFs). This is the second and last external transfer in the pipeline.
+
+**Which groups faf95 covers — verified against the real v4.1 joint data, not assumed.** The FAF
+group set is **afr, amr, eas, mid, nfe, sas**: `GRPMAX_POPS` **plus `mid`**, and critically it
+EXCLUDES the bottlenecked ami/asj/fin that [the MAX_AF trap](#the-max_af-trap-the-most-dangerous-simplification-in-this-pipeline)
+is about. So faf95 does **not** reintroduce that failure mode. `mid` is the single deviation from
+hprv's own proxy, which is why the producing group rides along as `faf95_group` on every row —
+the same reason `max_af_pops` rides beside `max_af`.
+
+**Absent faf95 is not AF = 0.** gnomAD emits `fafmax` only where some group's CI lower bound
+exceeds zero; on a chr22 sample **74%** of records carried none, and where present it was always
+> 0. So absence means "no group has a confidently non-zero frequency", and `frequency()` falls
+back to the proxy there — which is the *more stringent* of the two, so the fallback can only ever
+filter more, never silently retain something faf95 would have caught.
+
+**Expect a LARGER candidate list.** faf95 ≤ the point estimate, so the same cutoffs stop
+discarding low-count alleles whose confidence interval never justified the call. If supplying the
+slim made your list *smaller*, something is wrong — check the Step-2 join count.
 - Second cache caveat: cache frequencies exist only for alleles **accessioned into dbSNP**. An
   un-accessioned gnomAD variant silently returns *no* frequency and reads as "absent ⇒ rarest".
   Ensembl itself recommends `--custom` with the gnomAD VCF over `--af_gnomad*` for this reason.
@@ -86,8 +105,8 @@ here, not a behaviour. See [tooling_and_reproducibility.md](tooling_and_reproduc
 | **Global AF** | AF across all samples | Dilutes an ancestry-enriched variant; a variant common in one group looks rare globally. **Do not filter on this.** Carried as `vep_gnomAD{e,g}_AF` for **reporting only**. |
 | **VEP `MAX_AF`** | Max AF over *all* gnomAD groups **and** the 1000 Genomes phase-3 populations | **Never a filter field — it is a trap.** [See below.](#the-max_af-trap-the-most-dangerous-simplification-in-this-pipeline) Carried as `vep_MAX_AF` / `vep_MAX_AF_POPS` for reporting, so a reviewer can spot a call whose founder-group frequency is high. |
 | **grpmax AF** (formerly popmax) | Highest point-estimate AF across the **grpmax-eligible** genetic-ancestry groups | Better than global, but a point estimate is noisy when a group's AN is small. **This — reconstructed as a proxy from the per-population cache AFs — is our current filter field.** |
-| **FAF (faf95 / faf99)** | Lower bound of the 95% (or 99%) Poisson CI on the AF | The frequency you can be ≥95% confident the true AF is *at least*. Conservative for *filtering out* benign variants — you only exclude a variant as "too common" when confident it really is common. **The right filter field, and the TARGET — [unavailable under the VEP-only contract](#faf95-is-unavailable-and-why-a-cache-cannot-supply-it).** |
-| **grpmax FAF** | faf95 from the ancestry group with the highest FAF | The value ClinGen VCEPs use for BA1/BS1. **TARGET.** |
+| **FAF (faf95 / faf99)** | Lower bound of the 95% (or 99%) Poisson CI on the AF | The frequency you can be ≥95% confident the true AF is *at least*. Conservative for *filtering out* benign variants — you only exclude a variant as "too common" when confident it really is common. **The right filter field, and IMPLEMENTED** when the gnomAD joint slim is supplied. |
+| **grpmax FAF** | faf95 from the ancestry group with the highest FAF | The value ClinGen VCEPs use for BA1/BS1. This is exactly `fafmax_faf95_max_joint`, i.e. what hprv reads. **IMPLEMENTED.** |
 
 **The proxy, precisely.** `annotations.frequency()` returns the max cache AF over
 `GRPMAX_POPS = (AFR, AMR, EAS, NFE, SAS)` across both exome and genome fields. Mirroring gnomAD's
@@ -252,7 +271,7 @@ above rather than restated here. What is specific to this layer:
 | --- | --- | --- | --- |
 | Frequency oracle | gnomAD **v4.1** (GRCh38), from the **VEP cache** | **IMPLEMENTED** | Point AFs only. Joint AF/AN and the exome/genome discordance flag are sites-VCF fields — *target*. |
 | Filter field | **grpmax proxy** = max AF over `AFR/AMR/EAS/NFE/SAS` | **IMPLEMENTED** | `annotations.frequency()`. A point estimate. **Never** `MAX_AF` (over-drops) and **never** global AF (over-retains). |
-| Filter field | grpmax **faf95** | **TARGET** | The right field. Needs AC/AN ⇒ unrecoverable from the cache; needs the gnomAD sites VCF (~10 GB slim). |
+| Filter field | grpmax **faf95** | **IMPLEMENTED** (opt-in resource) | `fafmax_faf95_max_joint` via the ~10 GB joint slim, transferred in Step 2. Falls back per variant to the grpmax point-estimate proxy; `rarity_oracle` says which fired. FAF groups = afr/amr/eas/**mid**/nfe/sas — verified, and excluding ami/asj/fin. |
 | Dominant / de novo keep | proxy AF `< 1e-4` | **IMPLEMENTED** (Step 5) | De novo "absent-or-singleton + low `nhomalt`" is **removed** — no `nhomalt` field exists. |
 | Recessive / comp-het keep | proxy AF `< 1e-2` (discovery) | **IMPLEMENTED** (Steps 3 + 5) | Per variant, not per gene. |
 | High-confidence recessive tier | proxy AF `< 1e-3` | **IMPLEMENTED** (Step 5) | **Flags** `high_conf_rarity`; does not drop. |

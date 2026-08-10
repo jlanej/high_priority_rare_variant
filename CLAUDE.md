@@ -24,7 +24,7 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    paths, sample/subject IDs, or PHI. All paths are `${ENV}` placeholders resolved at runtime.
    `.gitignore` enforces this; before every commit, sanity-check with
    `grep -rE '/Users/|/scratch|/home/[a-z]|BS_[A-Z0-9]{8}'`.
-2. **gnomAD v4.1 from the VEP cache is the ONLY population-frequency oracle.** These trios are not
+2. **gnomAD v4.1 is the ONLY population-frequency oracle.** These trios are not
    jointly genotyped, so internal cohort AC/AN is meaningless (absent ≠ hom-ref). Never `bcftools
    merge` the trios into a genotype matrix and never compute population frequency from internal
    counts; internal recurrence is valid only as an artifact/blocklist signal.
@@ -36,10 +36,18 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
    - **Never substitute the global AF.** It dilutes ancestry-enriched variants and fails the
      opposite way (retaining benign polymorphisms). The two wrong substitutions err in opposite
      directions — there is no single safe fallback.
-   This is a **point estimate, not `faf95`**: faf95's CI correction needs AC/AN, which the cache
-   does not carry, so it is unrecoverable rather than approximated. It is the deliberate cost of
-   the VEP-only contract (rule 6). Everything reads it through `annotations.frequency()` — one
-   chokepoint, never a field getter directly.
+   **TWO ORACLES, chosen per variant, and `annotations.frequency()` is the one chokepoint —
+   never a field getter directly.** It prefers real **faf95** (`gnomad_faf95`, from the gnomAD
+   v4.1 JOINT slim transferred in Step 2; `resources.gnomad.sites_slim`, opt-in ~10 GB) and falls
+   back to the grpmax point-estimate proxy above wherever gnomAD published no faf95. Which one
+   fired is reported per variant as `rarity_oracle`. Verified against the real v4.1 data: the FAF
+   group set is afr/amr/eas/**mid**/nfe/sas — GRPMAX_POPS plus `mid`, EXCLUDING ami/asj/fin, so
+   faf95 does not reintroduce the MAX_AF trap; `faf95_group` reports the producing group.
+   **Absent faf95 is not AF 0** (gnomAD emits fafmax only where a CI lower bound exceeds zero —
+   74% of a chr22 sample had none), and the proxy fallback is the MORE STRINGENT of the two, so it
+   can only ever filter more. **Supplying the slim RETAINS MORE**: faf95 <= the point estimate, so
+   the same cutoffs stop discarding low-count alleles the interval never justified discarding — a
+   SMALLER list after enabling it means a broken join, not a better filter.
 6. **VEP-centric contract.** The annotation surface is a VEP 115 GRCh38 cache + its score PLUGINS:
    CADD (required-ish) and **SpliceAI** (required by default). Nothing else is bcftools-transferred in: no
    gnomAD, ClinVar, dbNSFP or LOFTEE file. Adding an annotation means either a VEP plugin or a
@@ -102,8 +110,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   presence); the rest of Step 2 is unchanged.
 - **Step 2 INFO fields** (the contract `src/hprv/annotations.py` owns): all but two are CSQ
   fields lifted by `bcftools +split-vep` with a `vep_` prefix. The exceptions are
-  `clinvar_CLNREVSTAT` / `clinvar_CLNSIG`, `bcftools annotate`-transferred from the ClinVar sites
-  VCF — a THIRD namespace on purpose, so which oracle a field came from is readable at a glance. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
+  `clinvar_*` (from the ClinVar sites VCF) and `gnomad_*` (`gnomad_faf95`, `gnomad_faf95_group`,
+  `gnomad_nhomalt`, + two reporting-only AFs, from the gnomAD v4.1 joint slim) —
+  `bcftools annotate` transfers under their own namespaces on purpose, so which oracle a field
+  came from is readable at a glance. Those are the ONLY two transfers. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
   `vep_BIOTYPE`, `vep_HGVSc`, `vep_HGVSp`, `vep_MANE_SELECT`, `vep_CADD_PHRED`, `vep_CLIN_SIG`,
   `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` (+ `DP_*`, `SYMBOL`; `annotations.spliceai_ds()` = the max,
   the splice keep-path — present only when the SpliceAI plugin is configured),
@@ -318,6 +328,18 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   POSITIVE limb is damped — shrinking a low-star BENIGN term toward zero would promote a
   poorly-reviewed benign call. And the screen stays star-blind: reinstating the old >=2-star
   keep/drop gate would violate never-drop.
+- **Absent `faf95` is NOT AF = 0, and the fallback direction is load-bearing.** gnomAD emits
+  `fafmax` only where some ancestry group's 95% CI lower bound exceeds zero — 74% of a chr22
+  sample carried none. So `frequency()` falling back to the grpmax proxy there is not a
+  compromise, it is the STRINGENT choice: proxy >= faf95 wherever both exist, so the fallback can
+  only ever filter MORE, never silently retain what faf95 would have caught. Inverting this (treat
+  absent faf95 as rarest, skip the proxy) would silently retain every common-in-proxy allele
+  gnomAD declined to compute a FAF for. `rarity_oracle` reports which one fired PER VARIANT —
+  a run-level label would be wrong, because both occur in one run.
+- **Enabling the gnomAD slim makes the candidate list BIGGER.** faf95 <= the point estimate, so
+  the same cutoffs stop discarding low-count alleles whose CI never justified the call. If the
+  list got SMALLER after supplying it, the join is broken — check Step 2's
+  "gnomAD joint matched N / M sites" line, which is guarded to die at 0 but not at 1.
 - **`MAX_AF` is a trap, not a shortcut.** It is right there in the CSQ and looks like the rarity
   field. It is not — see golden rule 2. It maxes over founder groups (ami AN≈900) and 1000G
   populations that gnomAD's grpmax excludes on purpose, so a single allele reads as AF≈1e-3 and

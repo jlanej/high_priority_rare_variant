@@ -76,6 +76,8 @@ def add(**k):
     # Calibrated missense predictors. Default ABSENT (not 0.0) so most rows exercise the
     # fall-through to CADD/none, and the few that set them exercise the calibrated limbs.
     k.setdefault("revel", ""); k.setdefault("alphamissense", "")
+    # gnomAD joint transfer fields. Default ABSENT so most rows exercise the proxy fallback.
+    k.setdefault("faf95", ""); k.setdefault("faf95_group", ""); k.setdefault("nhomalt", "")
     k.setdefault("clnsig", ""); k.setdefault("filter", "PASS"); k.setdefault("hidenovo", "")
     V.append(k)
 
@@ -89,7 +91,7 @@ add(file="A", chrom="chr1", pos=5000, gene="GENE1", csq="stop_gained", impact="H
 # REVEL >= 0.773 (Pejaver moderate) with a LOW cadd: the ladder must report revel, not cadd,
 # and must reach V4 — this is the whole point of adding a calibrated predictor.
 add(file="A", chrom="chr1", pos=8000, gene="GENE2", csq="missense_variant", impact="MODERATE",
-    af=5e-4, cadd="3", revel="0.85",
+    af=5e-4, cadd="3", revel="0.85", faf95="8e-05", faf95_group="nfe", nhomalt="7",
     gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/1", 99, 40), "MO_A": ("0/1", 99, 40)})
 # 3+4) compound het in GENE3 (var3 maternal, var4 paternal) -> mode=compound_het
 # AlphaMissense only (REVEL absent): the ladder must fall through to it rather than to CADD.
@@ -473,7 +475,7 @@ def main(argv=None) -> int:
     # not_functional, quietly destroying the very comp-het the multiallelic case exists to test.
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
         fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\t"
-                 "spliceai\trevel\talphamissense\n")
+                 "spliceai\trevel\talphamissense\tfaf95\tfaf95_group\tnhomalt\n")
         seen = set()
         for v in V:
             alts = [altbase(v["pos"])]
@@ -488,7 +490,8 @@ def main(argv=None) -> int:
                 fh.write(f"{v['chrom']}\t{v['pos']}\t{refbase(v['pos'])}\t{a}\t"
                          f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
                          f"{v['af_pop']}\t{v['clnsig']}\t{v['spliceai']}\t"
-                         f"{v['revel']}\t{v['alphamissense']}\n")
+                         f"{v['revel']}\t{v['alphamissense']}\t"
+                         f"{v['faf95']}\t{v['faf95_group']}\t{v['nhomalt']}\n")
 
     # Step-6 tables
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:
@@ -586,6 +589,38 @@ def main(argv=None) -> int:
         fh.write("#kid\tdad\tmom\nCH_A\tFA_A\tMO_A\nCH_B\tFA_B\tMO_B\nCH_C\tFA_C\tMO_C\n")
 
     # minimal config (defaults fill in thresholds); concrete ephemeral paths
+    # A REAL (tiny) gnomAD joint slim, so Step 2 exercises the actual `bcftools annotate`
+    # transfer and its 0-match guard rather than a faked INFO field. Field names are v4.1's
+    # exactly (fafmax_faf95_max_joint, ...) — the rename to gnomad_* happens in Step 2, so a
+    # typo there is caught here.
+    gn = os.path.join(W, "gnomad.slim.vcf")
+    with open(gn, "w") as fh:
+        fh.write("##fileformat=VCFv4.2\n")
+        for c in sorted({v["chrom"] for v in V}):
+            fh.write(f"##contig=<ID={c}>\n")
+        fh.write('##INFO=<ID=AF_joint,Number=A,Type=Float,Description="x">\n'
+                 '##INFO=<ID=AF_grpmax_joint,Number=A,Type=Float,Description="x">\n'
+                 '##INFO=<ID=fafmax_faf95_max_joint,Number=A,Type=Float,Description="x">\n'
+                 '##INFO=<ID=fafmax_faf95_max_gen_anc_joint,Number=A,Type=String,Description="x">\n'
+                 '##INFO=<ID=nhomalt_joint,Number=A,Type=Integer,Description="x">\n'
+                 "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+        rows = []
+        for v in V:
+            if not (v["faf95"] or v["nhomalt"]):
+                continue
+            info = [f"AF_joint={v['af'] or 1e-4:.6g}",
+                    f"AF_grpmax_joint={v['af'] or 1e-4:.6g}"]
+            if v["faf95"]:
+                info.append(f"fafmax_faf95_max_joint={v['faf95']}")
+                info.append(f"fafmax_faf95_max_gen_anc_joint={v['faf95_group'] or 'nfe'}")
+            if v["nhomalt"] != "":
+                info.append(f"nhomalt_joint={v['nhomalt']}")
+            rows.append((v["chrom"], v["pos"], refbase(v["pos"]), altbase(v["pos"]),
+                         ";".join(info)))
+        for c, pos, r, a, info in sorted(rows, key=lambda x: (x[0], x[1])):
+            fh.write(f"{c}\t{pos}\t.\t{r}\t{a}\t.\t.\t{info}\n")
+    # bgzip/tabix are run by run_integration.sh, which owns every tool invocation here.
+
     with open(os.path.join(W, "config.mock.yaml"), "w") as fh:
         fh.write(f"""project: {{name: mock, genome_build: GRCh38, output_dir: {W}/work}}
 runtime: {{image: none, engine: native, tmpdir: {W}/work/tmp, threads: 1}}
@@ -599,6 +634,10 @@ resources:
   # vep_SpliceAI_pred_DS_* directly.
   vep: {{annotated_vcf: {W}/cohort.sites.vep.vcf.gz, version: 115,
          spliceai_backfill: {{enabled: false}}}}
+  # The gnomAD joint slim -> Step 2's SECOND bcftools transfer -> real faf95 + nhomalt. Wired
+  # here so the integration exercises the transfer, the 0-match guard, and the faf95-before-proxy
+  # precedence in annotations.frequency() — not just the proxy fallback.
+  gnomad: {{sites_slim: {W}/gnomad.slim.vcf.gz, oracle: faf95}}
   mutation_rate_table: {W}/mutrate.tsv
   constraint: {{gnomad_v2_constraint: {W}/constraint.tsv}}
   cram_map: {W}/cram_map.tsv

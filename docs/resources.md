@@ -339,8 +339,49 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 
 | Resource | ~Size | Why you'd add it | Acquisition trap |
 |---|---|---|---|
-| **gnomAD v4.1 joint** slim | ~10 GB | restores real **faf95** + **nhomalt** (the homozygote sanity check) | stream-slim the 24 chromosome VCFs to ~5 of their 664 INFO fields; nothing but the slim output lands on disk and GCS egress is free. Confirmed v4.1 joint tags: `AF_joint`, `AF_grpmax_joint`, `fafmax_faf95_max_joint`, `nhomalt_joint` |
+| ~~**gnomAD v4.1 joint** slim~~ | ~10 GB | **WIRED** — see [the gnomAD joint slim](#the-gnomad-joint-slim-faf95) below. Opt-in via `--only gnomad_sites`. |
 | **LOFTEE** GRCh38 data | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | mostly the GERP bigwig. Use the plugin's **`grch38` branch** (already baked in; master is GRCh37-only) |
+
+## The gnomAD joint slim (faf95)
+
+**Opt-in**, and the single most consequential resource in the pipeline: it upgrades the rarity
+oracle from a grpmax point-estimate **proxy** to gnomAD's real **faf95** — the 95% CI lower bound,
+which is the quantity ACMG/ClinGen specify for frequency filtering (Whiffin 2017).
+
+```bash
+prepare_resources.sh --dir /data/hprv_resources --only gnomad_sites fetch
+```
+
+It is not in the default set because preparing it reads ~877 GB. Only the ~10 GB slim lands:
+`prep_gnomad` **streams** each of the 24 joint chromosome VCFs straight into `bcftools annotate
+-x` when htslib can read the URL, so no raw chromosome is ever staged. That needs htslib built
+with libcurl — check **`samtools --version`** (NOT `bcftools --version`, which prints no feature
+line); without it, it falls back to download-then-slim and you need scratch for one raw chromosome
+at a time. GCS egress is free. Each per-chromosome slim is validated by tabix and moved into place
+atomically, so an interrupted run resumes instead of concatenating a truncated file into the
+oracle.
+
+Five INFO fields are kept, renamed on transfer in Step 2:
+
+| gnomAD v4.1 | hprv INFO | role |
+|---|---|---|
+| `fafmax_faf95_max_joint` | `gnomad_faf95` | **the rarity oracle** |
+| `fafmax_faf95_max_gen_anc_joint` | `gnomad_faf95_group` | which ancestry group produced it |
+| `nhomalt_joint` | `gnomad_nhomalt` | the recessive false-positive tell |
+| `AF_joint`, `AF_grpmax_joint` | `gnomad_AF_joint`, `gnomad_AF_grpmax` | **reporting only**, never a filter field |
+
+Three things to know before you enable it:
+
+- **Your candidate list will get BIGGER.** faf95 ≤ the point estimate, so the same cutoffs stop
+  discarding low-count alleles whose confidence interval never justified the call. A *smaller*
+  list means a broken join — read Step 2's `gnomAD joint matched N / M sites` line.
+- **Absent faf95 is not AF 0** (74% of a chr22 sample had none). `frequency()` falls back to the
+  proxy per variant, which is the more stringent of the two; `rarity_oracle` says which fired.
+- **Contig naming** must match your cohort, exactly as for ClinVar. The Step-2 transfer dies on a
+  0-match join rather than silently leaving every faf95 absent.
+
+Set `resources.gnomad.oracle: grpmax_proxy` to keep the pre-transfer behaviour bit-for-bit while
+still carrying the columns for review.
 
 ## SpliceAI
 

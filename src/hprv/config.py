@@ -89,6 +89,9 @@ SH_MAP = {
     # ClinVar sites VCF. The ONE bcftools-transferred annotation: the VEP cache exposes CLIN_SIG
     # but no CLNREVSTAT, so review status / gold stars are unavailable from the cache at any price.
     "HPRV_CLINVAR_VCF": "resources.clinvar.vcf",
+    # The gnomAD v4.1 JOINT sites slim — the second bcftools transfer, and the one that upgrades
+    # the rarity oracle from a grpmax point-estimate PROXY to real faf95 (see annotations.frequency).
+    "HPRV_GNOMAD_SITES": "resources.gnomad.sites_slim",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
     # kraken2 DB for Step-8b non-human-fraction screening (bind-mounted DATA, never baked).

@@ -196,12 +196,25 @@ prep_gnomad() {
         # interrupted run must be rebuilt, never concatenated into the faf95 oracle (silent corruption)
         if [[ -f "$slim" ]] && bcftools index -n "$slim" >/dev/null 2>&1; then parts+=("$slim"); continue; fi
         rm -f "$slim" "$slim".tbi "$slim".csi "$tmp" "$tmp".tbi 2>/dev/null || true
-        log "[gnomad_sites] chr${c}: fetch + slim to {$GNOMAD_KEEP_INFO}"
-        fetch_to "${base}/${fn}" "$raw" || { warn "[gnomad_sites] chr${c} download failed"; record miss gnomad_sites; return 0; }
+        log "[gnomad_sites] chr${c}: slim to {$GNOMAD_KEEP_INFO}"
+        # STREAM when htslib can read the URL directly: the per-chrom joint VCFs are tens of GB
+        # each (~877 GB total) and only the ~10 GB of slim output ever needs to land. Staging each
+        # raw chromosome first needs that much scratch for no benefit, and GCS egress is free.
+        # Requires htslib built with libcurl — check `samtools --version` (NOT `bcftools
+        # --version`, which prints no feature line). Falls back to download-then-slim otherwise.
+        local src=""
+        if [[ "$proto" == "https" ]] && samtools --version 2>/dev/null | grep -q 'libcurl=yes'; then
+            src="${base}/${fn}"
+            log "[gnomad_sites] chr${c}: streaming (htslib libcurl) — no raw file lands"
+        else
+            fetch_to "${base}/${fn}" "$raw" || { warn "[gnomad_sites] chr${c} download failed"; record miss gnomad_sites; return 0; }
+            src="$raw"
+        fi
         # keep ONLY the INFO fields the pipeline reads; write to a temp and ATOMICALLY move it into
         # place only after tabix indexes it cleanly (which validates the BGZF EOF block) — so a
-        # partial/truncated slim can never be trusted or reused.
-        if bcftools annotate -x "^INFO/${GNOMAD_KEEP_INFO//,/,INFO/}" -Oz -o "$tmp" "$raw" \
+        # partial/truncated slim can never be trusted or reused. This matters MORE when streaming:
+        # a dropped connection mid-stream yields a short file that bgzip alone would accept.
+        if bcftools annotate -x "^INFO/${GNOMAD_KEEP_INFO//,/,INFO/}" -Oz -o "$tmp" "$src" \
                && tabix -f -p vcf "$tmp" 2>/dev/null; then
             mv -f "$tmp" "$slim"; mv -f "$tmp.tbi" "$slim.tbi"; rm -f "$raw"; parts+=("$slim")
         else
@@ -453,7 +466,7 @@ do_verify() {
     # absent (every gene reads T0), so a missing table must not fail a correctly-configured
     # Steps-0-8 run. Reported so an operator can see whether the excess statistic will be live.
     verify_extra "$MUTTARGET_OUT" mutational_target
-    verify_extra "$GNOMAD_OUT" gnomad_sites
+    verify_extra "$GNOMAD_OUT" gnomad_sites   # opt-in; absent => rarity runs on the grpmax proxy
     # Consumed but OPTIONAL, so `extra` rather than a hard requirement: each degrades with a loud
     # warning (ClinVar -> stars UNAVAILABLE; REVEL/AlphaMissense -> Step 9's missense tier falls
     # back to an off-label CADD rank). Reported so an operator can see which evidence will be live.
@@ -489,6 +502,13 @@ do_emit() {
         echo "# and therefore GOLD STARS are unavailable and a 1-star single-submitter assertion is"
         echo "# indistinguishable from a 3-star expert-panel one."
         echo "export CLINVAR_VCF=$CLINVAR_OUT"
+        echo "# gnomAD v4.1 JOINT sites slim -> real faf95 + nhomalt. OPT-IN:"
+        echo "#   prepare_resources.sh --dir DIR --only gnomad_sites fetch"
+        echo "# It upgrades the rarity oracle from a grpmax point-estimate PROXY to the 95%-CI"
+        echo "# corrected filtering AF, which RETAINS MORE at the same cutoffs (faf95 <= the point"
+        echo "# estimate). Commented out until you have prepared it — an unset var leaves the"
+        echo "# proxy in place, which is the current, documented behaviour."
+        echo "# export GNOMAD_SITES=$GNOMAD_OUT"
         echo "# Calibrated MISSENSE predictors (VEP plugins). These change the SCREEN by nothing —"
         echo "# missense is IMPACT=MODERATE and selection.py returns at the impact rung. They make"
         echo "# Step 9's missense TIER calibrated instead of an off-label CADD rank."
