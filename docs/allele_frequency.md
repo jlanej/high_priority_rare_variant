@@ -81,8 +81,11 @@ hprv's own proxy, which is why the producing group rides along as `faf95_group` 
 the same reason `max_af_pops` rides beside `max_af`.
 
 **ONE oracle per run — the arms never cross.** `resources.gnomad.oracle` picks the quantity for
-the whole run (`grpmax_proxy` by default, `faf95` when the slim is prepared), it is recorded once
-in `audit/counts.tsv`, and `annotations.frequency()` never consults the other arm. An earlier
+the whole run — **`faf95` by default**, because it is the quantity ACMG/ClinGen specify and the
+one you can cite without caveat. It requires the gnomAD joint slim and **halts at preflight**
+without it rather than quietly running on the point estimate; `grpmax_proxy` is the deliberate
+opt-down. The choice is recorded once in `audit/counts.tsv`, and `annotations.frequency()` never
+consults the other arm. An earlier
 design preferred faf95 per variant and fell back to the proxy, which made two rows in one run
 comparable on different quantities — undescribable in a methods section — and got the fallback
 direction wrong (below). `rarity_basis` records the per-variant provenance *within* the chosen

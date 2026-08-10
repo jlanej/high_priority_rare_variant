@@ -76,7 +76,13 @@ def test_annotations_frequency_and_predictors():
     v = FakeVar({"vep_gnomADe_NFE_AF": "0.002", "vep_gnomADg_EAS_AF": "0.004",
                  "vep_gnomADe_AFR_AF": "0.001", "vep_CADD_PHRED": "12.0&26.5"})
     assert abs(A.grpmax_af(v) - 0.004) < 1e-12            # max across e/g and pops
-    assert A.frequency(v) == A.grpmax_af(v)               # frequency() IS the grpmax proxy
+    PRX = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+    assert A.frequency(v, PRX) == A.grpmax_af(v)          # the proxy arm IS grpmax_af
+    # ...and under the DEFAULT (faf95) a cache-only AF is NOT substituted: the oracle has no
+    # value for this allele, so it reads absent/rarest. On a correct run that class is empty —
+    # the joint slim is a superset of the cache (which only carries dbSNP-accessioned alleles) —
+    # so a non-empty one means the transfer under-matched. Step 5 counts and warns about it.
+    assert A.frequency(v) is None and A.rarity_basis(v) == "absent"
     assert abs(A.cadd(v) - 26.5) < 1e-9                   # max over &-joined
     assert A.frequency(FakeVar({})) is None               # absent = rarest
 
@@ -109,8 +115,14 @@ def test_frequency_uses_exactly_one_oracle_per_run():
     # the oracle is RUN-level and constant; the default needs no extra resource
     assert AN.rarity_oracle(FAF) == "faf95"
     assert AN.rarity_oracle(PRX) == "grpmax_proxy"
-    assert AN.rarity_oracle(None) == "grpmax_proxy", "the default must not require the gnomAD slim"
-    assert AN.rarity_oracle({}) == "grpmax_proxy"
+    # faf95 is the DEFAULT — the correct, citable quantity, not the convenient one. It requires
+    # the gnomAD joint slim, and run_pipeline.sh HALTS at preflight without it rather than
+    # quietly running on the point estimate (the same contract as spliceai_required).
+    assert AN.rarity_oracle(None) == "faf95", "faf95 must be the default oracle"
+    assert AN.rarity_oracle({}) == "faf95"
+    assert AN.rarity_oracle({"resources": {"gnomad": {"oracle": "GRPMAX_PROXY"}}}) == "grpmax_proxy"
+    assert AN.rarity_oracle({"resources": {"gnomad": {"oracle": "nonsense"}}}) == "faf95", \
+        "an unrecognised oracle must fall to the CORRECT quantity, not the convenient one"
 
     both = _v(**{F["faf95"]: "6e-05", F["gnomad_af_joint"]: "8e-05",
                  F["gnomade_nfe_af"]: "0.00025"})
@@ -212,18 +224,25 @@ def test_frequency_excludes_bottlenecked_pops():
     """The whole point of the grpmax proxy: a founder-group-only allele must NOT drive rarity.
 
     gnomAD's grpmax excludes ami/asj/fin/mid/remaining because their small ANs make a point AF
-    unrepresentative. VEP's MAX_AF does not exclude them — so if frequency() ever regressed to
+    unrepresentative. (The FAF group set excludes ami/asj/fin but INCLUDES mid — the one class
+    where the two oracles legitimately differ; see test_frequency_uses_exactly_one_oracle_per_run.) VEP's MAX_AF does not exclude them — so if frequency() ever regressed to
     reading MAX_AF, this variant would report 1.1e-3, blow the 1e-4 dominant gate, and a real
     ultra-rare candidate would be silently dropped. It must read None (no eligible group).
     """
+    PRX = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
     ami_only = FakeVar({"vep_gnomADg_AMI_AF": "0.0011", "vep_gnomADe_FIN_AF": "0.0009",
                         "vep_gnomADe_ASJ_AF": "0.0015", "vep_gnomADe_MID_AF": "0.002",
                         "vep_MAX_AF": "0.002", "vep_MAX_AF_POPS": "gnomADe_MID"})
-    assert A.frequency(ami_only) is None
+    assert A.frequency(ami_only, PRX) is None
     # ...but a real NFE signal on the same variant IS counted.
     plus_nfe = FakeVar({"vep_gnomADg_AMI_AF": "0.0011", "vep_gnomADe_NFE_AF": "3e-5",
                         "vep_MAX_AF": "0.0011"})
-    assert abs(A.frequency(plus_nfe) - 3e-5) < 1e-12
+    assert abs(A.frequency(plus_nfe, PRX) - 3e-5) < 1e-12
+    # On the faf95 arm the guarantee is even stronger and needs no exclusion list: gnomAD computes
+    # FAF only over afr/amr/eas/mid/nfe/sas, so an ami/asj/fin-only allele has no eligible group
+    # and simply carries no fafmax. MAX_AF is not consulted by EITHER arm.
+    assert A.frequency(ami_only) is None, "MAX_AF must not leak into the faf95 arm either"
+    assert A.rarity_basis(ami_only) == "absent"
 
 
 def test_frequency_reads_multivalued_af_tuples():
@@ -236,15 +255,19 @@ def test_frequency_reads_multivalued_af_tuples():
     polymorphism. Golden rule 2: frequency() is the rarity oracle, so this must never regress.
     (Every other test here feeds strings, which is exactly why this hid.)
     """
+    # Asserted on grpmax_af() directly — this is about _max_float's VALUE parsing, which is the
+    # same on either oracle arm, so it must not be re-pinned every time the default changes.
     tup = FakeVar({"vep_gnomADe_NFE_AF": (0.001, 0.004)})
-    assert abs(A.frequency(tup) - 0.004) < 1e-12
+    assert abs(A.grpmax_af(tup) - 0.004) < 1e-12
     # mixed: a tuple with a missing entry, and the max must still win across fields
     mixed = FakeVar({"vep_gnomADe_NFE_AF": (".", 2e-5), "vep_gnomADg_AFR_AF": (7e-5,)})
-    assert abs(A.frequency(mixed) - 7e-5) < 1e-12
+    assert abs(A.grpmax_af(mixed) - 7e-5) < 1e-12
     # a plain scalar float (single-value field) still works
-    assert abs(A.frequency(FakeVar({"vep_gnomADe_SAS_AF": 1.5e-4})) - 1.5e-4) < 1e-12
+    assert abs(A.grpmax_af(FakeVar({"vep_gnomADe_SAS_AF": 1.5e-4})) - 1.5e-4) < 1e-12
     # and the string form (what most callers see) is unchanged
-    assert abs(A.frequency(FakeVar({"vep_gnomADe_EAS_AF": "0.002&0.003"})) - 0.003) < 1e-12
+    assert abs(A.grpmax_af(FakeVar({"vep_gnomADe_EAS_AF": "0.002&0.003"})) - 0.003) < 1e-12
+    # the faf95 field parses the same way (it is Number=A, so a multiallelic site yields a tuple)
+    assert abs(A.faf95(FakeVar({"gnomad_faf95": (1e-5, 4e-5)})) - 4e-5) < 1e-12
 
 
 def test_annotations_clinvar():
@@ -317,7 +340,13 @@ def test_audit_record_and_summarize(tmpdir="/tmp/_hprv_audit"):
 
 
 def test_step3_classifier():
-    cfg = {"filters": {"rarity": {"benign_ba1": 0.05, "recessive_max": 1e-2},
+    # Pinned to the grpmax_proxy arm because these fixtures carry VEP-CACHE AFs. On the default
+    # (faf95) arm a variant with only a cache AF and no gnomAD joint record correctly reads as
+    # absent/rarest, so these BA1 fixtures would not fire — a real behavioural difference, not a
+    # test artifact. The faf95 arm's Step-3 behaviour is exercised end-to-end by the integration
+    # run, whose mock supplies a real gnomAD slim.
+    cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}},
+           "filters": {"rarity": {"benign_ba1": 0.05, "recessive_max": 1e-2},
                        "functional": {"cadd_phred_supporting": 20.0, "spliceai_ds_min": 0.2,
                                       "keep_impacts": ["HIGH", "MODERATE"]}}}
     classify = build_classifier(cfg)

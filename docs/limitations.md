@@ -70,11 +70,12 @@ tiering. It is **keep-only** (a missing/None score never drops a variant, it onl
 
 ### 2. faf95 — RESOLVED by an opt-in resource; the proxy remains the fallback
 
-`frequency()` now prefers gnomAD's published **faf95** (the lower bound of the 95% Poisson CI),
-transferred in Step 2 from the gnomAD v4.1 **joint** slim (`resources.gnomad.sites_slim`,
-`prepare_resources.sh --only gnomad_sites fetch`, ~10 GB). It falls back **per variant** to the
-grpmax **point-estimate proxy** — the max AF across AFR/AMR/EAS/NFE/SAS — wherever gnomAD
-published no faf95. `rarity_oracle` reports which one fired on every row. The VEP cache itself
+`frequency()` uses gnomAD's published **faf95** (the lower bound of the 95% Poisson CI) by
+DEFAULT, transferred in Step 2 from the gnomAD v4.1 **joint** slim (`resources.gnomad.sites_slim`,
+`prepare_resources.sh --only gnomad_sites fetch`, ~10 GB). That resource is therefore required for
+a default run and the pipeline HALTS at preflight without it. `resources.gnomad.oracle:
+grpmax_proxy` is the deliberate opt-down to the point estimate — ONE oracle for the whole run
+either way, recorded in the audit; the arms never cross. The VEP cache itself
 still carries no AC/AN, so without the slim the proxy is all there is; that path is unchanged.
 
 Three properties worth stating, each verified against the real v4.1 data rather than assumed:

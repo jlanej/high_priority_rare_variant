@@ -157,13 +157,19 @@ def main(argv=None) -> int:
     # dominant model: rare functional inherited het, recurrent across individuals
     check(has("CH_A", "dominant", "chr2", 10000, "GENED"), "CH_A dominant inherited het GENED")
     check(has("CH_B", "dominant", "chr2", 10000, "GENED"), "CH_B dominant inherited het GENED")
-    # Rarity oracle = grpmax PROXY, not VEP's MAX_AF. GENEFND is at AF 0.002 in gnomAD 'mid' — a
-    # bottlenecked group gnomAD's own grpmax excludes — and absent from every grpmax-eligible
-    # group. MAX_AF therefore reports 0.002, 20x over dominant_max=1e-4, and reading it would
-    # silently DROP this call. frequency() must see None and the call must survive.
+    # THE MAX_AF TRAP, and it must hold on EITHER oracle. GENEFND is at AF 0.002 in gnomAD 'ami'
+    # — a bottlenecked founder group (AN~900) excluded from grpmax AND from the FAF group set, so
+    # neither arm sees it: the proxy skips ami, and gnomAD publishes no fafmax because no
+    # FAF-eligible group carries the allele. MAX_AF nonetheless reports 0.002, 20x over
+    # dominant_max=1e-4, and reading it would silently DROP this call.
     check(has("CH_A", "dominant", "chr2", 17000, "GENEFND"),
-          "founder-population-only allele (MAX_AF=0.002 in 'mid') still called dominant — "
-          "grpmax proxy correctly ignores bottlenecked groups")
+          "founder-population-only allele (MAX_AF=0.002 in 'ami') still called dominant — "
+          "neither oracle reads bottlenecked groups, and neither reads MAX_AF")
+    # The `mid` case is DIFFERENT and is the one place the arms legitimately disagree: grpmax
+    # excludes mid, the FAF set includes it. On the default (faf95) this allele IS gated.
+    check(not has("CH_A", "dominant", "chr2", 17500, "GENEMID"),
+          "a mid-enriched allele IS gated under the default faf95 oracle (the FAF group set "
+          "includes mid, unlike grpmax) — the one documented difference between the arms")
     fnd = [r for r in calls if r["symbol"] == "GENEFND"]
     check(fnd and all(not r["grpmax_af"] for r in fnd),
           "GENEFND reports an EMPTY grpmax_af (no eligible group carries it)")
@@ -439,7 +445,7 @@ def main(argv=None) -> int:
         # an earlier design blended them per variant, which made two rows in one run comparable
         # on different quantities and got the fallback direction wrong for singletons.
         oracles = {r["rarity_oracle"] for r in pv if r["rarity_oracle"]}
-        check(oracles == {"grpmax_proxy"},
+        check(oracles == {"faf95"},
               f"exactly ONE rarity oracle for the whole run (got {sorted(oracles)})")
         # BOTH ARMS, against the REAL transferred per-trio VCF. The pipeline ran on the default
         # (proxy) oracle above; this proves the faf95 arm on the same bcftools-transferred data

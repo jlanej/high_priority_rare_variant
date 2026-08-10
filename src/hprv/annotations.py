@@ -280,13 +280,15 @@ def rarity_oracle(cfg=None) -> str:
     fallback direction wrong (see ``frequency()``). One oracle, chosen in config, recorded in the
     audit, and never crossed at runtime.
 
-    ``resources.gnomad.oracle``, default ``grpmax_proxy`` — the behaviour that needs no extra
-    resource. Selecting ``faf95`` requires the gnomAD joint slim; ``run_pipeline.sh`` HALTS at
-    preflight rather than quietly running on the other quantity.
+    ``resources.gnomad.oracle``, default **faf95** — the CORRECT quantity (a 95% CI lower bound,
+    what ACMG/ClinGen specify), not the convenient one. It requires the gnomAD joint slim, and
+    ``run_pipeline.sh`` HALTS at preflight when that is missing rather than quietly running on the
+    other quantity — the same contract as ``resources.vep.spliceai_required``. Opt down to
+    ``grpmax_proxy`` deliberately for a run without the slim.
     """
     from .config import get as _get
-    v = str(_get(cfg or {}, "resources.gnomad.oracle", "grpmax_proxy")).strip().lower()
-    return "faf95" if v == "faf95" else "grpmax_proxy"
+    v = str(_get(cfg or {}, "resources.gnomad.oracle", "faf95")).strip().lower()
+    return "grpmax_proxy" if v == "grpmax_proxy" else "faf95"
 
 
 def rarity_basis(variant, cfg=None) -> str:

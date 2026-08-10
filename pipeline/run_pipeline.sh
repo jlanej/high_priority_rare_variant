@@ -121,7 +121,7 @@ if run_step 2; then
         # — the proxy is the documented, currently-shipping behaviour, not a broken state.
         # ONE oracle per run. Selecting faf95 without the slim would silently run on the OTHER
         # quantity — the exact ambiguity the single-oracle design exists to remove — so it HALTS.
-        if [[ "$(cfg_get resources.gnomad.oracle grpmax_proxy)" == "faf95" ]]; then
+        if [[ "$(cfg_get resources.gnomad.oracle faf95)" != "grpmax_proxy" ]]; then
             _need HPRV_GNOMAD_SITES "gnomAD joint slim (resources.gnomad.sites_slim) — REQUIRED because resources.gnomad.oracle is 'faf95'. Prepare it with 'prepare_resources.sh --only gnomad_sites fetch', or set oracle: grpmax_proxy to run on the VEP-cache point estimate"
         fi
         _opt HPRV_GNOMAD_SITES    "gnomAD joint slim (resources.gnomad.sites_slim) — rarity falls back to the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward DROPPING); no faf95, no nhomalt"
