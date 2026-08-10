@@ -2,18 +2,26 @@
 
 **VEP-centric contract.** Every annotation this pipeline reads comes from ONE tool: VEP 115
 (GRCh38) — its cache plus its score plugins — whose CSQ fields Step 2 lifts to INFO with a
-``vep_`` prefix (via ``bcftools +split-vep``). No external sites VCF is bcftools-transferred in
-— no gnomAD, ClinVar, dbNSFP or LOFTEE file is annotated in. The plugins are CADD (genome-wide
-functional, SNV+indel) and — optionally — SpliceAI (precomputed raw genome-wide splice delta
-scores); population frequency and ClinVar ride in the cache itself. This module is the single
-place that knows those field names and how to coerce their (string) values, so the selection,
-inheritance, and burden steps all read them identically.
+``vep_`` prefix (via ``bcftools +split-vep``), with ONE documented exception. The plugins are CADD
+(genome-wide functional, SNV+indel), SpliceAI (precomputed raw genome-wide splice deltas), and the
+calibrated missense pair REVEL + AlphaMissense; population frequency and ClinVar ``CLIN_SIG`` ride
+in the cache itself.
 
-What that costs is documented in docs/allele_frequency.md and docs/functional_annotation.md;
-in short: no faf95 (no CI correction), no nhomalt, no LOFTEE, no ClinVar review status. SpliceAI
-IS available now (when its score files are provided) — but the PRECOMPUTED set has its own limits
-(a missing score is NOT evidence of no effect; see spliceai_ds()). Adding another annotation means
-adding its INFO field here AND its plugin/transfer in Step 2 — nothing else reaches around this.
+The exception is ClinVar REVIEW STATUS: the cache carries ``CLIN_SIG`` but no ``CLNREVSTAT`` at
+any price, so gold stars require the ClinVar sites VCF itself, ``bcftools annotate``-transferred
+in Step 2 under a ``clinvar_`` prefix. That third namespace is deliberate — it makes the different
+oracle visible at a glance. No gnomAD, dbNSFP or LOFTEE file is transferred or read.
+
+This module is the single place that knows those field names and how to coerce their (string)
+values, so the selection, inheritance, and burden steps all read them identically.
+
+What the contract still costs is documented in docs/allele_frequency.md and
+docs/functional_annotation.md; in short: no faf95 (no CI correction), no nhomalt, no LOFTEE. Two
+availability caveats travel with the scores: the PRECOMPUTED SpliceAI set does not cover every
+indel (a missing score is NOT evidence of no effect; see spliceai_ds()), and REVEL/AlphaMissense
+are missense-only, so ``None`` on any non-missense is expected rather than a gap. Adding another
+annotation means adding its INFO field here AND its plugin/transfer in Step 2 — nothing else
+reaches around this.
 
 All getters are defensive: they return ``None`` for missing/'.'/unparseable values
 and take the max over ``&``/``,``-joined multi-transcript values for scores.
@@ -48,8 +56,9 @@ F = {
     "mane": "vep_MANE_SELECT",
     # --- functional prediction ---
     # CADD from the dedicated plugin (CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep):
-    # genome-wide, SNV+indel, and under this contract the ONLY functional predictor.
-    # It is therefore the sole keep-path for anything VEP rates below MODERATE. CADD
+    # genome-wide, SNV+indel. Alongside SpliceAI it is one of only TWO keep-paths for
+    # anything VEP rates below MODERATE (SpliceAI is checked first); REVEL/AlphaMissense
+    # below are missense-only and so can never be a keep-path at all. CADD
     # v1.6+ ingests SpliceAI/MMSplice as input features, so it carries a lossy
     # re-encoding of the splice signal the SpliceAI plugin would have supplied.
     "cadd": "vep_CADD_PHRED",
@@ -80,8 +89,9 @@ F = {
     "spliceai_symbol": "vep_SpliceAI_pred_SYMBOL",
     # --- clinical ---
     # ClinVar significance as cached by VEP (--check_existing, via --everything).
-    # The cache exposes CLIN_SIG ONLY: there is no review status (CLNREVSTAT), so star
-    # ratings are unavailable and the >=2-star auto-promote gate cannot be applied.
+    # The cache exposes CLIN_SIG ONLY — no review status. Stars come from the separate
+    # ClinVar transfer below (clnrevstat). The old >=2-star auto-promote gate is NOT
+    # reinstated: stars RANK in Step 9, and gating the screen would violate never-drop.
     # Values are lowercase, '&'-joined (e.g. "pathogenic&likely_pathogenic").
     "clnsig": "vep_CLIN_SIG",
     # --- ClinVar review status (the ONE bcftools transfer; see 02_annotate_sites.sh) ---
@@ -203,11 +213,15 @@ def frequency(variant) -> Optional[float]:
 
 
 # --- functional predictors ---------------------------------------------------
-# CADD is the only one available under the VEP-only contract. REVEL / AlphaMissense /
-# MPC / MetaRNN (dbNSFP) and SpliceAI are gone with their resource files; their getters
-# and their Step-3 branches were removed rather than left to return None forever. Note
-# the missense trio was already inert BEFORE removal: they are missense-only scores, and
-# every missense is IMPACT=MODERATE, which selection.py keeps at an earlier branch.
+# CADD (genome-wide), SpliceAI (splice), and the calibrated MISSENSE pair REVEL +
+# AlphaMissense, all VEP plugins. MPC / MetaRNN remain unwired (they would need dbNSFP,
+# whose pinned URL is dead upstream).
+#
+# The missense pair is INERT AT THE SCREEN by construction and always will be: they are
+# missense-only scores, every missense is IMPACT=MODERATE, and selection.py keeps MODERATE
+# at the impact rung and returns BEFORE any predictor is consulted. Their Step-3 keep-
+# reasons are asserted never to fire in CI. Their only consumer is Step 9's missense tier,
+# where they replace an off-label CADD rank with a ClinGen-calibrated one.
 def cadd(variant) -> Optional[float]:
     return _max_float(variant, "cadd")
 
@@ -263,15 +277,15 @@ def consequence(variant) -> Optional[str]:
 
 
 # --- clinical ----------------------------------------------------------------
-# ClinVar here is the VEP cache's CLIN_SIG, NOT a ClinVar VCF transfer. Two consequences
-# the reader must hold onto:
-#   1. NO review status. The cache has no CLNREVSTAT, so star ratings do not exist and
-#      clinvar_stars()/the >=2-star auto-promote gate are gone. A 1-star single-submitter
-#      P/LP assertion is now indistinguishable from an expert-panel one.
-#   2. It is as stale as the cache (VEP 115 GRCh38 caches ClinVar 2025-02), whereas the
-#      ClinVar VCF ships monthly. Reclassification is real; treat P/LP as a triage
-#      prior, never as an answer.
-# Both push toward false-positive retention (more to review), not toward missed calls.
+# TWO SOURCES, deliberately distinguishable by prefix:
+#   * clnsig()  reads the VEP cache's CLIN_SIG (vep_ prefix). It is as stale as the cache
+#     (VEP 115 caches ClinVar 2025-02) — reclassification is real, so treat P/LP as a
+#     triage prior, never an answer.
+#   * clinvar_stars() reads CLNREVSTAT from the ClinVar VCF TRANSFER (clinvar_ prefix),
+#     which is also a fresher, independently version-pinned release.
+# Stars RANK, they never gate: the screen is star-blind on purpose, because a keep/drop
+# gate on review status would violate never-drop. A 1-star assertion is kept and reviewed,
+# and ranked below a 3-star one by Step 9.
 def clnsig(variant) -> Optional[str]:
     return _str(variant, "clnsig")
 

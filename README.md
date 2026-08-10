@@ -186,15 +186,16 @@ NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CAD
 apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:latest
 
 # 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
-#    Under the VEP-only contract the pipeline needs FIVE things: a reference FASTA, a VEP 115
-#    GRCh38 cache, the CADD plugin data (license-gated, ~82 GB), the SpliceAI raw hg38 score files
-#    (REQUIRED by default — resources.vep.spliceai_required: true HALTS the run at preflight when
-#    they are missing; set it false to run without SpliceAI), and the per-gene constraint table
-#    (Step 6 ranking only). Nothing else is used — do not fetch the rest.
+#    A bare `fetch` prepares everything the pipeline consumes: a reference FASTA, a VEP 115 GRCh38
+#    cache, CADD (license-gated, ~82 GB), the per-gene constraint tables (Steps 6/9), ClinVar
+#    (~0.18 GB -> gold stars), and REVEL + AlphaMissense (~1.3 GB -> Step 9's calibrated missense
+#    tier). Do NOT narrow it with --only: that silently skips the last three. gnomAD/LOFTEE/dbNSFP
+#    are genuinely unused and stay opt-in. SpliceAI is separate (step 2b below) because its useful
+#    files are login-gated; it is REQUIRED by default (resources.vep.spliceai_required: true HALTS
+#    the run at preflight when missing; set it false to run without SpliceAI).
 #    prepare_resources.sh + its pinned manifest ship IN the image (on PATH). See docs/resources.md.
 apptainer exec --bind /data hprv.sif \
-    prepare_resources.sh --dir /data/hprv_resources --accept-license \
-    --only reference,vep_cache,cadd,constraint fetch
+    prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
 
 # 2b. SpliceAI raw hg38 scores. `--only spliceai` cannot finish the job: the SNV mirror it can
 #     reach is MANE-only and the indel file is login-gated with no no-login mirror. Use the

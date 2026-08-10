@@ -46,7 +46,8 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 >
 > Every annotation the pipeline reads comes from **one** tool: VEP 115 GRCh38 — its cache plus its
 > plugins (CADD, and **SpliceAI** — required by default, `resources.vep.spliceai_required: true`).
-> No gnomAD / ClinVar / dbNSFP / LOFTEE file is
+> Exactly ONE file is bcftools-transferred in — the **ClinVar sites VCF** (`resources.clinvar.vcf`),
+> supplying `CLNREVSTAT` ⇒ `clinvar_stars`, which the cache carries at no price. No gnomAD / dbNSFP / LOFTEE file is
 > bcftools-transferred in. Several rows below therefore describe **targets and reference science, not
 > what runs** — each is marked. The **IMPLEMENTED** column is what the code does.
 >
@@ -58,7 +59,6 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > | ~~ClinVar stars~~ | **RESTORED.** The ClinVar sites VCF is now transferred in Step 2 (`resources.clinvar.vcf`), so `CLNREVSTAT` -> `clinvar_stars` (0-4) is available. It is a Step-9 RANKING input, never a keep/drop gate. Absent transfer = blank, which is *not* 0 stars. |
 > | ~~REVEL / AlphaMissense~~ | **RESTORED** as VEP plugins (dedicated files, not dbNSFP). Still **no effect on selection** — see the note under the functional table; they make Step 9's missense tier calibrated instead of an off-label CADD rank. |
 > | LOFTEE | No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for the planned tiering step. |
-> | ClinVar stars | No `CLNREVSTAT` ⇒ the ≥2★ gate is unimplementable; unstarred P/LP is honored. ClinVar is also as stale as the cache (VEP 115 ⇒ ClinVar 2025-02). |
 > | REVEL / AlphaMissense / MPC | **No loss to selection** — see the note under the functional table. |
 
 ### Frequency oracle — IMPLEMENTED
@@ -154,11 +154,20 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 
 ### Clinical evidence
 - **IMPLEMENTED**: ClinVar `CLIN_SIG` from the VEP cache. P/LP (excluding `conflicting`)
-  overrides a failed rarity/function screen. **No star gate** — the cache has no `CLNREVSTAT`,
-  so a 1★ single-submitter assertion is indistinguishable from an expert-panel one and is
-  honored. Over-retention (more to review), never over-dropping. Release is pinned by the cache
-  (VEP 115 ⇒ ClinVar 2025-02), not independently.
-- *TARGET*: auto-promote P/LP at **≥2★** only; 1★ → prioritize + human review; Conflicting/VUS →
+  overrides a failed rarity/function screen. **No star gate, deliberately** — stars ARE available
+  now (`clinvar_stars`, from the Step-2 ClinVar transfer), but gating the SCREEN on them would
+  violate never-drop. A 1★ assertion is still kept and reviewed; it is RANKED below a 3★ one by
+  Step 9. Over-retention (more to review), never over-dropping. The cache's `CLIN_SIG` release is
+  pinned by the cache (VEP 115 ⇒ ClinVar 2025-02); the **transferred** ClinVar VCF
+  (`resources.clinvar.vcf`) is pinned independently and is what supplies `CLNREVSTAT`.
+- **IMPLEMENTED — the Step-9 star damp.** `resources.clinvar.min_review_stars` = **2**,
+  `resources.clinvar.low_star_scale` = **0.5**. Below the star threshold the clinical term's
+  **positive limb only** is multiplied by the scale; a low-star *benign* term is left at full
+  magnitude, because shrinking it toward zero would PROMOTE a poorly-reviewed benign call. Blank
+  stars (no transfer) ⇒ `clinvar_review_status = UNAVAILABLE` ⇒ **full** weight — absent is not 0★.
+  Set `low_star_scale: 0.0` to ignore sub-threshold assertions entirely; the variant still appears
+  in every output (never-drop).
+- *TARGET (screen-level only — the Step-9 ranking damp above is IMPLEMENTED)*: auto-promote P/LP at **≥2★** only; 1★ → prioritize + human review; Conflicting/VUS →
   flag; exclude 0★. Classifier backbone **AutoGVP**; combining via **Tavtigian/ClinGen points**
   (P ≥ 10, LP 6–9, VUS 0–5), **PM2 at Supporting**. All require a ClinVar VCF.
 
@@ -298,11 +307,23 @@ a read-level review list.
 | Tier | Rule | Points |
 |---|---|---|
 | **V5** | NMD-competent pLoF in a LoF-mechanism gene | +8 — **UNREACHABLE**: `variants.tsv` has no EXON/CDS_position, so every pLoF caps at V4 |
-| **V4** | `spliceai_ds ≥ 0.5`, or a HIGH-impact pLoF (NMD indeterminate) | +4 |
-| **V3** | `spliceai_ds ≥ 0.2`, or missense `cadd ≥ 25.3` | +2 — the CADD route is `cadd_offlabel`, a discovery rank, **not** PP3 |
-| **V2** | missense below the CADD cut; in-frame indel | +1 |
-| **V1** | non-coding/synonymous kept via the CADD rung | +0.5 |
+| **V4** | `spliceai_ds ≥ 0.5`; a HIGH-impact pLoF (NMD indeterminate); or missense `revel ≥ 0.773` (Pejaver *moderate*) | +4 |
+| **V3** | `spliceai_ds ≥ 0.2`; missense `revel ≥ 0.644`; missense `am_pathogenicity ≥ 0.564` (REVEL absent); or missense `cadd ≥ 25.3` | +2 — the CADD route is `cadd_offlabel`, a discovery rank, **not** PP3 |
+| **V2** | missense scored *between* the calibrated cuts; missense with no predictor at all; in-frame indel | +1 |
+| **V1** | missense `revel ≤ 0.290` or `am_pathogenicity ≤ 0.34` (calibrated benign range); non-coding/synonymous kept via the CADD rung | +0.5 |
 | **V0** | `spliceai < 0.1` **and** `cadd < 15` **and** LOW/MODIFIER | 0 — **caps the total**; BOTH scores must be PRESENT (absence ≠ benignity) |
+
+**Missense predictor precedence** — `revel` → `alphamissense` → `cadd` (off-label) → `none`, a
+**fixed order, never a max** over whatever is available: ClinGen SVI's rule is to commit to one
+predictor chosen before seeing results, so best-of-N would be an uncalibrated cherry-pick. A blank
+score falls through to the next source (both are missense-only and neither covers every
+substitution). `missense_evidence_source` always names which one fired. Splice and missense
+evidence are **independent mechanisms**, so when both are present the tier is the **stronger** of
+the two and both are reported in `variant_tier_reason` — adding splice evidence can never lower a
+tier. Thresholds: `prioritization.variant_tier.revel_supporting` **0.644** / `revel_moderate`
+**0.773** / `revel_benign_max` **0.290** (Pejaver 2022); `alphamissense_supporting` **0.564** /
+`alphamissense_benign_max` **0.34** (Cheng 2023). hprv assigns **no ACMG weight** — these cut
+points ORDER candidates.
 
 **Mechanism gating** (ACMG/ClinGen SVI — the most important structural rule): the constraint term
 **and** the gene-list prior are multiplied by **V0 → 0.0, V1/V2 → 0.5, V3–V5 → 1.0**, and zeroed
@@ -314,12 +335,15 @@ molecular (above) + rarity (**1e-5 → +2, 1e-4 → +1.5, 1e-3 → +1, 1e-2 → 
 caps at −4**) + gene constraint (**+1**, gated) + recurrence (**+1 / +2 cap**, on the *carrier
 count* — never on the saturating case-only `p_recurrence`; same-variant only **+0.5**) + quality
 (GT fail **−2**, NHF flagged **−3**, **NHF not_screened 0**, comp-het partner unknown **−0.5**) +
-clinical (ClinVar P/LP **+4**, benign **−4**; `review_status = UNAVAILABLE` — no `CLNREVSTAT`, so no
-≥2★ gate) + MOI (discordant **−1**, **unknown exactly 0**) + gene artifact (above).
+clinical (ClinVar P/LP **+4**, benign **−4**; the **positive limb only** is scaled by
+`resources.clinvar.low_star_scale` **0.5** when `clinvar_stars <` `resources.clinvar.min_review_stars`
+**2** — a low-star *benign* term is NOT shrunk, which would promote it. Blank stars ⇒
+`review_status = UNAVAILABLE` ⇒ **full** weight, because absent ≠ 0★) + MOI (discordant **−1**, **unknown exactly 0**) + gene artifact (above).
 
 > **`priority_points` is NOT an ACMG score.** Do not read totals against Tavtigian's P ≥ 10 /
 > LP 6–9 / VUS 0–5 bands: the criteria are not ACMG criteria, no phenotype/segregation/functional
-> evidence exists, the ClinVar term has no star gate, and the artifact terms have no ACMG analogue.
+> evidence exists, the ClinVar term applies an uncalibrated review-status damp that is not ACMG
+> PP5/BP6, and the artifact terms have no ACMG analogue.
 > Never emit a P/LP/VUS label from it.
 
 **NHF is three states, never two:** `clean` / `flagged` / **`not_screened`**. **Blank ≠ 0.0** —
@@ -349,8 +373,8 @@ constraint table (~3 MB; `prepare_resources.sh --only mutational_target`). Not i
 `resources.constraint.gnomad_v2_constraint`, which is projected down to the LOEUF/pLI priors and has
 no `mu_*` columns. Absent → loud WARN, every gene reads T0, the variant layer still runs.
 
-*TARGET:* V5 (needs three more VEP fields), calibrated missense strength (REVEL/dbNSFP), pLoF
-confidence (LOFTEE), ClinVar star gate, single-site excess de-escalation, per-ancestry candidate
+*TARGET:* V5 (needs three more VEP fields), pLoF confidence (LOFTEE), single-site excess
+de-escalation, per-ancestry candidate
 yield, synonymous-λ calibration.
 
 ### A-priori gene lists & phenotype — TARGET (priors/tiers not yet wired; `[reserved]` in config, no code reads gene lists or HPO/Exomiser)
