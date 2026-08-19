@@ -178,7 +178,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **Step 7 output**: `hprv_summary.xlsx` (openpyxl; `src/hprv/report.py`) — documented workbook:
   About/legend + Gene consolidation + Candidate calls + Trio resolution + QC + Audit counts.
 - **Step 8 output**: `igv/` for the jlanej/igv.js variant-review server (`src/hprv/igv.py` +
-  `08_igv_export.sh`): `variants.tsv` (only `chrom/pos/ref/alt` required; extra columns are
+  `08_igv_export.sh`): `variants.tsv` — its headline `frequency` column IS `rarity_af`, the value
+  the run's oracle produced and every gate applied; it must never be a different quantity from the
+  one that did the filtering, with `grpmax_af`/`faf95` alongside as the raw inputs. (Only
+  `chrom/pos/ref/alt` required; extra columns are
   filterable; per-member `*_file`/`*_index` + `*_vcf*` track paths are RELATIVE to the data-dir
   `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
   map (`resources.cram_map`; `samtools view -C -T ref --regions-file bed`, ± `outputs.igv.padding`),
@@ -577,7 +580,7 @@ two things that look identical in the output are not the same fact:
   genotype QC, selection funnel, Step-6 helpers, and the Step-9 prioritization layer — the NB
   fit/tail/BH-FDR, the never-drop invariant end-to-end through the CLI, the positive-control guard,
   both tier ceilings, blank-vs-zero NHF, mechanism gating, and a check that every default in the
-  code equals `config.example.yaml`'s value). **67 tests, no network and no VCF.**
+  code equals `config.example.yaml`'s value). **68 tests, no network and no VCF.**
   **One documented exception to "no heavy deps":** the 9 tests that drive `09_prioritize.py:main()`
   need `yaml` transitively (`load_config` does `import yaml`). They declare it at the `_load_p9()`
   chokepoint and **SKIP** without it — and `_run_all` then refuses to print "All N passed", instead

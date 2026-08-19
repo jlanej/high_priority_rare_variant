@@ -28,6 +28,11 @@ NHF_FLAG_FRACTION = 0.5
 # our annotations, then the per-member track columns.
 COLUMNS = [
     "chrom", "pos", "ref", "alt",
+    # `frequency` IS `rarity_af` — the value the run's oracle produced and every gate applied.
+    # Duplicated into this prominent position on purpose: it is the column a reviewer reads
+    # first, and it must not be a different quantity from the one that did the filtering.
+    # `rarity_oracle` / `rarity_basis` say which quantity that was and how it arose; `grpmax_af`
+    # and `faf95` ride further right as the raw inputs.
     "trio_id", "gene", "consequence", "impact", "frequency", "inheritance", "origin", "pair_id",
     "child_gt", "mother_gt", "father_gt", "child_GQ", "child_DP", "child_AB",
     # max_af/max_af_pops are shown next to grpmax_af so a reviewer can spot a call whose
@@ -171,7 +176,16 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "chrom": chrom, "pos": pos, "ref": ref, "alt": alt,
                 "trio_id": trio, "gene": r.get("symbol") or r.get("gene"),
                 "consequence": r.get("consequence"), "impact": r.get("impact"),
-                "frequency": r.get("grpmax_af"),
+                # THE ORACLE'S value — the same number as `rarity_af`, shown early because it
+                # is the frequency a reviewer reads first. It was hardwired to `grpmax_af`, so
+                # under the default faf95 oracle the headline column disagreed with the value
+                # every gate actually used, and the review table showed two different
+                # "frequencies" with no way to tell which was authoritative.
+                # Keyed on rarity_ORACLE, not on rarity_af: the latter is legitimately EMPTY when
+                # the oracle has no value for the allele (basis=absent), and keying on it would
+                # send exactly those rows down the legacy branch.
+                "frequency": (r.get("rarity_af") if r.get("rarity_oracle")
+                              else r.get("grpmax_af")),
                 "inheritance": r.get("mode"), "origin": _origin(r.get("flags")),
                 "pair_id": r.get("pair_id"),
                 "child_gt": r.get("child_gt"), "mother_gt": r.get("mother_gt"),

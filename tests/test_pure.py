@@ -563,6 +563,70 @@ def _nhf_tsv(path, entries):
             fh.write(f"{k}\t{reads}\t{frac}\n")
 
 
+def test_igv_frequency_column_is_the_run_oracle():
+    """The review table's headline `frequency` must be the value the run's oracle produced.
+
+    It was hardwired to `grpmax_af`, so under the default faf95 oracle the first frequency a
+    reviewer reads disagreed with `rarity_af` — the number every gate actually applied — and the
+    table showed two different "frequencies" with no way to tell which was authoritative.
+
+    Keyed on rarity_ORACLE, not on rarity_af: the latter is legitimately EMPTY when the oracle has
+    no value for the allele (basis=absent), and keying on the value would send exactly those rows
+    down the legacy branch and resurrect the proxy.
+    """
+    import csv
+    from hprv import igv
+    d = tempfile.mkdtemp(prefix="_hprv_igvfreq_")
+    try:
+        data = os.path.join(d, "igv")
+        os.makedirs(data, exist_ok=True)
+        manifest = os.path.join(d, "trios.resolved.tsv")
+        _write_tsv(manifest, ["trio_id", "vcf", "ped", "samples"],
+                   [{"trio_id": "T1", "vcf": "x.vcf.gz", "ped": "x.ped", "samples": "KID,DAD,MOM"}])
+        calls = os.path.join(d, "candidates.calls.tsv")
+        cols = ["chrom", "pos", "ref", "alt", "trio_id", "mode", "rarity_af", "rarity_oracle",
+                "rarity_basis", "grpmax_af", "faf95"]
+        _write_tsv(calls, cols, [
+            # faf95 arm, measured: frequency must be the faf95 value, NOT the higher proxy
+            {"chrom": "chr1", "pos": "100", "ref": "A", "alt": "T", "trio_id": "T1",
+             "mode": "dominant", "rarity_af": "6e-05", "rarity_oracle": "faf95",
+             "rarity_basis": "measured", "grpmax_af": "0.00025", "faf95": "6e-05"},
+            # zero_ci: the oracle resolved to 0 while the proxy is high — the case that matters
+            {"chrom": "chr1", "pos": "200", "ref": "C", "alt": "G", "trio_id": "T1",
+             "mode": "dominant", "rarity_af": "0", "rarity_oracle": "faf95",
+             "rarity_basis": "zero_ci", "grpmax_af": "0.00022", "faf95": ""},
+            # absent: rarity_af is EMPTY but the oracle ran — must stay empty, not fall back
+            {"chrom": "chr1", "pos": "300", "ref": "G", "alt": "A", "trio_id": "T1",
+             "mode": "dominant", "rarity_af": "", "rarity_oracle": "faf95",
+             "rarity_basis": "absent", "grpmax_af": "0.00099", "faf95": ""},
+        ])
+        out = os.path.join(data, "variants.tsv")
+        igv.build_variants_tsv(calls, manifest, data, out)
+        got = {r["pos"]: r for r in csv.DictReader(open(out), delimiter="\t")}
+        assert got["100"]["frequency"] == "6e-05", got["100"]["frequency"]
+        assert got["200"]["frequency"] == "0", "zero_ci must show the oracle's 0, not the proxy"
+        assert got["300"]["frequency"] == "", \
+            "an absent oracle value must stay blank, never fall back to the proxy"
+        for pos in ("100", "200", "300"):
+            assert got[pos]["frequency"] == got[pos]["rarity_af"], \
+                f"frequency and rarity_af disagree at {pos}"
+        # the raw inputs still ride along for review
+        assert got["100"]["grpmax_af"] == "0.00025" and got["100"]["faf95"] == "6e-05"
+
+        # LEGACY table with no rarity_* columns still populates frequency from the proxy
+        legacy = os.path.join(d, "legacy.tsv")
+        _write_tsv(legacy, ["chrom", "pos", "ref", "alt", "trio_id", "mode", "grpmax_af"],
+                   [{"chrom": "chr1", "pos": "400", "ref": "A", "alt": "T", "trio_id": "T1",
+                     "mode": "dominant", "grpmax_af": "9e-05"}])
+        out2 = os.path.join(data, "variants_legacy.tsv")
+        igv.build_variants_tsv(legacy, manifest, data, out2)
+        row = next(csv.DictReader(open(out2), delimiter="\t"))
+        assert row["frequency"] == "9e-05", "a pre-oracle table must still populate frequency"
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_igv_nhf_join_is_pos_minus_one():
     """Step-8b NHF folds into variants.tsv on the 0-based key (pos-1), with the read
     denominator beside each fraction, and nhf_flag over the min_reads floor. A decoy key at

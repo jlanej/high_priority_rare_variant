@@ -475,6 +475,9 @@ def main(argv=None) -> int:
     mode_c = _find(vcols, "inheritance", "mode")
     alias = {"child_GQ": _find(vcols, "child_gq"), "child_DP": _find(vcols, "child_dp"),
              "child_AB": _find(vcols, "child_ab"), "clin_sig": _find(vcols, "clin_sig", "clnsig"),
+             # `frequency` here is the PRE-ORACLE fallback only: on a current igv/variants.tsv it
+             # holds the run oracle's value (= rarity_af), not the grpmax proxy. Harmless because
+             # vget prefers a non-empty real `grpmax_af` column, which every current table has.
              "grpmax_af": _find(vcols, "grpmax_af", "frequency")}
 
     def vget(row, canonical):
