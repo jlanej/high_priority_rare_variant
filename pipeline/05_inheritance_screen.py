@@ -30,12 +30,11 @@ from hprv.ped import parse_ped
 
 COLS = [
     "trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
-    # frequency() prefers faf95 and falls back to grpmax_af; max_af/max_af_pops ride
-    # along for review only, so a curator can see when a call is being driven by a
-    # founder-group frequency that grpmax deliberately ignores.
-    # grpmax_af is the point-estimate PROXY; faf95 is the CI-corrected oracle when the gnomAD
-    # slim was transferred. BOTH ride along so a reviewer can see the gap the CI correction
-    # closed — and frequency() (the chokepoint) prefers faf95 and falls back to the proxy.
+    # frequency() reads ONE oracle for the whole run (resources.gnomad.oracle: faf95 by default,
+    # else the grpmax point-estimate proxy); the arms never cross. max_af/max_af_pops ride along
+    # for review only, so a curator can see when a call would have been driven by a founder-group
+    # frequency that grpmax deliberately ignores. grpmax_af (the proxy) and faf95 (the CI-corrected
+    # value) BOTH ride along so a reviewer can see the gap the CI correction closed.
     # faf95_group names the ancestry group that produced it: the FAF set is GRPMAX_POPS + `mid`,
     # so this is how the one deviation stays visible. nhomalt is the recessive false-positive tell.
     # rarity_af is THE value every gate used (annotations.frequency()) and rarity_oracle is its

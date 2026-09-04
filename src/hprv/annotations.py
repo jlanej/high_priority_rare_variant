@@ -13,8 +13,9 @@ oracle a field came from is visible at a glance:
 
   * ``clinvar_*`` — ClinVar REVIEW STATUS. The cache carries ``CLIN_SIG`` but no ``CLNREVSTAT``,
     so gold stars require the ClinVar sites VCF itself.
-  * ``gnomad_*``  — **faf95** and **nhomalt**, from the gnomAD v4.1 JOINT slim (optional). faf95's
-    CI correction needs AC/AN, which the cache omits; see ``frequency()`` for the precedence.
+  * ``gnomad_*``  — **faf95** and **nhomalt**, from the gnomAD v4.1 JOINT slim — REQUIRED under
+    the default oracle (``resources.gnomad.oracle: faf95``), optional only under ``grpmax_proxy``.
+    faf95's CI correction needs AC/AN, which the cache omits; see ``frequency()``.
 
 No dbNSFP or LOFTEE file is transferred or read.
 
@@ -22,9 +23,9 @@ This module is the single place that knows those field names and how to coerce t
 values, so the selection, inheritance, and burden steps all read them identically.
 
 What the contract still costs is documented in docs/allele_frequency.md and
-docs/functional_annotation.md. With the optional gnomAD joint slim the rarity oracle IS real
-faf95 and nhomalt is available; without it, rarity falls back to the point-estimate proxy and
-nhomalt is absent. LOFTEE remains unwired either way. Two
+docs/functional_annotation.md. ONE rarity oracle per run: real faf95 (the default; the joint slim
+is required) or, by explicit opt-down, the grpmax point-estimate proxy — the arms never cross.
+nhomalt travels with the slim. LOFTEE remains unwired either way. Two
 availability caveats travel with the scores: the PRECOMPUTED SpliceAI set does not cover every
 indel (a missing score is NOT evidence of no effect; see spliceai_ds()), and REVEL/AlphaMissense
 are missense-only, so ``None`` on any non-missense is expected rather than a gap. Adding another
@@ -217,10 +218,11 @@ def _max_float(variant, *keys) -> Optional[float]:
 def grpmax_af(variant) -> Optional[float]:
     """Max gnomAD v4.1 AF over the grpmax-ELIGIBLE ancestry groups (see GRPMAX_POPS).
 
-    A point estimate standing in for gnomAD's published grpmax AF, and the **fallback** arm of
-    ``frequency()`` — the preferred arm is real ``faf95()``, which the gnomAD joint slim supplies
-    when it is configured. This function is what runs when that resource is absent, or (per
-    variant) when gnomAD published no faf95 for the allele.
+    A point estimate standing in for gnomAD's published grpmax AF, and the **opt-down** arm of
+    ``frequency()`` (``resources.gnomad.oracle: grpmax_proxy``). The default arm is real
+    ``faf95()`` from the gnomAD joint slim; the two are never mixed within a run, and this
+    function is never consulted under the faf95 arm — not even when gnomAD published no faf95 for
+    the allele (that resolves to 0 / ``zero_ci``, see ``frequency()``).
 
     It is a point estimate, not a CI lower bound: computing faf95 needs AC/AN, which the VEP
     cache does not carry, so THIS field cannot be CI-corrected no matter what. It therefore runs
@@ -241,11 +243,13 @@ def faf95(variant) -> Optional[float]:
     bound of the Poisson 95% CI on the population AF, maximised over the FAF-eligible genetic
     ancestry groups. Available only when the gnomAD joint slim is transferred in Step 2.
 
-    **None is not "AF = 0".** gnomAD emits fafmax only where some group's CI lower bound is above
-    zero; on a chr22 sample 74% of records carried none, and where it was present it was always
-    > 0. So None means "no group has a confidently non-zero frequency" — which for a rarity gate
-    is the rarest case, and is why `frequency()` falls back to the point-estimate proxy there
-    (the proxy is the MORE stringent of the two, the safe direction).
+    **None is not "AF = 0" — and it is not "use the proxy" either.** gnomAD emits fafmax only
+    where some group's CI lower bound is above zero; on a chr22 sample roughly 80% of records
+    carried none, and where it was present it was always > 0. So None means "no group has a
+    confidently non-zero frequency". ``frequency()`` resolves that to 0.0 (rarest,
+    ``rarity_basis=zero_ci``) when gnomAD has the allele at all, and to None (absent, rarest)
+    when it has no record — never to the point-estimate proxy, which would filter singletons on
+    an inflated AF (96.5% of that class are AC <= 2).
     """
     return _max_float(variant, "faf95")
 
