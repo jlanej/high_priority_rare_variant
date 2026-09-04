@@ -10,17 +10,22 @@ high-priority rare variants and candidate genes — and *why* each step is shape
 >
 > The **backbone is implemented as described**: resolve → QC gate → normalize → site-only union →
 > annotate once → select plausible → per-trio extract+transfer → inheritance screen → gene
-> consolidation → report → IGV export. What has changed is **Step 2's annotation stack**. The
-> pipeline runs a **VEP-only contract**: a VEP 115 GRCh38 cache plus the **CADD** and **SpliceAI**
-> plugins, and nothing else. No gnomAD, ClinVar, dbNSFP or LOFTEE file is downloaded, bind-mounted or
-> transferred — the external `bcftools annotate` stage this doc used to describe **no longer
-> exists**.
+> consolidation → report → IGV export → prioritization. **Step 2's annotation stack** is a
+> **VEP-centric contract**: a VEP 115 GRCh38 cache plus the **CADD**, **SpliceAI** (required by
+> default), **REVEL** and **AlphaMissense** (required by default) plugins, plus exactly **two**
+> `bcftools annotate` transfers — the **ClinVar sites VCF** (`clinvar_CLNREVSTAT` ⇒ gold stars,
+> which rank in Step 9 and never gate) and the **gnomAD v4.1 joint slim** (`gnomad_faf95`,
+> `gnomad_nhomalt`, …), required by the default `resources.gnomad.oracle: faf95`. No dbNSFP or
+> LOFTEE file is transferred.
 >
-> Consequences that touch this document, marked **TARGET** where they appear below: rarity is a
-> gnomAD v4.1 **grpmax point-estimate proxy**, not `faf95` (the cache carries no AC/AN, so faf95 is
-> *unrecoverable*, not approximated); the functional ladder is **three rungs** (VEP IMPACT, then SpliceAI, then
-> CADD); ClinVar P/LP is **unstarred**; constraint and gene-lists are Step-6 inputs, not Step-2
-> annotations. Steps 7's overlays are still planned.
+> Consequences that touch this document: rarity is ONE oracle per run — gnomAD **`faf95`** (the
+> 95% CI lower bound) by default, the grpmax point-estimate proxy only under the deliberate opt-down
+> `grpmax_proxy`, never a per-variant blend; the functional ladder is **three rungs** (VEP IMPACT,
+> then SpliceAI ≥ 0.2, then CADD ≥ 25.3), i.e. five keep reasons; the ClinVar P/LP override is
+> **star-blind by design**; constraint and the mutational-target table are Step-6/Step-9 inputs,
+> not Step-2 annotations. Items still marked **TARGET** below: LOFTEE/PVS1 grading, the
+> pediatric-cancer overlay and the phenotype prior (Step 9's Class-B gene-list overlay exists, off by
+> default).
 >
 > The full ledger — what the first pass cannot see, why, and the cost to fix each — lives in
 > **[limitations.md](limitations.md)**; it is not restated here. The reference science below is
@@ -48,10 +53,11 @@ defensible:
    [cohort_construction.md](cohort_construction.md).
 3. **The "subset merged VCF" (step 3) must not become a cohort genotype matrix used for
    frequency.** Keep **per-trio** subset VCFs as the authoritative unit for inheritance; the only
-   legitimate cohort frequency is **external gnomAD v4.1** — today the cache's per-population AFs
-   reduced to a **grpmax point-estimate proxy** (`annotations.frequency()`), with `faf95` a
-   **TARGET** that needs the gnomAD sites VCF. The correction that matters here is unchanged
-   either way: the frequency is *external*, never internal.
+   legitimate cohort frequency is **external gnomAD v4.1**, read through `annotations.frequency()`
+   as ONE quantity per run — real **`faf95`** from the gnomAD joint slim by default, the cache's
+   grpmax point-estimate proxy only under the deliberate opt-down `oracle: grpmax_proxy`. The
+   correction that matters here is unchanged either way: the frequency is *external*, never
+   internal.
 4. **"Genes with more variants than expected" (step 5) means recurrence across individuals.**
    The focus is **inherited** variation: the primary signal is a gene where rare functional
    variants — especially **dominant heterozygous** ones — recur across multiple independent
@@ -65,7 +71,7 @@ defensible:
 as a lightweight cross-reference, mtDNA is out of scope. The original flow also omits a **QC gate
 0** (per-trio sex / Mendelian-error / contamination checks — garbage in, garbage out), which we add.
 Known blind spots: SNV/indel only (CNV/SV), pseudogene/seg-dup regions, and everything the
-VEP-only contract cannot see — see [limitations.md](limitations.md).
+VEP-centric contract cannot see — see [limitations.md](limitations.md).
 
 ---
 
@@ -73,8 +79,8 @@ VEP-only contract cannot see — see [limitations.md](limitations.md).
 
 | # | Original step | Verdict | Required change |
 |---|---------------|---------|-----------------|
-| 1 | Site-only VCF per input → merge + sort → cohort site-only VCF; VEP-annotate the merge | **Keep — efficient & correct in spirit** | Normalize each trio first (`norm -m- -f`); build the union with `view -G` + `concat -a -D` (**not** `merge`); strip incomparable per-trio `INFO`/`FILTER`; annotate once, and annotate with **more than consequence calling** — today VEP's cache also supplies the gnomAD v4.1 AFs and ClinVar `CLIN_SIG`, and the CADD and SpliceAI plugins supply the functional scores (**TARGET:** faf95 + LOFTEE + a dated ClinVar VCF as external transfers; constraint and gene-lists are Step-6 inputs, not annotations) |
-| 2 | Select variants meeting minimal biological plausibility (AF, MODERATE+ impact, CADD, pathogenic, a-priori genes; exclude non-PASS) → plausible merged VCF | **Keep** | Make it **inheritance-agnostic** and use the **permissive-union** rarity gate (looser of dominant/recessive) so nothing needed by *some* mode is dropped early; exclude only clearly-benign (BA1 ≥ 0.05 on the rarity field, never rescued); **always keep ClinVar P/LP** regardless of impact (today **unstarred** — the cache has no review status, so the ≥2★ gate is retired); treat a-priori gene lists as a *prior/tier*, never a hard include/exclude ("never-drop rule" — **TARGET**: no list overlay is wired yet) |
+| 1 | Site-only VCF per input → merge + sort → cohort site-only VCF; VEP-annotate the merge | **Keep — efficient & correct in spirit** | Normalize each trio first (`norm -m- -f`); build the union with `view -G` + `concat -a -D` (**not** `merge`); strip incomparable per-trio `INFO`/`FILTER`; annotate once, and annotate with **more than consequence calling** — VEP's cache supplies the gnomAD v4.1 point AFs and ClinVar `CLIN_SIG`, the CADD/SpliceAI/REVEL/AlphaMissense plugins supply the functional scores, and two `bcftools annotate` transfers supply faf95/nhomalt (gnomAD joint slim) and review status (a dated ClinVar VCF). **TARGET:** LOFTEE. Constraint and gene lists are Step-6/9 inputs, not annotations |
+| 2 | Select variants meeting minimal biological plausibility (AF, MODERATE+ impact, CADD, pathogenic, a-priori genes; exclude non-PASS) → plausible merged VCF | **Keep** | Make it **inheritance-agnostic** and use the **permissive-union** rarity gate (looser of dominant/recessive) so nothing needed by *some* mode is dropped early; exclude only clearly-benign (BA1 ≥ 0.05 on the rarity field, never rescued); **always keep ClinVar P/LP** regardless of impact (star-blind by design — stars are available and rank in Step 9; a ≥2★ keep/drop gate would violate never-drop); treat a-priori gene lists as a *prior/tier*, never a hard include/exclude (the "never-drop rule" — Step 9's optional Class-B overlay is the one list mechanism, off by default) |
 | 3 | Extract these variants from individual files → subset merged VCF of variants of interest | **Keep the extraction; change the "merge"** | Extract plausible-site genotypes from each trio's **refined** VCF (recovers real `PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`); **transfer annotations** onto each trio with `bcftools annotate -a cohort.sites.annotated`; keep **per-trio** subset VCFs as the unit — do **not** compute frequency from a genotype-merged cohort VCF |
 | 4 | Screen each pedigree with pedigree-aware inheritance + basic genotype QC → candidate variants | **Keep — this is the core** | Use refined `PP`-derived GQ; per-mode rules focused on **inherited** variation: **dominant** (rare functional inherited het), AR-hom, comp-het-in-trans, X-linked, with GQ ≥ 20 / DP ≥ 10 / het AB 0.25–0.75. De novo is retained as a **secondary cross-reference** (`hiConfDeNovo`, child-membership checked); review handled by separate machinery |
 | 5 | Screen across pedigrees for genes with multiple candidates, accounting for constraint | **Keep the goal; make it recurrence-based** | Tally **distinct individuals** per gene by model (**dominant het** / biallelic / X-linked); flag genes with ≥ `min_carriers` carriers as **recurrent**; **rank/weight by constraint** (a recurrent het in a haploinsufficient gene is most compelling; a gene tolerant of damage is uninteresting). De novo Poisson enrichment (Samocha) is an **optional secondary** signal |
@@ -101,18 +107,18 @@ flowchart TD
 
     N --> S1
     subgraph S1[Step 1 — Cohort site list]
-      C1[view -G  → site-only per trio PASS] --> C2[concat -a -D + sort + norm -d<br/>strip per-trio INFO/FILTER] --> C3[(cohort.sites.vcf.gz)]
+      C1[view -G  → site-only per trio FILTER PASS/.] --> C2[concat -a -D + sort + norm -d<br/>strip per-trio INFO/FILTER] --> C3[(cohort.sites.vcf.gz)]
     end
 
     C3 --> S2
-    subgraph S2[Step 2 — Annotate ONCE  VEP-only contract]
-      AN[VEP 115 cache + CADD & SpliceAI plugins<br/>consequence/IMPACT/SYMBOL/MANE<br/>gnomAD v4.1 per-pop AFs + ClinVar CLIN_SIG<br/>--flag_pick] --> AV[bcftools +split-vep<br/>CSQ -> INFO vep_*] --> A2[(cohort.sites.annotated.vcf.gz)]
+    subgraph S2[Step 2 — Annotate ONCE  VEP-centric contract]
+      AN[VEP 115 cache + CADD, SpliceAI, REVEL, AlphaMissense plugins<br/>consequence/IMPACT/SYMBOL/MANE<br/>gnomAD v4.1 per-pop AFs + ClinVar CLIN_SIG<br/>--flag_pick] --> AV[bcftools +split-vep<br/>CSQ -> INFO vep_*] --> TR[bcftools annotate x2<br/>ClinVar VCF -> clinvar_*<br/>gnomAD joint slim -> gnomad_faf95 / nhomalt] --> A2[(cohort.sites.annotated.vcf.gz)]
       IN[/"optional: pre-made VEP VCF<br/>--vep-vcf — VEP call skipped, build verified"/] -.-> AV
     end
 
     A2 --> S3
     subgraph S3[Step 3 — Select plausible sites]
-      P1[rarity permissive-union grpmax proxy<br/>functional ladder: IMPACT then CADD<br/>keep ClinVar P/LP; drop BA1-common] --> P2[(plausible.sites.vcf.gz  = target list)]
+      P1[rarity permissive-union on rarity_af = faf95<br/>ladder: IMPACT, then SpliceAI, then CADD<br/>keep ClinVar P/LP; drop BA1-common] --> P2[(plausible.sites.vcf.gz  = target list)]
     end
 
     P2 --> S4
@@ -144,17 +150,18 @@ flowchart TD
 | Step | Produces | Authoritative for |
 |------|----------|-------------------|
 | resolve | `trios.resolved.tsv` (trio_id, vcf, ped, samples) + `trio_resolution.tsv` + PEDs | which VCF each trio maps to, generated from a `kid/dad/mom` file by exact sample-ID match |
-| 0 | QC report per trio; **advisory** pass/flag list (surfaced in the xlsx QC sheet + IGV `sample_qc.tsv`) | flags suspect trios for human review — flagged trios are **NOT** auto-excluded; they still contribute calls + recurrence pending review |
+| 0 | QC report per trio (MIE on the first `qc.max_sites` QC-passing autosomal biallelic sites, chrX sex, contamination); **advisory** pass/flag list (surfaced in the xlsx QC sheet + IGV `sample_qc.tsv`) | flags suspect trios for human review — flagged trios are **NOT** auto-excluded; they still contribute calls + recurrence pending review |
 | 1 | `cohort.sites.vcf.gz` (site-only, normalized, de-duplicated union) | the set of loci seen anywhere in the cohort — **not** a frequency |
-| 2 | `cohort.sites.annotated.vcf.gz` | every annotation the pipeline reads, computed once: VEP CSQ lifted to `INFO/vep_*` — consequence/IMPACT/SYMBOL/MANE, gnomAD v4.1 per-population AFs, ClinVar `CLIN_SIG`, CADD, SpliceAI delta scores (`vep_SpliceAI_pred_DS_*`). Constraint is **not** here; it joins by gene symbol at Step 6 |
+| 2 | `cohort.sites.annotated.vcf.gz` | every annotation the pipeline reads, computed once: VEP CSQ lifted to `INFO/vep_*` — consequence/IMPACT/SYMBOL/MANE, gnomAD v4.1 per-population point AFs, ClinVar `CLIN_SIG`, CADD, SpliceAI delta scores (`vep_SpliceAI_pred_DS_*`), `vep_REVEL`, `vep_am_pathogenicity`/`vep_am_class` — plus the two transfers: `clinvar_CLNREVSTAT`/`clinvar_CLNSIG` (ClinVar VCF) and `gnomad_faf95`/`gnomad_faf95_group`/`gnomad_nhomalt`/`gnomad_AF_joint`/`gnomad_AF_grpmax` (gnomAD joint slim). Constraint is **not** here; it joins by gene symbol at Step 6 |
 | 2b | `cohort.sites.annotated.vcf.gz` rewritten in place + `.spliceai_backfill.done` | *(OFF by default; opt in)* live-SpliceAI backfill of variants with no precomputed score (mostly novel indels), folded into the same `vep_SpliceAI_pred_DS_*` fields before Step 3 |
 | 3 | `plausible.sites.vcf.gz` | the target list of loci worth genotyping per trio |
 | 4 | per-trio `*.candidates.annotated.vcf.gz` | real per-trio genotypes (`PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`) at plausible sites, annotation-carrying |
-| 5 | per-trio candidate call tables (with inheritance mode) | diagnostic per-family findings |
-| 6 | recurrence-ranked gene table (distinct-individual carriers per model + constraint) | cross-pedigree discovery signal |
+| 5 | `candidates.calls.tsv` (one row per call: inheritance mode, `rarity_af`/`rarity_oracle`/`rarity_basis`, `gt_bases`-style genotypes) | diagnostic per-family findings |
+| 6 | `genes.ranked.tsv` — distinct-individual carriers per model, the case-only recurrence rank, the mutational-target carrier expectation (`exp_carriers_mu`/`p_carrier_excess`, when `--mutrate` carries `mu_*`) + constraint | cross-pedigree discovery signal |
 | 7 | `hprv_summary.xlsx` (documented supplemental table) | consolidated human-readable summary |
 | 8 | `igv/` (variants.tsv + mini-CRAMs + per-trio VCF tracks + trios.tsv + sample_qc.tsv + curation.json + config.json) | jlanej/igv.js trio variant-review ingestion |
 | 8b | `igv/nhf/<trio>/<sample>.variant_nhf.tsv` → `child_/mother_/father_nhf` (+`_reads`) + `nhf_flag` columns in `variants.tsv` | *(optional, default on)* non-human fraction of each candidate's ALT reads — a contamination / mis-mapping down-rank signal for review |
+| 9 | `variants.prioritized.tsv`, `genes.prioritized.tsv`, `igv/variants.prioritized.tsv` | the re-ranked review list — a rank, never a drop (row-count conservation asserted) |
 
 *(Planned, not yet delivered: an ACMG-SF / pediatric-cancer overlay + phenotype-ranked tiered report — see [CLAUDE.md](../CLAUDE.md) Open TODOs.)*
 
@@ -168,7 +175,7 @@ regenerates. Step 8b (NHF) is idempotent the same way via a per-`(trio, member)`
 **Step 8b — non-human-fraction (NHF), optional review aid.** When `resources.kraken2_db` is set,
 `nonhuman-screen` classifies each screened member's ALT-supporting reads (in the mini-CRAMs Step 8
 already sliced — no new source-CRAM I/O) with kraken2 and records the fraction that are non-human.
-This is **outside the VEP-only annotation contract** — a review-layer down-rank signal, never a
+This is **outside the VEP-centric annotation contract** — a review-layer down-rank signal, never a
 selection filter, and it never changes which variants are reported. `members: carriers` screens the
 child (which defines the candidate) plus any parent that carries the ALT, so a curator can tell
 sample-specific contamination (one member dirty) from a locus that mis-maps in everyone. The read
@@ -216,7 +223,17 @@ synthesized genotype matrix.
   emits a fully-populated `MAX_AF`/`gnomAD*_AF` header over entirely empty values, every rarity gate
   reads `None` ⇒ "rarest", and the screen keeps everything. So the step asserts on **values**, not
   field presence: zero grpmax-eligible AF fields lifted, or 0 / N sites carrying any gnomAD
-  frequency, is a hard `die`.
+  frequency, is a hard `die`. The same discipline covers the rest of Step 2: SpliceAI and CADD have
+  value-level 0-lift guards (`die` when configured but no variant received a score); the ClinVar
+  and gnomAD transfers die on a 0-match join, and under the default `oracle: faf95` a missing or
+  failed gnomAD transfer is a hard stop — including on the ingest path (Step 3 also asserts
+  `gnomad_AF_joint` is declared in the header). Ingest mode dies on any multi-ALT record and on
+  union sites absent from the external VCF (Step 4 would otherwise drop them silently).
+- **Idempotency is keyed, not mtime-based.** Per-contig VEP shard `.done` files key the VEP inputs
+  (union cksum + cache dir/version + plugin file size/mtime), so a changed union or a new plugin
+  file re-runs the shard; the annotated-union `.done` adds `csq_select`; a union `.done` mismatch
+  invalidates the union; the Step 1/4 per-trio caches key the source VCF (size+mtime), the
+  FILTER/contig settings and the sample list; Step 0's `qc_report.tsv.done` keys the manifest.
 - **Auditing.** Every step appends `(step, scope, metric, value)` to `audit/counts.tsv`
   (`scope` = `global` or a trio_id). This yields a **global variant funnel** (union → annotated →
   plausible, with Step-3 keep/drop reasons) and a **per-trio funnel** (candidate genotypes →
@@ -227,24 +244,28 @@ synthesized genotype matrix.
 ## Cross-cutting principles
 
 - **External gnomAD v4.1 is the only population-frequency oracle**, and it is read through exactly
-  one chokepoint (`annotations.frequency()`). Internal cohort frequency is used *only* as an
-  artifact/blocklist signal (a variant rare in gnomAD but recurrent across many unrelated trios is a
-  likely sequencing/mapping artifact). **What that oracle is today:** the max cached AF over the
-  **grpmax-eligible** ancestry groups (AFR/AMR/EAS/NFE/SAS) — a **point estimate**. `faf95` is
-  **TARGET**: it is the lower bound of that frequency's 95% CI, needs AC/AN, and the VEP cache
-  carries none, so it is unrecoverable rather than approximated (the proxy therefore errs toward
-  *dropping* low-count alleles). Do **not** substitute VEP's `MAX_AF` (it maxes over the
-  bottlenecked founder groups grpmax deliberately excludes, plus tiny 1000G pops, and silently kills
-  real ultra-rare candidates) or the global `AF` (it dilutes ancestry-enriched variants and retains
-  them) — the two wrong substitutions err in **opposite** directions. See
+  one chokepoint (`annotations.frequency()`) as ONE quantity per run. Internal cohort frequency is
+  used *only* as an artifact/blocklist signal (a variant rare in gnomAD but recurrent across many
+  unrelated trios is a likely sequencing/mapping artifact). **What that oracle is:**
+  `resources.gnomad.oracle: faf95` (the default) reads gnomAD's published filtering allele
+  frequency — the lower bound of the 95% CI — transferred from the joint slim; an allele gnomAD has
+  but published no faf95 for reads 0 (`rarity_basis=zero_ci`), an allele with no record reads
+  absent, both rarest, and the proxy is never consulted. `grpmax_proxy` is the deliberate opt-down
+  to the cache's per-population **point estimate** (max over AFR/AMR/EAS/NFE/SAS; no AC/AN, so no
+  CI correction — it errs toward *dropping* low-count alleles). The arms never mix within a run.
+  Do **not** substitute VEP's `MAX_AF` (it maxes over the bottlenecked founder groups grpmax
+  deliberately excludes, plus tiny 1000G pops, and silently kills real ultra-rare candidates) or
+  the global `AF` (it dilutes ancestry-enriched variants and retains them) — the two wrong
+  substitutions err in **opposite** directions, under either arm. See
   [allele_frequency.md](allele_frequency.md), [limitations.md](limitations.md) and
   [cohort_construction.md](cohort_construction.md).
 - **The functional ladder is three rungs, on purpose.** VEP `IMPACT` ∈ {HIGH, MODERATE} keeps;
   otherwise SpliceAI max Δ ≥ 0.2 (`spliceai_ds_min`) keeps; otherwise `CADD_PHRED ≥ 25.3` keeps;
-  otherwise drop. There is no missense-predictor rung, and
-  removing dbNSFP cost the screen **zero** discrimination: REVEL/AlphaMissense/MPC are
-  missense-only, every missense is MODERATE, and MODERATE is kept a rung earlier — those branches
-  were unreachable even when the code contained them (CI asserts their keep-reasons never fire).
+  otherwise drop. There is no missense-predictor rung, and there cannot usefully be one:
+  REVEL/AlphaMissense/MPC are missense-only, every missense is MODERATE, and MODERATE is kept a
+  rung earlier — those branches were unreachable even when the code contained them (CI asserts
+  their keep-reasons never fire). REVEL and AlphaMissense are annotated (VEP plugins, required by
+  default) for Step 9's missense tier, not for the screen.
   The honest corollary is that 25.3 — Pejaver-2022's **missense-calibrated** PP3-supporting cutoff —
   is applied *exclusively* to the non-coding variants it was never calibrated for. Treat it as a
   discovery rank (≈ top 0.3% genome-wide), **not** ACMG PP3 evidence. See
@@ -254,26 +275,35 @@ synthesized genotype matrix.
   candidates, cross-check the pre-refinement `PL`/`GT`. See
   [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md).
 - **Gene lists and constraint are weights/tiers, never hard filters.** The never-drop rule keeps
-  novel-gene discovery alive. Constraint enters **only** at Step 6, as a *tiebreaker in the ranking*
-  (`burden.weight_by_constraint`, after recurrence kind and the recurrence p-value) — it never
-  drops a gene, and it is not a Step-2 annotation. Two things a reader should not assume:
-  **per-model** down-weighting (constraint applied to dominant single-hit nominees but *not* to
-  recessive candidates) is the **TARGET** described in [gene_constraint.md](gene_constraint.md) —
-  `filters.constraint_weighting.downweight_recessive_by_lof_constraint` is reserved and the current
-  key sorts every model alike; and the **gene-list overlay is not wired at all** yet
-  (`resources.gene_lists.*` is reserved). See [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md).
-- **Calibrate, don't just filter.** Step 6 does report a calibrated recurrence null (per-model
-  p-values + BH-FDR q + an exome-wide flag), so a recurrent gene is ranked by evidence rather than
-  by raw carrier count. The **synonymous negative control is TARGET**, not built in: the principle —
-  if synonymous burden/enrichment λ ≠ 1, the qualifying-variant filters or ancestry/coverage match
-  are wrong — is right, but `--syn-denovo-count` is reserved and the de novo expectation is not yet
-  scaled to an observed synonymous rate (Step 6 says so in its own audit output). See
-  [gene_burden.md](gene_burden.md).
-- **Reproducibility is a first-class requirement.** Every resource is pinned and recorded. Under the
-  VEP-only contract there are only two: the **VEP cache release** (115, which transitively pins
-  gnomAD v4.1 and ClinVar 2025-02 — the cache's ClinVar is as stale as the cache, where the ClinVar
-  VCF ships monthly) and the **CADD version**. The longer list (separate ClinVar date, dbNSFP build,
-  PanelApp panel version, ACMG SF version) applies to the **TARGET** stack. See
+  novel-gene discovery alive. Constraint enters at Step 6 as a *tiebreaker in the ranking*
+  (`burden.weight_by_constraint`, after recurrence kind and the recurrence/excess p-value) and at
+  Step 9 as a mechanism-gated `+1` term — it never drops a gene, and it is not a Step-2 annotation.
+  Two things a reader should not assume: Step 6's constraint key sorts every model alike
+  (`filters.constraint_weighting.downweight_recessive_by_lof_constraint` is reserved), whereas
+  Step 9 DOES zero its constraint term for `compound_het`/`hom_recessive`/`x_linked_recessive`
+  (`zero_constraint_for_recessive_modes` — pLI/LOEUF measure selection against heterozygotes);
+  and the **gene-list overlay** is Step 9's Class-B prior only
+  (`prioritization.composite.gene_list_prior`, a file path, off by default) —
+  `resources.gene_lists.*` and the Tier 1/2/3 scheme of
+  [gene_lists_and_phenotype.md](gene_lists_and_phenotype.md) remain reserved.
+- **Calibrate, don't just filter — but call a rank a rank.** Step 6 reports a recurrence null
+  (per-model p-values + BH-FDR q + an exome-wide flag) so a recurrent gene is ordered by evidence
+  rather than raw carrier count — but it is a **case-only** null built from the variants observed
+  in the cohort, so it saturates for private variants (2 carriers at N = 200 give p ≈ 3e-7) and is
+  a RANK, never a calibrated significance claim. The mutational-target carrier expectation
+  (`exp_carriers_mu`, `p_carrier_excess`; `burden.rank_by_mutational_target`) is the second
+  yardstick, and Step 9's excess statistic the third. The **synonymous negative control is
+  TARGET**, not built in: the principle — if synonymous burden/enrichment λ ≠ 1, the
+  qualifying-variant filters or ancestry/coverage match are wrong — is right, but
+  `--syn-denovo-count` is reserved and the de novo expectation is not yet scaled to an observed
+  synonymous rate (Step 6 says so in its own audit output). See [gene_burden.md](gene_burden.md).
+- **Reproducibility is a first-class requirement.** Every resource is pinned and recorded. Under
+  the VEP-centric contract that is: the **VEP cache release** (115, which transitively pins the
+  cache's gnomAD v4.1 point AFs and ClinVar 2025-02 `CLIN_SIG`), the **CADD**, **SpliceAI**,
+  **REVEL** and **AlphaMissense** file versions, the **gnomAD v4.1 joint slim** and the **dated
+  ClinVar VCF** (both pinned in `resources/manifest.env`, independently of the cache), plus the
+  Step-6/9 constraint and mutational-target tables. The longer list (PanelApp panel version, ACMG
+  SF version, HPO/Exomiser data) applies to the **TARGET** overlay stack. See
   [tooling_and_reproducibility.md](tooling_and_reproducibility.md).
 
 ---
@@ -281,11 +311,10 @@ synthesized genotype matrix.
 ## Known scope limitations (stated honestly, not hidden)
 
 **The full ledger is [limitations.md](limitations.md)** — what the first pass cannot see, why, and
-what each costs to fix (in short: faf95 + nhomalt need the optional gnomAD joint slim, and
-without it rarity is a point estimate; no LOFTEE, no
-ClinVar stars — SpliceAI is now wired as the splice keep-path). Read it
-before interpreting a negative result. Every one of those gaps is **additive** to fix: the contract
-is a single seam — one `bcftools annotate` in `02_annotate_sites.sh` plus one field in
+what each costs to fix (in short: no LOFTEE and no exome/genome discordance flag; faf95, nhomalt,
+ClinVar stars, REVEL/AlphaMissense and SpliceAI are all wired). Read it before interpreting a
+negative result. Every one of those gaps is **additive** to fix: the contract is a single seam — a
+VEP plugin or one `bcftools annotate` in `02_annotate_sites.sh` plus one field in
 `annotations.F`. What follows is the scope that is deliberately *out* of this pipeline regardless of
 which annotations are wired in.
 

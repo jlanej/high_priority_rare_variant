@@ -9,17 +9,20 @@ What this pipeline **cannot currently see**, why, and what each would cost to fi
 
 ## Why the first pass looks like this
 
-The pipeline runs on a **VEP-centric contract**: VEP 115 GRCh38 — its cache plus its plugins (CADD,
-and SpliceAI, required by default). No gnomAD, ClinVar, dbNSFP or LOFTEE file is bcftools-transferred in.
+The pipeline runs on a **VEP-centric contract**: VEP 115 GRCh38 — its cache plus its plugins (CADD;
+SpliceAI and REVEL/AlphaMissense, required by default) — plus exactly two `bcftools annotate`
+transfers, the ClinVar sites VCF and the gnomAD v4.1 joint slim (required by the default `faf95`
+oracle). No dbNSFP or LOFTEE file is transferred in.
 
 That was a deliberate trade. The alternative was ~1.4 TB of resource acquisition (gnomAD joint
-sites alone are 877 GB), each piece with its own version pinning, license gate, index, contig-naming
+sites alone are 877 GB raw — which is why the slim streams them down to ~10 GB), each piece with its own version pinning, license gate, index, contig-naming
 hazard and failure mode — before a single trio could be screened. The VEP cache already carries
 gnomAD v4.1 frequencies and ClinVar, and the group already runs VEP. So the first pass buys a
 **simple, sound, reproducible spine** — one annotation source, one frequency chokepoint, one
 functional ladder — and pays for it in the coverage documented below.
 
-Most items here are **additive to fix** — and §1 (SpliceAI) already has been. The contract is a
+Most items here are **additive to fix** — and §1 (SpliceAI), §2 (faf95), §3 (nhomalt), §6 (ClinVar
+stars) and §7 (REVEL/AlphaMissense) already have been. The contract is a
 narrow seam: each is re-enabled by **either a VEP plugin (as SpliceAI and CADD are) or one `bcftools
 annotate` transfer** in `02_annotate_sites.sh`, plus its INFO field in `annotations.F`. Nothing in
 the architecture forecloses any of it.
@@ -68,15 +71,17 @@ tiering. It is **keep-only** (a missing/None score never drops a variant, it onl
 - CADD v1.6+ also ingests SpliceAI as an input feature, so it remains a weak backstop for splice
   signal below the SpliceAI keep threshold.
 
-### 2. faf95 — RESOLVED by an opt-in resource; the proxy remains the fallback
+### 2. faf95 — IMPLEMENTED and the DEFAULT oracle; the proxy is a deliberate opt-down
 
 `frequency()` uses gnomAD's published **faf95** (the lower bound of the 95% Poisson CI) by
 DEFAULT, transferred in Step 2 from the gnomAD v4.1 **joint** slim (`resources.gnomad.sites_slim`,
 `prepare_resources.sh --only gnomad_sites fetch`, ~10 GB). That resource is therefore required for
 a default run and the pipeline HALTS at preflight without it. `resources.gnomad.oracle:
 grpmax_proxy` is the deliberate opt-down to the point estimate — ONE oracle for the whole run
-either way, recorded in the audit; the arms never cross. The VEP cache itself
-still carries no AC/AN, so without the slim the proxy is all there is; that path is unchanged.
+either way, recorded once in the audit as `rarity_oracle`; the arms never cross, and
+`rarity_basis` (`measured` / `zero_ci` / `absent`) is the per-variant provenance within the
+chosen arm. The VEP cache itself carries no AC/AN, so on the opt-down arm the proxy is all there
+is; that path is unchanged from the first pass.
 
 Three properties worth stating, each verified against the real v4.1 data rather than assumed:
 
@@ -84,15 +89,17 @@ Three properties worth stating, each verified against the real v4.1 data rather 
   bottlenecked ami/asj/fin. So faf95 does not reintroduce the `MAX_AF` trap of §2a. `mid` is the
   one deviation, so `faf95_group` reports the producing group on every row.
 - **Absent faf95 splits in two.** gnomAD emits `fafmax` as *missing*, never as 0, wherever no
-  group's CI lower bound clears zero (80% of a chr22 sample). If gnomAD **has** the allele, faf95
-  is 0 ⇒ rarest, and the proxy must not be consulted — 96.5% of that class are AC ≤ 2, and
-  filtering a singleton on its inflated point estimate is the error faf95 exists to prevent. Only
-  a variant gnomAD has **never seen** falls back to the proxy. `rarity_oracle` distinguishes them.
+  group's CI lower bound clears zero (roughly 80% of a chr22 sample). If gnomAD **has** the allele,
+  faf95 is 0 ⇒ rarest (`rarity_basis=zero_ci`), and the proxy must not be consulted — 96.5% of
+  that class are AC ≤ 2, and filtering a singleton on its inflated point estimate is the error
+  faf95 exists to prevent. A variant gnomAD has **never seen** resolves to absent ⇒ rarest
+  (`rarity_basis=absent`); the proxy is not consulted there either — under `faf95` it is never
+  consulted at all. `gnomad_AF_joint` is the witness and `rarity_basis` distinguishes the halves.
 - **Supplying the slim RETAINS MORE.** faf95 ≤ the point estimate, so the same cutoffs stop
   discarding low-count alleles the interval never justified discarding. A smaller candidate list
   after enabling it means a broken join, not a better filter — check Step 2's match count.
 
-**Consequence of the fallback path** (no slim configured): since a point estimate is always ≥ its
+**Consequence of the opt-down path** (`oracle: grpmax_proxy`): since a point estimate is always ≥ its
 own CI lower bound, every rarity gate fires slightly *more* often than a faf95 gate would. That
 path **errs toward dropping** on low-count alleles — a false-negative direction. The error shrinks
 as the group's
@@ -261,7 +268,7 @@ Two findings worth recording so nobody re-derives them:
   network/FUSE mount, and `outputs.igv.extract_jobs` drives `samtools -@` for real intra-slice
   parallelism.
 
-## Structural gaps (independent of the VEP-only contract)
+## Structural gaps (independent of the VEP-centric contract)
 
 These predate the contract and are tracked in [ROADMAP.md](ROADMAP.md):
 
@@ -310,7 +317,8 @@ limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_ge
 
 ## Reading a negative result
 
-Given the above, "no candidate found" for a trio means: no **coding** variant (or CADD-high
-non-coding variant) passing a **point-estimate** rarity gate, in a **SNV/indel** callset, without
-phenotype weighting, splice prediction, CNV calling, or star-gated clinical evidence. That is a
-useful screen. It is not an exclusion.
+Given the above, "no candidate found" for a trio means: no **coding** variant, SpliceAI-high or
+CADD-high non-coding variant passing the run's rarity gate (gnomAD **faf95** by default; a
+point-estimate proxy only if opted down), in a **SNV/indel** callset, without phenotype weighting
+or CNV calling, and with ClinVar review status used only to rank. That is a useful screen. It is
+not an exclusion.

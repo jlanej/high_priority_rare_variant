@@ -22,13 +22,16 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 
 > 📋 **VEP-centric contract — know what the screen can and cannot see *before* you run it.**
 > Almost every annotation comes from one source: a **VEP 115 GRCh38 cache + the CADD, SpliceAI,
-> REVEL and AlphaMissense plugins**. Exactly **two** things are `bcftools annotate`-transferred,
-> because the cache cannot supply them at any price: the **ClinVar sites VCF** (review status ⇒
-> gold stars) and the optional **gnomAD v4.1 joint slim** (real **`faf95`** + **`nhomalt`**).
-> Without that slim, rarity falls back to a grpmax point-estimate proxy. What remains missing:
-> **no LOFTEE** (pLoF confidence), no exome/genome discordance flag. Every gap is *additive* to
-> fix — one `bcftools annotate` transfer each. The full ledger, with the cost to close each, is
-> **[docs/limitations.md](docs/limitations.md)**. Read it before you interpret a negative result.
+> REVEL and AlphaMissense plugins** (SpliceAI and REVEL/AlphaMissense are required by default).
+> Exactly **two** things are `bcftools annotate`-transferred, because the cache cannot supply them
+> at any price: the **ClinVar sites VCF** (review status ⇒ gold stars, which rank in Step 9 and
+> never gate) and the **gnomAD v4.1 joint slim** (real **`faf95`** + **`nhomalt`**). The slim is
+> **required by the default configuration**: `resources.gnomad.oracle: faf95` makes faf95 the ONE
+> rarity oracle for the whole run and halts at preflight without it; `grpmax_proxy` is the
+> deliberate opt-down to the VEP-cache point estimate, and the two arms never mix within a run.
+> What remains missing: **no LOFTEE** (pLoF confidence), no exome/genome discordance flag. The full
+> ledger, with the cost to close each, is **[docs/limitations.md](docs/limitations.md)**. Read it
+> before you interpret a negative result.
 
 ## What it does
 
@@ -38,13 +41,13 @@ for the vetted design and the artifact each step produces):
 | Step | What | Output |
 |------|------|--------|
 | resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
-| 0 | Per-trio QC gate (Mendelian error + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
+| 0 | Per-trio QC gate (Mendelian error on the first `qc.max_sites` QC-passing autosomal biallelic sites + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
-| 2 | Annotate the union **once** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache), then two `bcftools annotate` transfers: ClinVar review status, and the optional gnomAD joint slim for `faf95`/`nhomalt` — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
+| 2 | Annotate the union **once** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache), then two `bcftools annotate` transfers: ClinVar review status, and the gnomAD joint slim for `faf95`/`nhomalt` (required under the default `faf95` oracle) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
 | 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
-| 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint | `genes.ranked.tsv` |
+| 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint; a case-only recurrence rank plus, with a mutational-target table, the expected-carrier excess (`p_carrier_excess`) | `genes.ranked.tsv` |
 | 7 | Consolidated **.xlsx** supplemental-table summary (documented: gene consolidation, calls, resolution, QC, audit) | `hprv_summary.xlsx` |
 | 8 | **igv.js** trio variant-review export: `variants.tsv` + mini-CRAM slices (child/mother/father) + per-trio VCF tracks | `igv/` |
 | 9 | **Prioritization**: gene excess over its mutational target (NB2, trimmed fit, mid-p calibration) + a six-signal artifact panel + a graded gene down-weight, then per-variant tiering and an additive `priority_points` composite — **a re-rank, never a drop** | `variants.prioritized.tsv`, `genes.prioritized.tsv`, `igv/variants.prioritized.tsv` (the igv.js review table: Step 8's columns + every triage column, so filtering/sorting happens in the review tool) |
@@ -63,7 +66,7 @@ configurable default from the **[Canonical defaults](docs/README.md#canonical-de
 the evidence behind each choice is in **[docs/](docs/README.md)**.
 
 **1. Cohort site list (no internal frequencies).** Each trio VCF is subset to its 3 members,
-kept to `PASS` sites, normalized (`bcftools norm -m- -f`, split multiallelics + left-align), and
+kept to FILTER `PASS`/`.` sites, normalized (`bcftools norm -m- -f`, split multiallelics + left-align), and
 reduced to variant *loci only* (`view -G`). The per-trio site files are unioned
 (`concat -a -D` + sort + dedup) into one cohort site list. This is a *union of loci*, never a
 genotype `merge`: because the trios are not jointly genotyped, an absent record ≠ hom-ref, so any
@@ -71,29 +74,36 @@ internal cohort AC/AN would be fiction. The trios' stale embedded annotations (o
 are stripped here and re-computed fresh.
 
 **2. Annotate once.** The cohort site list is annotated a single time (VEP is *never* run per
-trio), from a **single source**: VEP 115 (consequence/IMPACT/SYMBOL/HGVS/MANE) + the **CADD** and
-**SpliceAI** plugins, with gnomAD v4.1 per-population AFs (`--af_gnomade`/`--af_gnomadg`) and ClinVar
-`CLIN_SIG` (`--check_existing`) coming out of the cache itself. The CSQ fields are lifted to
-INFO with a `vep_` prefix (`bcftools +split-vep`); **nothing is transferred in from an external
-sites VCF**. Already have a VEP 115 VCF? Point `resources.vep.annotated_vcf` at it and Step 2
-skips the VEP call entirely.
+trio): VEP 115 (consequence/IMPACT/SYMBOL/HGVS/MANE) + the **CADD**, **SpliceAI**, **REVEL** and
+**AlphaMissense** plugins, with gnomAD v4.1 per-population point AFs (`--af_gnomade`/`--af_gnomadg`)
+and ClinVar `CLIN_SIG` (`--check_existing`) coming out of the cache itself. The CSQ fields are
+lifted to INFO with a `vep_` prefix (`bcftools +split-vep`). Exactly **two** external transfers
+follow, each under its own INFO namespace: the ClinVar sites VCF (`clinvar_CLNREVSTAT` ⇒
+`clinvar_stars`) and the gnomAD v4.1 joint slim (`gnomad_faf95`, `gnomad_faf95_group`,
+`gnomad_nhomalt`, `gnomad_AF_joint`, `gnomad_AF_grpmax`). Already have a VEP 115 VCF? Point
+`resources.vep.annotated_vcf` at it and Step 2 skips the VEP call (the two transfers still run).
 
 **3. Frequency oracle.** Rarity is judged on **gnomAD v4.1**, never on internal counts, through a
-single chokepoint (`annotations.frequency()`) with a two-arm precedence:
+single chokepoint (`annotations.frequency()`) that reads **one oracle per run**, selected by
+`resources.gnomad.oracle`:
 
-1. **`faf95`** — gnomAD's published filtering allele frequency, the *lower bound of the 95% CI*
-   and the quantity ACMG/ClinGen specify for frequency filtering. Requires the optional gnomAD
-   joint slim (`resources.gnomad.sites_slim`, ~10 GB, `--only gnomad_sites`).
-2. **grpmax point-estimate proxy** — max AF over the **grpmax-eligible** ancestry groups
-   (AFR/AMR/EAS/NFE/SAS), read from the cache. Used per variant wherever faf95 is absent.
+- **`faf95` (the default)** — gnomAD's published filtering allele frequency
+  (`fafmax_faf95_max_joint`), the *lower bound of the 95% CI* and the quantity ACMG/ClinGen specify
+  for frequency filtering. Requires the gnomAD joint slim (`resources.gnomad.sites_slim`, ~10 GB,
+  `--only gnomad_sites`); the run halts at preflight without it. An allele gnomAD has but published
+  no faf95 for resolves to 0 (`rarity_basis=zero_ci`, rarest); an allele with no gnomAD record
+  resolves to absent (rarest). The proxy is never consulted.
+- **`grpmax_proxy`** — a deliberate opt-down: the max point-estimate AF over the **grpmax-eligible**
+  ancestry groups (AFR/AMR/EAS/NFE/SAS), read from the VEP cache. No CI correction is possible, so
+  it errs slightly toward *dropping* low-count alleles.
 
-`rarity_oracle` reports which one produced each row. Because faf95 ≤ the point estimate, supplying
-the slim **retains more** at the same cutoffs — it stops discarding low-count alleles whose
-confidence interval never justified the call; the proxy arm errs slightly toward *dropping*
-([the ledger](docs/limitations.md#2-faf95--resolved-by-an-opt-in-resource-the-proxy-remains-the-fallback)).
-VEP's `MAX_AF` and the global AFs are **reporting only, never filter fields** — they fail in
-opposite directions and neither is a safe substitute. Benign-common variants (`≥ 0.05`, ClinGen
-BA1) are dropped and never rescued.
+`rarity_oracle` is recorded once per run and `rarity_basis` (`measured`/`zero_ci`/`absent`) is the
+per-variant provenance; every row's `rarity_af` is the value the gates actually applied. Because
+faf95 ≤ the point estimate, the default **retains more** at the same cutoffs than the proxy would
+([the ledger](docs/limitations.md#2-faf95--implemented-and-the-default-oracle-the-proxy-is-a-deliberate-opt-down)).
+VEP's `MAX_AF` and the global AFs are **reporting only, never filter fields under either arm** —
+they fail in opposite directions and neither is a safe substitute. Benign-common variants
+(`≥ 0.05`, ClinGen BA1) are dropped and never rescued.
 
 **4. Plausible-variant selection.** An inheritance-agnostic filter keeps a site if it is rare
 (permissive-union cutoff) **and** functionally credible. The functional ladder is deliberately
@@ -107,13 +117,14 @@ covers the splice-disrupting class a rung above it) — every missense is
 IMPACT=MODERATE and is kept at rung 1, so 25.3 (Pejaver-2022's PP3-supporting cutoff,
 calibrated on *missense only*) is applied exclusively to non-coding variants it was never
 calibrated for. Treat it as a discovery rank (≈ top 0.3% genome-wide), **not** as ACMG PP3
-evidence. And the P/LP override is **unstarred** — the cache has no `CLNREVSTAT`, so the ≥2★ gate
-is unimplementable; this over-retains (more to curate) rather than over-drops.
+evidence. And the P/LP override is **star-blind by design** — review status is available
+(`clinvar_stars`, from the ClinVar transfer) and ranks in Step 9, but gating the screen on it would
+violate never-drop; this over-retains (more to curate) rather than over-drops.
 
 **5. Per-trio inheritance screen (inherited focus).** Real per-trio genotypes are recovered at
 the plausible sites and classified with refined-`GQ` genotype QC (GQ ≥ 20, DP ≥ 10, allele
 balance bands from `AD`):
-- **Dominant** — a rare (`dominant_max`, default AF < 1e-4), functional **heterozygous** variant
+- **Dominant** — a rare (`dominant_max`, default `rarity_af` < 1e-4 on the run's oracle), functional **heterozygous** variant
   transmitted from ≥ 1 parent (origin recorded). This is the signal Step 6 consolidates.
 - **Recessive** — homozygous, or **compound het in trans** (parent-of-origin: maternal + paternal).
 - **X-linked recessive** — male hemizygous with a carrier mother (sex-aware ploidy; kid sex
@@ -125,9 +136,14 @@ balance bands from `AD`):
 **distinct individuals** carrying a qualifying variant under each model (dominant het / biallelic
 / X-linked; de novo counted separately as secondary). A gene is flagged **recurrent** at
 ≥ `min_carriers` (default 2) distinct individuals, and genes are ranked recurrent-first, weighted
-by **gene constraint** (LOEUF / pLI / s\_het) — a recurrent het in a haploinsufficient gene is far
-more compelling than one in a constraint-tolerant gene. An optional de novo Poisson enrichment vs
-a Samocha mutation model is reported as a secondary column when a mutation-rate table is supplied.
+by **gene constraint** (LOEUF / pLI / s\_het / pHaplo) — a recurrent het in a haploinsufficient
+gene is far more compelling than one in a constraint-tolerant gene. The per-model recurrence
+p-values (`p_recurrence`, BH `q`, exome-wide flag) are a **case-only rank**, never a calibrated
+test — two carriers of private variants at N = 200 already give p ≈ 3e-7. When a mutational-target
+table is supplied, Step 6 also reports each gene's expected carrier count from its Samocha
+mutation rate (`exp_carriers_mu`, `carrier_excess_ratio`, `p_carrier_excess`) and, with
+`burden.rank_by_mutational_target: true` (the default), orders recurrent genes by that excess so
+long genes stop leading by size; an optional de novo Poisson enrichment is a secondary column.
 
 **7. Outputs for review.** A single documented **`.xlsx`** workbook consolidates the run
 (gene consolidation, candidate calls, trio resolution, QC, audit) as a supplemental table. An
@@ -144,10 +160,11 @@ orders it, in two layers ([docs/prioritization.md](docs/prioritization.md)):
   per-gene Samocha targets, with a **negative-binomial** null whose `(C, α)` are re-fit per cohort
   on an iteratively **trimmed** bulk, so the artifact tail cannot calibrate its own null. The NB is
   not an assumption: dispersion measured **φ = 18.7** raw and **1.29** trimmed, and in a two-fold
-  cross-fit the Poisson tail was **2.51× anti-conservative** at α = 1e-3 while the NB was
+  cross-fit the Poisson tail was **2.41× anti-conservative** at α = 1e-3 (with its own arm
+  trimmed; 1.82× untrimmed) while the NB was
   conservative — the correct direction of error under the never-drop rule. A **mid-p calibration
-  diagnostic** for both nulls lands in the audit on every run (this is the `SCIENCE_AUDIT.md` **A-3**
-  calibration gap). `C` is fit over the **full** gene universe including zero-count genes, because
+  diagnostic** for both nulls lands in the audit on every run (the pre-implementation science
+  audit's **A-3** calibration gap). `C` is fit over the **full** gene universe including zero-count genes, because
   the candidate list is a zero-truncated sample.
 - **Six orthogonal artifact signals** → an integer corroboration count: cohort saturation (**195×**
   enriched), segdup overlap (10.1×), artifact-prone gene family (6.5×), synonymous o/e departure
@@ -156,8 +173,9 @@ orders it, in two layers ([docs/prioritization.md](docs/prioritization.md)):
   before any penalty.
 - **A four-tier graded down-weight**, with an **auditable established-gene ceiling** (a
   control-union gene never enters T2/T3, and is flagged `established_gene_high_excess` instead) and
-  a CDS-fallback ceiling. Measured: **228 genes / 2,565 variants (10.4%) triaged at 100%
-  established-gene retention.** The maximum penalty (−3.0) **cannot by itself** demote a variant
+  a CDS-fallback ceiling. Measured at the shipped default (`min_n_for_ratio_rule: 3`): **92 genes /
+  2,369 variants (9.57%) triaged at 100% established-gene retention** (228 / 2,565 / 10.36% with
+  the count floor at 1). The maximum penalty (−3.0) **cannot by itself** demote a variant
   carrying strong molecular evidence in a constrained gene — it is a re-rank, not a veto.
 - **Variant layer** — a V0–V5 tier under ACMG/ClinGen **SVI mechanism gating** (gene constraint
   counts only when the variant has a credible molecular effect; a molecularly-benign prediction
@@ -169,8 +187,9 @@ orders it, in two layers ([docs/prioritization.md](docs/prioritization.md)):
   which calls a gene list promoted — the set to scrutinise for confirmation bias.
 
 Three honest limits carried in the output rather than papered over: **no pLoF reaches V5** (the
-NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CADD route is labelled
-`cadd_offlabel` and claims no graded strength (REVEL is ClinGen's calibrated choice), and
+NMD-escape test needs three more VEP fields in `variants.tsv`), the missense tier reads REVEL, then
+AlphaMissense, then CADD in a **fixed precedence** (`missense_evidence_source` names which spoke;
+the CADD fallback is labelled `cadd_offlabel` and claims no graded strength), and
 **`priority_points` is not an ACMG score** — never read against Tavtigian's P/LP/VUS bands.
 
 ## Design principles
@@ -178,8 +197,10 @@ NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CAD
 - **Focus on inherited variation; dominant recurrence is a first-class signal.** Heterozygous
   variants become interesting when they *stack up across individuals* in the same gene. De novo
   and mtDNA are handled by separate dedicated pipelines.
-- **gnomAD v4.1 is the only population-frequency oracle** (currently a grpmax point-estimate
-  proxy from the VEP cache unless the optional gnomAD joint slim supplies real `faf95` — see [limitations](docs/limitations.md#2-faf95--resolved-by-an-opt-in-resource-the-proxy-remains-the-fallback)).
+- **gnomAD v4.1 is the only population-frequency oracle**, read as ONE quantity per run: real
+  `faf95` from the gnomAD joint slim by default, or the VEP-cache grpmax point-estimate proxy as a
+  deliberate opt-down (`resources.gnomad.oracle`; see
+  [limitations](docs/limitations.md#2-faf95--implemented-and-the-default-oracle-the-proxy-is-a-deliberate-opt-down)).
   Because the trios are not jointly genotyped, internal cohort AC/AN is meaningless
   (absent ≠ hom-ref) and is used only as an artifact/blocklist signal.
 - **Gene lists and constraint are priors/tiers, never hard filters** ("never-drop rule") — so
@@ -195,16 +216,21 @@ NMD-escape test needs three more VEP fields in `variants.tsv`), the missense CAD
 apptainer pull hprv.sif docker://ghcr.io/<owner>/high_priority_rare_variant:latest
 
 # 2. Prepare the annotation resources ONCE (the image ships software; this fetches data).
-#    A bare `fetch` prepares everything the pipeline consumes: a reference FASTA, a VEP 115 GRCh38
-#    cache, CADD (license-gated, ~82 GB), the per-gene constraint tables (Steps 6/9), ClinVar
-#    (~0.18 GB -> gold stars), and REVEL + AlphaMissense (~1.3 GB -> Step 9's calibrated missense
-#    tier). Do NOT narrow it with --only: that silently skips the last three. gnomAD/LOFTEE/dbNSFP
-#    are genuinely unused and stay opt-in. SpliceAI is separate (step 2b below) because its useful
-#    files are login-gated; it is REQUIRED by default (resources.vep.spliceai_required: true HALTS
-#    the run at preflight when missing; set it false to run without SpliceAI).
-#    prepare_resources.sh + its pinned manifest ship IN the image (on PATH). See docs/resources.md.
+#    A bare `fetch` prepares the default set: a reference FASTA, a VEP 115 GRCh38 cache, CADD
+#    (license-gated, ~82 GB), the per-gene constraint + mutational-target tables (Steps 6/9),
+#    ClinVar (~0.18 GB -> gold stars), and REVEL + AlphaMissense (~1.3 GB -> Step 9's calibrated
+#    missense tier, REQUIRED by default). Do NOT narrow it with --only: that silently skips the
+#    last three. Two things a bare `fetch` does NOT pull, both needed by the default config:
+#      - the gnomAD v4.1 JOINT slim (~10 GB lands; preparing it streams ~877 GB) — REQUIRED by the
+#        default `resources.gnomad.oracle: faf95` (opt down with `grpmax_proxy`);
+#      - SpliceAI (step 2b below), whose useful files are login-gated — REQUIRED by default
+#        (`resources.vep.spliceai_required: true` HALTS the run at preflight when missing).
+#    LOFTEE/dbNSFP data are genuinely unused and stay opt-in. prepare_resources.sh + its pinned
+#    manifest ship IN the image (on PATH). See docs/resources.md.
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources --accept-license fetch
+apptainer exec --bind /data hprv.sif \
+    prepare_resources.sh --dir /data/hprv_resources --only gnomad_sites fetch
 
 # 2b. SpliceAI raw hg38 scores. `--only spliceai` cannot finish the job: the SNV mirror it can
 #     reach is MANE-only and the indel file is login-gated with no no-login mirror. Use the
@@ -212,14 +238,17 @@ apptainer exec --bind /data hprv.sif \
 #     load-bearing — emit-env exports $DIR/spliceai/<file>, which is where these land.
 scripts/download_spliceai.sh --dir /data/hprv_resources/spliceai --ref "$REF_FASTA"
 
+#    `verify` mirrors the default config: gnomad_sites, revel and alphamissense are reported as
+#    REQUIRED (non-zero exit when missing) unless the config opts down.
+apptainer exec --bind /data hprv.sif \
+    prepare_resources.sh --dir /data/hprv_resources verify
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
+#    (emit-env writes GNOMAD_SITES uncommented once the slim is present.)
 
 #    Already have a VEP 115 GRCh38 VCF of your sites? Set resources.vep.annotated_vcf and Step 2
-#    skips the VEP call entirely — no cache fetch needed.
-#    NB: prepare_resources.sh still knows the pre-contract resource set; `fetch` without --only
-#    downloads ~1.4 TB the pipeline never reads, and `verify` still checks (and fails on) the
-#    retired gnomAD/ClinVar/LOFTEE files. Use --only; skip `verify` for now.
+#    skips the VEP call entirely — no cache/CADD/plugin fetch needed. The two bcftools transfers
+#    still run, so the gnomAD slim is still required under the default oracle.
 
 # 3. Configure. Copy the example; point the ${ENV} placeholders at your prepared resources.
 cp config/config.example.yaml config/config.yaml     # config.yaml is git-ignored
@@ -282,9 +311,10 @@ and review (detected here only as a lightweight cross-reference), and **mtDNA he
 what each item costs to fix — is **[docs/limitations.md](docs/limitations.md)**. It is the anchor;
 the headlines are:
 
-- **From the VEP-only contract:** no `faf95` (rarity is a point-estimate proxy); no `nhomalt`;
-  no LOFTEE; no ClinVar star ratings. Each is one `bcftools annotate` transfer away.
-  (SpliceAI is no longer on this list — it ships as a VEP plugin and is required by default.)
+- **From the VEP-centric contract:** no LOFTEE (pLoF confidence / PVS1 grading) and no
+  exome/genome discordance flag. `faf95`, `nhomalt`, ClinVar stars, REVEL/AlphaMissense and
+  SpliceAI are all wired (the first three via the two `bcftools annotate` transfers, the rest as
+  VEP plugins).
 - **Structural, independent of the contract:** SNV/indel only — **CNV/SV are a real blind spot**
   (10–15% of pediatric-cancer/rare-disease diagnoses); pseudogene/seg-dup regions (*PMS2*,
   *CYP21A2*, *SMN1*) are low-confidence from short reads; the phenotype (Exomiser/HPO) prior is
@@ -294,10 +324,11 @@ the headlines are:
   are **unmeasured**, not measured-and-acceptable — GIAB/CMRG truth sets and a positive-control
   panel are the next step.
 
-**Reading a negative result:** "no candidate" means no *coding* (or CADD-high non-coding) variant
-passing a *point-estimate* rarity gate in a *SNV/indel* callset, without phenotype weighting,
-splice prediction, CNV calling, or star-gated clinical evidence. That is a useful screen; it is
-not an exclusion. See also
+**Reading a negative result:** "no candidate" means no *coding*, SpliceAI-high or CADD-high
+non-coding variant passing the run's rarity gate (gnomAD `faf95` by default; a point-estimate
+proxy only if opted down) in a *SNV/indel* callset, without phenotype weighting or CNV calling, and
+with ClinVar review status used only to rank, never to gate. That is a useful screen; it is not an
+exclusion. See also
 [pipeline_design.md](docs/pipeline_design.md#known-scope-limitations-stated-honestly-not-hidden).
 
 ## License

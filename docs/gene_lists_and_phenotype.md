@@ -5,12 +5,15 @@ How curated disease-gene knowledge bases and HPO-driven phenotype matching are u
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ⚠️ **STATUS: TARGET / not yet wired.** This entire layer — gene-list tiering, ACMG-SF/PanelApp
-> overlays, and Exomiser/LIRICAL/HPO phenotype ranking — is **planned, not implemented**. No code
-> in `pipeline/` or `src/` reads a gene list, assigns a Tier 1/2/3, or runs a phenotype ranker; the
-> corresponding config keys (`resources.gene_lists.*`, `overlays.pediatric_cancer.*`,
-> `overlays.phenotype.*`) are `[reserved]` and unread. Read this as the design for the intended
-> layer, not a description of current behavior. (Constraint weighting in Step 6 — LOEUF/pLI/s_het/
+> ⚠️ **STATUS: TARGET / not yet wired — with one exception.** The Tier 1/2/3 scheme, the
+> ACMG-SF/PanelApp overlays, and Exomiser/LIRICAL/HPO phenotype ranking are **planned, not
+> implemented**; the corresponding config keys (`resources.gene_lists.*`,
+> `overlays.pediatric_cancer.*`, `overlays.phenotype.*`) are `[reserved]` and unread, and nothing
+> runs a phenotype ranker. The exception is **Step 9's Class-B gene-list prior**
+> (`prioritization.composite.gene_list_prior`, `--gene-prior`): a symbol-keyed overlay file that
+> adds one mechanism-gated term to a *second* ranking (`rank_prior` beside `rank_agnostic`),
+> **off by default** — see [prioritization.md §13](prioritization.md). Read the rest of this page
+> as the design for the intended layer. (Constraint weighting in Steps 6 and 9 — LOEUF/pLI/s_het/
 > pHaplo — IS wired; see [gene_constraint.md](gene_constraint.md).)
 
 ## TL;DR
@@ -86,7 +89,7 @@ Proband phenotypes are standardized to **HPO** terms, then genes are ranked by p
 
 ## Tiered integration strategy
 
-Lists and phenotype scores map candidates to reporting tiers. Rarity/impact/QC gating (gnomAD v4.1 grpmax **proxy** AF — a point estimate, **not** `faf95`; VEP consequence + CADD; GATK genotype-refinement PP/GQ) is applied **independently and before** the priors below, so no tier assignment can exclude a variant that already passed.
+Lists and phenotype scores map candidates to reporting tiers. Rarity/impact/QC gating (gnomAD v4.1 `rarity_af` — real `faf95` by default; VEP consequence + SpliceAI + CADD; GATK genotype-refinement PP/GQ) is applied **independently and before** the priors below, so no tier assignment can exclude a variant that already passed.
 
 | Tier | Definition | Threshold treatment | Outcome |
 | --- | --- | --- | --- |
@@ -115,7 +118,7 @@ Tier-2 constraint up-weighting uses the pipeline's constraint defaults (see [gen
 | Cancer panels | PanelApp GE **Green** on panels **243** + **245** (+ PanelApp-AUS cancer/KidGen) | Pin panel `version`; see pediatric_cancer.md |
 | COSMIC | **v104** (May 2026), germline-flagged subset | Added-gene names not asserted |
 | Never-drop rule | Tier-3 (no-list) variants passing rarity + impact + trio-QC | Retained at lower prior |
-| Rarity gating (applied first) | grpmax **proxy** AF (point estimate; `faf95` is the TARGET) < **1e-4** dominant/de novo; < **1e-2** recessive (**1e-3** high-conf tier); ≥ **0.05** hard benign | See [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md); gene-specific ClinGen VCEP overrides generic cutoffs |
+| Rarity gating (applied first) | `rarity_af` (gnomAD `faf95` by default; the grpmax proxy only if opted down) < **1e-4** dominant/de novo; < **1e-2** recessive (**1e-3** high-conf tier); ≥ **0.05** hard benign | See [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md); gene-specific ClinGen VCEP overrides generic cutoffs |
 | Reproducibility | Pin OMIM date, COSMIC vNN, PanelApp versions, ClinGen dates, ACMG SF vN.N, Exomiser data `YYMM` | Per-run manifest; freeze copies |
 
 ## Known scope limitations

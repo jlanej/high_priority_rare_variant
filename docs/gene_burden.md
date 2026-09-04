@@ -7,21 +7,25 @@ Finds genes where rare, functional **inherited** variants recur across multiple 
 
 ## Status: what of this doc is live
 
-The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD and SpliceAI
-plugins, nothing else downloaded or bind-mounted. That reshapes this doc into three layers, marked throughout:
+The pipeline runs a **VEP-centric contract** — a VEP 115 GRCh38 cache plus the CADD / SpliceAI /
+REVEL / AlphaMissense plugins, and exactly two `bcftools annotate` transfers (the ClinVar sites VCF
+and the gnomAD v4.1 joint slim). That reshapes this doc into three layers, marked throughout:
 
 | Layer | What it is | Examples here |
 | --- | --- | --- |
-| **IMPLEMENTED** | Step 6 (`pipeline/06_gene_burden.py`) does this today | Distinct-individual carrier counts per gene per model; the per-model recurrence nulls; BH-FDR + exome-wide flag; constraint weighting and ranking |
+| **IMPLEMENTED** | Step 6 (`pipeline/06_gene_burden.py`) does this today | Distinct-individual carrier counts per gene per model; the per-model case-only recurrence nulls (a RANK) + BH-FDR + exome-wide flag; the mutational-target carrier expectation (`exp_carriers_mu` / `p_carrier_excess`) when `--mutrate` carries `mu_*`; constraint weighting and ranking |
 | **TARGET** | Documented, configured, **not** running | De novo Poisson enrichment (needs a mutation-rate table; uncalibrated when it runs), TRAPD corroboration, synonymous-λ calibration |
 | **REFERENCE** | Literature the roadmap is built on, not a claim about this code | The statistical-test menu, SAIGE-GENE+/regenie, mask definitions (M1/M2), DeNovoWEST/extTADA |
 
-**The single change that touches every rarity statement below:** there is **no `faf95`** under this
-contract. The VEP cache carries gnomAD v4.1 point AFs but no AC/AN, so the 95% CI lower bound is
-**unrecoverable, not approximated**. `annotations.frequency()` returns a **grpmax proxy** — the max
-AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS). Where this doc historically said "faf95",
-read "grpmax-proxy AF" — and see [§ Rarity field](#rarity-field-for-qualifying-variants) for why
-that direction of error is *safe* for the recurrence p-values specifically.
+**The single change that touches every rarity statement below:** the rarity field is `rarity_af` —
+the value `annotations.frequency()` returned under the run's ONE oracle
+(`resources.gnomad.oracle`). By default that is gnomAD's real **`faf95`** (the 95% CI lower bound,
+transferred from the gnomAD v4.1 joint slim, which the default configuration requires); only under
+the deliberate opt-down `oracle: grpmax_proxy` is it the grpmax point-estimate proxy — the max AF
+over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) read from the VEP cache. The arms never mix
+within a run. Where this doc says "faf95", read "the run's `rarity_af`" — and see
+[§ Rarity field](#rarity-field-for-qualifying-variants) for how the proxy's direction of error, if
+you opt down, is *safe* for the recurrence p-values specifically.
 
 The full ledger of what the first pass cannot see, and what each gap costs to close, is
 [limitations.md](limitations.md) — the anchor doc. This doc links there rather than restating it.
@@ -29,12 +33,12 @@ The full ledger of what the first pass cannot see, and what each gap costs to cl
 ## TL;DR
 
 - **Primary signal is recurrence-based gene consolidation** across the cohort, focused on **inherited germline variation**. For each gene, tally the number of **distinct individuals** carrying a qualifying variant under each inheritance model — **dominant** (rare inherited het), **biallelic** (homozygous + compound het), and **X-linked**. A gene is **recurrent** at **≥ `min_carriers` (default 2)** distinct individuals.
-- **The key new signal is recurrence of inherited heterozygous variants.** A rare (grpmax-proxy AF < 1e-4), functional, inherited het is only weakly interesting in one family, but becomes compelling when it **recurs across multiple individuals in the same gene**.
+- **The key new signal is recurrence of inherited heterozygous variants.** A rare (`rarity_af` < 1e-4), functional, inherited het is only weakly interesting in one family, but becomes compelling when it **recurs across multiple individuals in the same gene**.
 - **Rank recurrent genes first, weighted by gene constraint** (LOEUF / pLI / `s_het`). A recurrent het in a **haploinsufficient** gene is the most compelling result; a gene tolerant of damaging variation is de-prioritized even when recurrent.
 - **De novo enrichment is an OPTIONAL SECONDARY signal only.** De novo filtering **and review are handled by separate dedicated machinery**; here de novo is carried as a lightweight cross-reference column (GATK `hiConfDeNovo`, child-membership checked). When a mutation-rate table is supplied, an optional Samocha-2014 Poisson enrichment (denovolyzeR-style) is reported — **exome-wide P < 2.5e-6, BH q < 0.05** — but it is not the driver, and it is **uncalibrated** (see [below](#optional-secondary-signal-de-novo-enrichment-vs-a-mutation-model)).
 - **The non-joint per-trio design forbids an internal cohort allele frequency.** Absent genotypes are ambiguous (no-call vs hom-ref), so there is no valid internal AC/AN. Internal recurrence here means *distinct-individual carrier counts of qualifying variants*, not a population frequency.
 - **TRAPD** vs **ancestry-matched, coverage-intersected gnomAD v4.1 exomes** remains an **optional corroboration** (not yet implemented) — stratification/coverage-sensitive, never a standalone discovery engine.
-- **Rarity gate for qualifying variants uses a gnomAD v4.1 grpmax *proxy*** — the max point-estimate AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS), < 1e-4 for dominant/de novo candidates. **Not `faf95`** (unavailable — no AC/AN in the cache) and **never** VEP's `MAX_AF` or a global AF, both of which fail, in opposite directions ([limitations.md §2a](limitations.md)).
+- **Rarity gate for qualifying variants uses gnomAD v4.1 `rarity_af`** — real `faf95` from the joint slim by default, the grpmax point-estimate proxy (max over AFR/AMR/EAS/NFE/SAS) only under `oracle: grpmax_proxy`; < 1e-4 for dominant/de novo candidates. **Never** VEP's `MAX_AF` or a global AF, both of which fail, in opposite directions, under either arm ([limitations.md §2a](limitations.md)).
 - **Defer SAIGE-GENE+ / regenie** until a true joint call set exists; both require a joint genotype matrix this pipeline does not have. mtDNA heteroplasmy is out of scope here (handled by a separate dedicated pipeline).
 
 ## Why the non-joint design constrains the method
@@ -53,7 +57,7 @@ These VCFs are GATK Genotype-Refinement output, refined **per family** (Calculat
 
 Step 6 aggregates the per-family candidate calls (from the inheritance screen, see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)) into a per-gene tally. For each gene it counts the number of **distinct individuals** carrying a qualifying variant under each model:
 
-| Model | What is counted | Rarity gate (grpmax-proxy AF) |
+| Model | What is counted | Rarity gate (`rarity_af`, the run's oracle) |
 | --- | --- | --- |
 | **Dominant (inherited het)** | Rare, functional **heterozygous** variant transmitted from ≥ 1 parent (parent-of-origin recorded: maternal / paternal / both), **not** part of a compound-het pair | < 1e-4 |
 | **Biallelic** | Homozygous **or** compound het (two rare hets, same gene, in *trans*) | < 1e-2 (permissive) / 1e-3 (high-confidence tag) per allele |
@@ -65,8 +69,24 @@ The dominant-het count is the **key new signal**: individually a rare inherited 
 ### Recurrence flag and ranking
 
 - A gene is **recurrent** when its distinct-individual carrier count reaches **`min_carriers` (default 2)**.
-- Genes are ranked **recurrent-first**, then **distinct-variant** recurrence above same-variant (founder/artifact), then by the strongest per-model recurrence p, then **constraint-weighted** (constrained = LOEUF < 0.35 **or** pLI ≥ 0.9 **or** s_het ≥ 0.1 **or** pHaplo ≥ 0.86), then by carrier / dominant-het counts. A recurrent het in a **haploinsufficient** gene ranks highest.
+- Genes are ranked **recurrent-first**, then **distinct-variant** recurrence above same-variant (founder/artifact; for biallelic carriers the per-trio SET of variant keys is compared, so two trios sharing one comp-het pair read `same_variant`), then by `p_carrier_excess` — the carrier count against its mutational-target expectation — when `burden.rank_by_mutational_target` is true (the default) and `--mutrate` carries `mu_*` (else by the strongest per-model recurrence p, `best_p`, under which long genes lead by size), then **constraint-weighted** (constrained = LOEUF < 0.35 **or** pLI ≥ 0.9 **or** s_het ≥ 0.1 **or** pHaplo ≥ 0.86), then by carrier / dominant-het counts. A recurrent het in a **haploinsufficient** gene ranks highest.
 - De novo carrier counts and the optional de novo enrichment p-value are carried as **secondary columns** used only to break ties after the recurrence and constraint keys.
+
+### Expected carriers from the mutational target (IMPLEMENTED when `--mutrate` carries `mu_*`)
+
+`p_recurrence` asks "given the gnomAD frequencies of the variants we happened to observe, how
+surprising is this many carriers?" — which saturates for private variants (below). A second,
+independent yardstick is the gene's **mutational target**: with `mu_mis`/`mu_syn`/`mu_lof` in the
+`--mutrate` table, Step 6 emits `mu_tot`, `exp_carriers_mu` = C·μ_g (C = Σ n_carriers / Σ μ over
+the **full** mutational-target universe, zero-count genes included — the candidate list is
+zero-truncated, and fitting C on matched genes only would inflate it), `carrier_excess_ratio` =
+n_carriers / exp_carriers_mu, and `p_carrier_excess` (Poisson upper tail).
+`burden.rank_by_mutational_target` (**true**) then orders recurrent genes by `p_carrier_excess`
+instead of `best_p`, so a long gene with many carriers no longer leads simply because it is long.
+This is the Step-6 sibling of Step 9's excess statistic ([prioritization.md](prioritization.md))
+and inherits the same reading: a high ratio is a *quality* question first (mismapping, saturation,
+founder alleles), not evidence of disease association. The `p_recurrence` / `q_recurrence` /
+`*_exome_wide_sig` columns are unchanged.
 
 ## Optional secondary signal: de novo enrichment vs a mutation model
 
@@ -90,6 +110,9 @@ The dominant-het count is the **key new signal**: individually a rare inherited 
 >    **not** emit the per-class (LoF / missense / synonymous) breakdown of `denovolyzeByGene(classes=…)`.
 >    A LoF-specific test would give more power/interpretability for haploinsufficient genes — a
 >    possible enhancement, but out of scope for this off-by-default secondary arm.
+> 3. **Missing rates are never charged as zero.** A missing `mu_mis` → no test for that gene; a
+>    missing `mu_lof` → imputed as (mu_mis+mu_syn) × `prioritization.excess.offset.mu_lof_impute_factor`
+>    and recorded in `dn_mu_src` (`gnomad`|`imputed`|`none`) so the imputation stays visible.
 
 ### The Samocha framework
 
@@ -116,8 +139,8 @@ DNMs feeding the burden test are drawn from the same genotype-QC gates as the re
 | DP (de novo) | ≥ 20 | IMPLEMENTED |
 | Het allele balance | 0.25–0.75 | IMPLEMENTED |
 | Parental cleanliness | each parent alt AD ≤ 1, DP ≥ 10 | IMPLEMENTED |
-| gnomAD v4.1 frequency | grpmax-**proxy** AF < 1e-4 | IMPLEMENTED (as a proxy, not `faf95`) |
-| gnomAD homozygote sanity check | `nhomalt` | **NOT IMPLEMENTED** — `nhomalt` does not exist in the VEP cache. The `filters.denovo.require_gnomad_absent_or_singleton` key is **retired**, not silently no-op'd: it was only ever implemented as `nhomalt > 1`, a homozygote-count test rather than the allele-count test its name promised ([limitations.md §3](limitations.md)). |
+| gnomAD v4.1 frequency | `rarity_af` < 1e-4 | IMPLEMENTED (faf95 by default; the proxy only under `oracle: grpmax_proxy`) |
+| gnomAD homozygote sanity check | `nhomalt` | **REPORTED, NOT GATED** — `nhomalt` is transferred with the gnomAD joint slim and Step 9 raises `nhomalt_recessive_conflict` on biallelic calls (0 points by default). The `filters.denovo.require_gnomad_absent_or_singleton` key stays **retired**, not silently no-op'd: it was only ever implemented as `nhomalt > 1`, a homozygote-count test rather than the allele-count test its name promised ([limitations.md §3](limitations.md)). |
 | Region | callable-region intersect | **NOT IMPLEMENTED** — no callable-region BED is defined or applied anywhere in the pipeline. Aspirational; see the [pitfalls](#pitfalls) below, where differential coverage is the confounder it would address. |
 
 **Known failure mode to guard against:** gnomAD priors in CalculateGenotypePosteriors can push a genuine ultra-rare pathogenic call toward hom-ref, suppressing a real de novo. For top candidates, cross-check the pre-refinement PL/GT before counting or discarding.
@@ -141,37 +164,44 @@ Because the non-joint design already denies a valid internal AF, treat TRAPD as 
 
 ### What actually qualifies (IMPLEMENTED)
 
-Step 6 has **no mask concept**. It consumes whatever Step 5 emitted, and Step 5's variants are whatever Step 3's classifier kept. That classifier (`src/hprv/selection.py`) is a deliberately **three-rung** ladder (IMPACT, SpliceAI, CADD):
+Step 6 has **no mask concept**. It consumes whatever Step 5 emitted, and Step 5's variants are whatever Step 3's classifier kept. That classifier (`src/hprv/selection.py`) is a deliberately **three-rung** ladder (IMPACT, SpliceAI, CADD), yielding five keep reasons (`clinvar_plp`, `impact_high`, `impact_moderate`, `spliceai`, `cadd`):
 
 1. VEP `IMPACT` ∈ `keep_impacts` (**HIGH, MODERATE**) → keep;
-2. **else** `CADD_PHRED ≥ 25.3` → keep;
-3. else drop.
+2. **else** SpliceAI max Δ ≥ `spliceai_ds_min` (**0.2**) → keep;
+3. **else** `CADD_PHRED ≥ 25.3` → keep; else drop.
 
-Plus two overrides: grpmax-proxy AF ≥ 0.05 (ClinGen **BA1**) drops and is never rescued; a ClinVar **P/LP** assertion keeps, and also rescues a variant that would fail the rarity gate. Consequence classes come from VEP (see [functional_annotation.md](functional_annotation.md)); frequencies from the VEP cache's gnomAD v4.1 point AFs (see [allele_frequency.md](allele_frequency.md)). All qualifying variants additionally require FILTER = PASS and the genotype-QC gates above.
+Plus two overrides: `rarity_af` ≥ 0.05 (ClinGen **BA1**) drops and is never rescued; a ClinVar **P/LP** assertion keeps, and also rescues a variant that would fail the rarity gate. Consequence classes come from VEP (see [functional_annotation.md](functional_annotation.md)); frequencies from the run's oracle — gnomAD v4.1 faf95 by default (see [allele_frequency.md](allele_frequency.md)). All qualifying variants additionally require FILTER `PASS` or `.` and the genotype-QC gates above.
 
 Two consequences a reader must hold onto before interpreting any per-gene tally:
 
-- **The ClinVar override is unstarred.** The cache carries `CLIN_SIG` but no review status, so a 1★ single-submitter P/LP assertion enters the tally indistinguishably from an expert-panel one. It over-retains rather than over-drops.
+- **The ClinVar override is star-blind by design.** Review status IS available (`clinvar_stars`, from the Step-2 ClinVar transfer) and ranks in Step 9, but the screen never gates on it — a keep/drop gate on stars would violate never-drop — so a 1★ single-submitter P/LP assertion enters the tally alongside an expert-panel one and is ranked below it later. It over-retains rather than over-drops.
 - **CADD 25.3 is off-label.** It is Pejaver-2022's PP3-supporting cutoff, calibrated on **missense only** — and missense never reaches rung 3 — the CADD rung — because every missense is MODERATE and rung 1 returns first. So 25.3 is applied *exclusively* to the non-coding variants it was not calibrated for. It is a discovery rank (≈ top 0.3% genome-wide), **not** ACMG PP3 evidence ([limitations.md §4](limitations.md)).
 
 ### Masks (REFERENCE / TARGET — not implemented)
 
-The standard burden masks, documented because they are what a mature version of this module would use and what the literature below assumes. **Neither is computable under the VEP-only contract** — M1 needs LOFTEE, M2 needs REVEL/AlphaMissense.
+The standard burden masks, documented because they are what a mature version of this module would use and what the literature below assumes. **M1 is not computable** (no LOFTEE); M2's inputs ARE annotated now (REVEL, AlphaMissense and CADD ride on every row) but Step 6 has no mask logic — M2 is a TARGET, not a resource gap.
 
 | Mask | Definition | Blocker |
 | --- | --- | --- |
 | **M1 — pLoF** | LOFTEE **HC, no flags** | No LOFTEE data files ([limitations.md §5](limitations.md)) |
-| **M2 — pLoF + damaging missense** | M1 ∪ (REVEL ≥ 0.5 **or** AlphaMissense likely_pathogenic **or** CADD ≥ 20) | No dbNSFP/REVEL/AlphaMissense ([limitations.md §7](limitations.md)) |
+| **M2 — pLoF + damaging missense** | M1 ∪ (REVEL ≥ 0.5 **or** AlphaMissense likely_pathogenic **or** CADD ≥ 20) | Inputs annotated (REVEL/AlphaMissense plugins, required by default); no mask logic in Step 6 ([limitations.md §7](limitations.md)) |
 
 AAF tiers **≤ 1e-4** (dominant / de novo) and **≤ 1e-2 / 1e-3** (recessive) *are* live as the per-model rarity gates above. Multiple masks × AAF tiers would improve power but must be paid for in correction where the optional statistical tests are used (see below).
 
-> **Note on M2 and REVEL/AlphaMissense specifically:** their absence costs this *screen* nothing. They are missense-only scores, every missense is MODERATE, and rung 1 keeps MODERATE before any predictor is consulted — so those branches were **unreachable even when the code contained them and dbNSFP was configured**. CI now asserts the corresponding keep-reasons never fire. The genuine loss is tiering and reporting, not selection.
+> **Note on M2 and REVEL/AlphaMissense specifically:** they change this *screen* by nothing even now that they are wired. They are missense-only scores, every missense is MODERATE, and rung 1 keeps MODERATE before any predictor is consulted — so those branches were **unreachable even when the code contained them**. CI asserts the corresponding keep-reasons never fire. Their consumer is Step 9's missense tier, not selection.
 
 ### Rarity field for qualifying variants
 
-The rarity field is real **faf95** when the optional gnomAD joint slim is configured, else a **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS), mirroring gnomAD's own grpmax inclusion set.
+The rarity field is `rarity_af`: real **faf95** from the gnomAD joint slim under the default
+oracle, or — only under the deliberate opt-down `oracle: grpmax_proxy` — the grpmax proxy: the max
+gnomAD v4.1 point-estimate AF over the grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS),
+mirroring gnomAD's own grpmax inclusion set.
 
-It is the **fallback** arm of `frequency()`, not faf95 itself: computing faf95 requires AC/AN, which the VEP cache does not carry, so this field can never be CI-corrected. Real faf95 arrives with the optional gnomAD joint slim and takes precedence per variant (`rarity_oracle` reports which fired). On the fallback path a point estimate is always ≥ its own CI lower bound, so **rarity gates fire slightly more often than a faf95 gate would**: the screen errs toward dropping on low-count alleles.
+The proxy can never be CI-corrected: computing faf95 requires AC/AN, which the VEP cache does not
+carry. Real faf95 arrives with the joint slim, and a run uses ONE of the two for every variant —
+`rarity_oracle` is recorded once, `rarity_basis` (`measured`/`zero_ci`/`absent`) per variant. On
+the proxy arm a point estimate is always ≥ its own CI lower bound, so **rarity gates fire slightly
+more often than a faf95 gate would**: that arm errs toward dropping on low-count alleles.
 
 The recurrence null (below) inherits the *opposite* and more comfortable side of that same bias — see [Multiple-testing correction](#multiple-testing-correction).
 
@@ -196,11 +226,11 @@ Both **require a joint genotype matrix** and are therefore **not applicable to u
 
 ## Multiple-testing correction
 
-The primary recurrence signal is **calibrated**: for each gene, observed distinct-individual carriers are tested against `Binomial(N_trios, p)` with `p = 1 − Π_v (1 − q_v)²` over the gene's qualifying inherited variants (an allele absent from gnomAD is floored at `absent_af_floor`, default 1e-6). This yields a per-gene `p_recurrence`, a **BH `q_recurrence`**, and an exome-wide flag — so 2 carriers of a *private* variant are genome-wide significant while 2 carriers of a common-ish variant are not. It is a **case-only approximation** using in-cohort variants; the gnomAD-derived per-gene cumulative-AF version (TRAPD/CoCoRV) is the planned upgrade. The same thresholds apply to the **optional secondary de novo enrichment**:
+The primary recurrence signal is a **case-only rank, not a calibrated test**: for each gene, observed distinct-individual carriers are tested against `Binomial(N_trios, p)` with `p = 1 − Π_v (1 − q_v)²` over the gene's qualifying inherited variants (an allele absent from gnomAD is floored at `absent_af_floor`, default 1e-6). This yields a per-gene `p_recurrence`, a **BH `q_recurrence`**, and an exome-wide flag — so 2 carriers of a *private* variant clear the exome-wide line while 2 carriers of a common-ish variant do not. It is a **case-only approximation** using in-cohort variants; the gnomAD-derived per-gene cumulative-AF version (TRAPD/CoCoRV) is the planned upgrade, and the mutational-target expectation above is the interim second yardstick. The X-linked null is evaluated against `--n-male-trios` (`run_pipeline.sh` counts Step-0 `inferred_sex == 1` among resolved trios) when available, else N_trios. The same thresholds apply to the **optional secondary de novo enrichment**:
 
-> **The per-variant `q_v` is the grpmax-proxy AF read from Step 5's `grpmax_af` column, not `faf95`** — and for *this* test the substitution errs in the safe direction. Because the proxy is a point estimate it reads slightly **high** versus faf95 on low-count alleles; a larger `q_v` **inflates** the null probability of seeing carriers by chance, which **inflates the p-value**. These recurrence p-values are therefore **conservative** — the right direction for a discovery claim, since it costs sensitivity rather than manufacturing significance. Do not read this as "equivalent to faf95": it is a bias, in a known and bounded direction, not an equality. (Note the same substitution is *un*favourable at the rarity gate, where a high point estimate drops real candidates — the direction of harm flips with how the number is used.)
+> **The per-variant `q_v` is Step 5's `rarity_af` — the run's oracle value, real faf95 by default** (a `zero_ci` allele is floored at `absent_af_floor` like an absent one; `grpmax_af` is read only for a legacy calls table with no `rarity_oracle` column). If a run opts down to `grpmax_proxy`, the substitution errs in the safe direction *for this test*: a point estimate reads slightly **high** versus faf95 on low-count alleles; a larger `q_v` **inflates** the null probability of seeing carriers by chance, which **inflates the p-value**, making those recurrence p-values **conservative** — the right direction for a discovery claim, since it costs sensitivity rather than manufacturing significance. Do not read this as "equivalent to faf95": it is a bias, in a known and bounded direction, not an equality. (The same substitution is *un*favourable at the rarity gate, where a high point estimate drops real candidates — the direction of harm flips with how the number is used.)
 
-> **The larger bias runs the *other* way — read "significant" as a ranking, not a calibrated claim.** The `q_v` → conservative point above is a *small* effect (roughly one CI-width on low-count alleles). It is dominated by the **case-only approximation**: `p` is built from *only the variants observed in the cohort*, not the gene's full qualifying-variant target in gnomAD. Omitting the rest of that target makes `p` **too small** (anti-conservative) for the gene-level "is this gene recurrently hit?" question — so for essentially any gene with ≥ `min_carriers` carriers of *private* variants, `p_recurrence` clears the exome-wide line (2 carriers of distinct absent→floored variants give `p ≈ 3e-7` even at only N = 200 trios). Concretely, `recurrence_exome_wide_sig` / `q_recurrence` largely **restate the recurrence flag** for private-variant genes: they *order* candidates, they do not *certify* significance. The honest fix is the gnomAD-derived per-gene cumulative-AF null (TRAPD/CoCoRV, the planned upgrade); until then, treat these columns as a **rank**, and lean on constraint + variant class for interpretation.
+> **The larger bias runs the *other* way — read "significant" as a ranking, not a calibrated claim.** The `q_v` → conservative point above is a *small* effect (roughly one CI-width on low-count alleles). It is dominated by the **case-only approximation**: `p` is built from *only the variants observed in the cohort*, not the gene's full qualifying-variant target in gnomAD. Omitting the rest of that target makes `p` **too small** (anti-conservative) for the gene-level "is this gene recurrently hit?" question — so for essentially any gene with ≥ `min_carriers` carriers of *private* variants, `p_recurrence` clears the exome-wide line (2 carriers of distinct absent→floored variants give `p ≈ 3e-7` even at only N = 200 trios, and 3 carriers at N = 1000 give 4e-8 — the flag is essentially "≥ 3 carriers of private hets"). Concretely, `recurrence_exome_wide_sig` / `q_recurrence` largely **restate the recurrence flag** for private-variant genes: they *order* candidates, they do not *certify* significance. The honest fix is the gnomAD-derived per-gene cumulative-AF null (TRAPD/CoCoRV, the planned upgrade); until then, treat these columns as a **rank**, and lean on constraint + variant class for interpretation.
 
 - **Exome-wide gene-based threshold: P < 2.5e-6** (≈ 0.05 / ~20,000 protein-coding genes). The literature also expresses this as a class-specific Bonferroni; the canonical default here is the single ~2.5e-6 line.
 - If **not** using a single omnibus p-value, divide further by the number of masks × AAF tiers × tests. Combining masks/tiers per gene via **ACAT/Cauchy (ACAT-O)** collapses them into one p-value and **avoids that penalty** — the preferred route.
@@ -217,7 +247,7 @@ A recurrent gene is only interesting if it is **intolerant of the class of varia
 
 ## Pitfalls
 
-- **Population stratification** — the dominant confounder in external-control burden; matched-ancestry gnomAD subsets + PCA sample assignment would be mandatory for TRAPD. It also reaches the *live* recurrence null: the grpmax proxy takes the max over ancestry groups regardless of the cohort's actual composition, so a variant common in one group and absent elsewhere is charged its highest AF.
+- **Population stratification** — the dominant confounder in external-control burden; matched-ancestry gnomAD subsets + PCA sample assignment would be mandatory for TRAPD. It also reaches the *live* recurrence null: the rarity oracle (faf95's `fafmax`, or the proxy's max) takes the max over ancestry groups regardless of the cohort's actual composition, so a variant common in one group and absent elsewhere is charged its highest AF.
 - **Differential coverage** — without cohort joint genotyping, low-coverage no-calls masquerade as hom-ref. Restricting to jointly-callable high-depth intervals is the mitigation, and **it is not implemented** — there is no callable-region intersect.
 - **Batch/platform effects** — capture kit, caller, and build details differ from gnomAD. The synonymous-λ is the calibration diagnostic that would catch this; it is **not implemented** (see [Scope limitations](#scope-limitations-stated-honestly)), so this confounder is currently undiagnosed rather than controlled.
 - **No internal AF** — the recurrence tally is distinct-individual carrier counts against a gnomAD-derived null, never an internal AC/AN. De novo (per-family, batch-insensitive) is a **secondary cross-reference** here, not the primary signal; gnomAD-control burden (TRAPD) would be corroborative and is not implemented.
@@ -241,12 +271,13 @@ A recurrent gene is only interesting if it is **intolerant of the class of varia
 
 ```bash
 # 1. Keep PASS sites below the frequency gate.
-#    LIVE, but note the field: the rarity oracle is faf95 when the gnomAD slim is configured,
-#    else the grpmax PROXY computed in
-#    annotations.grpmax_af() as the max over vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF.
-#    There is no single faf95 INFO field to filter on (see allele_frequency.md), and
-#    vep_MAX_AF is NOT a substitute — it over-counts founder groups.
-bcftools view -f PASS -i 'INFO/vep_gnomADg_NFE_AF < 1e-4' "${TRIO_VCF}" -Oz -o "${RARE_VCF}"
+#    LIVE, but note the field: the rarity oracle is ONE quantity per run — INFO/gnomad_faf95
+#    (from the joint slim; absent-but-observed = 0, no record = rarest) by default, or the grpmax
+#    PROXY computed in annotations.grpmax_af() as the max over
+#    vep_gnomAD{e,g}_{AFR,AMR,EAS,NFE,SAS}_AF only under oracle: grpmax_proxy (see
+#    allele_frequency.md). vep_MAX_AF is NOT a substitute under either arm — it over-counts
+#    founder groups.
+bcftools view -f PASS,. -i 'INFO/gnomad_faf95 < 1e-4 || INFO/gnomad_faf95="."' "${TRIO_VCF}" -Oz -o "${RARE_VCF}"
 
 # 2. TARGET (needs LOFTEE): restrict to the pLoF mask (HC, no flags) via the VEP CSQ field.
 #    Under the current contract the equivalent live gate is simply IMPACT=HIGH.
@@ -279,13 +310,14 @@ denovolyzeByGene(genes = dnm$gene, classes = dnm$class, nsamples = n_trios)
 | --- | --- | --- | --- |
 | **Primary signal** | **Recurrence-based gene consolidation** — distinct-individual carrier counts per gene per inheritance model | IMPLEMENTED | The driver. Inherited-germline focused |
 | Recurrence flag | `burden.min_carriers` = **2** distinct individuals | IMPLEMENTED | |
-| Recurrence null | `Binomial(N_trios, p)`, model-appropriate `p`; `absent_af_floor` = **1e-6** | IMPLEMENTED | Requires `--n-trios`; **skipped with a warning if omitted** |
-| Secondary signal | **De novo enrichment** (denovolyzeR-style, Samocha-2014 rates, Poisson) | TARGET | Needs a `--mutrate` table; none ships. **Uncalibrated** when it runs |
+| Recurrence null | `Binomial(N_trios, p)`, model-appropriate `p`; `absent_af_floor` = **1e-6** | IMPLEMENTED (a case-only RANK) | Requires `--n-trios`; **skipped with a warning if omitted**. X-linked null against `--n-male-trios` when available |
+| Mutational-target expectation | `exp_carriers_mu` = C·μ_g, `carrier_excess_ratio`, `p_carrier_excess`; `burden.rank_by_mutational_target` = **true** | IMPLEMENTED (when `--mutrate` carries `mu_*`) | C fit over the FULL universe; orders recurrent genes so long genes stop leading by size |
+| Secondary signal | **De novo enrichment** (denovolyzeR-style, Samocha-2014 rates, Poisson) | TARGET | Needs a `--mutrate` table; none ships. **Uncalibrated** when it runs; `dn_mu_src` records whether `mu_lof` was measured or imputed |
 | Corroborative signal | **TRAPD** vs gnomAD v4.1 exomes | NOT IMPLEMENTED | `burden.corroborative_trapd` is reserved |
-| Frequency oracle / field | gnomAD **v4.1** point AF via the VEP cache, **grpmax proxy** (max over AFR/AMR/EAS/NFE/SAS) | IMPLEMENTED | **Not `faf95`** — no AC/AN in the cache. Never internal cohort AC/AN; never `MAX_AF` or global AF |
-| Rarity gate (dominant / de novo candidate) | grpmax-proxy AF **< 1e-4** | IMPLEMENTED | `nhomalt` / absent-or-singleton gates are **retired** — no `nhomalt` field exists |
+| Frequency oracle / field | gnomAD **v4.1** `rarity_af` — real **faf95** (joint slim, default) or the **grpmax proxy** (opt-down) — ONE per run | IMPLEMENTED | Never internal cohort AC/AN; never `MAX_AF` or global AF under either arm |
+| Rarity gate (dominant / de novo candidate) | `rarity_af` **< 1e-4** | IMPLEMENTED | The absent-or-singleton gate stays **retired**; `nhomalt` is reported (Step 9 flag), never gated |
 | Functional ladder | `IMPACT` ∈ {HIGH, MODERATE}, **else** `SpliceAI Δ ≥ 0.2`, **else** `CADD_PHRED ≥ 25.3` | IMPLEMENTED | Three rungs, whole ladder. 25.3 is off-label on non-coding |
-| Masks | **M1** = LOFTEE HC no-flag; **M2** = M1 ∪ (REVEL ≥ 0.5 or AlphaMissense LP or CADD ≥ 20) | REFERENCE | Neither computable: no LOFTEE, no REVEL/AlphaMissense |
+| Masks | **M1** = LOFTEE HC no-flag; **M2** = M1 ∪ (REVEL ≥ 0.5 or AlphaMissense LP or CADD ≥ 20) | REFERENCE | M1 not computable (no LOFTEE); M2's inputs are annotated but Step 6 has no mask logic |
 | De novo genotype QC | GQ ≥ 20, DP ≥ 20, het AB 0.25–0.75, parent alt AD ≤ 1 | IMPLEMENTED | `hiConfDeNovo` screen when the tag is present |
 | Exome-wide significance | **P < 2.5e-6** | IMPLEMENTED | ~0.05 / 20,000 genes |
 | Discovery FDR | **BH q < 0.05** | IMPLEMENTED | Per model family (dominant / biallelic / X-linked / de novo) |
