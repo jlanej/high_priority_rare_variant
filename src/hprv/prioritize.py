@@ -24,8 +24,8 @@ deliberately too small to demote a variant carrying strong molecular evidence in
 gene. It is a re-rank, not a veto. `09_prioritize.py` asserts row-count conservation.
 
 **Absent evidence is never benign evidence.** A blank NHF means nobody looked, not that the
-reads are clean (three states, never two — copied from
-``Analysis/.../inherited/prepare_igv_variants.py:nhf_status``). A missing SpliceAI score means
+reads are clean (three states, never two — the same rule the group's igv-review
+``prepare_igv_variants.py`` applies). A missing SpliceAI score means
 the precomputed set does not cover that indel, not that splicing is unaffected — so the V0
 "molecularly benign" tier requires BOTH scores to be PRESENT and below their cutoffs. A gene
 with no gnomAD ``mu`` gets a CDS-length fallback offset AND a tier ceiling, because a ±30%
@@ -63,6 +63,9 @@ VARIANT_TIERS = ("V0", "V1", "V2", "V3", "V4", "V5")
 # `homozygous` is the spec's name for what Step 5 emits as `hom_recessive`; both are matched so
 # the predicate survives either vocabulary.
 RECESSIVE_MODES = frozenset({"compound_het", "hom_recessive", "homozygous", "x_linked_recessive"})
+# Step-5 modes whose proband call is a single X allele. MOI coherence treats them as X-linked
+# observations (coherent with XLR *or* XLD), not as autosomal dominant/recessive ones.
+HEMIZYGOUS_MODES = frozenset({"x_linked_recessive", "denovo_x_hemi"})
 
 # Literal column-header tokens that must never be mistaken for a gene symbol. This is not
 # theoretical fastidiousness: the validation cohort's own `gene.counts.txt` (a
@@ -519,10 +522,10 @@ def fit_poisson_null(counts, mus, trim_p: float = 1.0e-3, max_iter: int = 20,
 
     A side-by-side NB-vs-Poisson calibration is only a fair comparison if BOTH arms are fit the
     way they would be used. Evaluating the Poisson at the NB's trimmed ``C`` instead measures a
-    hybrid nobody would deploy, and it changes the headline number materially: the published
-    2.51x Poisson anti-conservatism at alpha = 1e-3 is reproducible only WITH the Poisson arm
+    hybrid nobody would deploy, and it changes the headline number materially: the canonical
+    2.41x Poisson anti-conservatism at alpha = 1e-3 is reproducible only WITH the Poisson arm
     trimmed. Under a plain untrimmed reading it is 1.82x (range 1.60-2.04x over 40 random
-    splits). **Never quote the 2.51x figure without that condition.** The design decision is
+    splits). **Never quote the 2.41x figure without that condition.** The design decision is
     robust either way — every variant tested leaves the Poisson anti-conservative (all >= 1.31x)
     and the NB conservative (0.31x) — but the two numbers are not interchangeable.
     """
@@ -632,7 +635,8 @@ def artifact_signals(row, thresholds: dict) -> dict:
     judge would not transfer to another cohort.
 
     ``thresholds`` keys: ``per_trio_min``, ``segdup_min_frac``, ``oe_syn_max_deviation``,
-    ``constraint_flag_values``, ``family_match`` (callable), ``caf_low_cutoff``.
+    ``constraint_flag_values``, ``family_match`` (callable), ``caf_low_cutoff``. ``row`` may carry
+    ``in_mutrate_table`` (False when the gene has no mutational-target row at all).
     """
     reasons = []
     sig = {}
@@ -705,7 +709,11 @@ def artifact_signals(row, thresholds: dict) -> dict:
     null_flagged = thresholds.get("caf_null_is_flagged", True)
     caf = _num(row.get("classic_caf"))
     if caf is None:
-        sig["sig_caf_low"] = bool(null_flagged) and cutoff is not None
+        # Only a gene gnomAD LOOKED AT (it has a mutational-target row) and reported no pLoF
+        # CAF for is a low-information locus. A gene with no row at all — a symbol gnomAD never
+        # keyed — is unknown, and flagging it handed every unjoined gene a corroboration vote.
+        in_table = bool(row.get("in_mutrate_table", True))
+        sig["sig_caf_low"] = bool(null_flagged) and cutoff is not None and in_table
         if sig["sig_caf_low"]:
             reasons.append("classic_caf=absent_low_information_locus")
     else:
@@ -1098,11 +1106,12 @@ def assign_variant_tier(row, cfg=None) -> dict:
 def rarity_strength(af, cfg=None) -> str:
     """``strong`` | ``moderate`` | ``supporting`` | ``permissive`` | ``fail`` | ``unknown``.
 
-    Two caveats that must travel with this column. (1) WHICH oracle produced the value is
-    per-variant and is reported in ``rarity_oracle``: real **faf95** when the gnomAD joint slim
-    was transferred AND gnomAD published a non-zero CI lower bound for this allele, otherwise the
-    grpmax **point-estimate proxy**, which sits ~one CI-width high. Even on faf95 these bands are
-    not ACMG PM2 — PM2 is Supporting-only evidence, not a gate, and hprv assigns no ACMG weight.
+    Two caveats that must travel with this column. (1) WHICH oracle produced the value is a
+    RUN-level choice (``resources.gnomad.oracle``: real **faf95** from the gnomAD joint slim by
+    default, else the grpmax **point-estimate proxy**, which sits ~one CI-width high) and is
+    reported in ``rarity_oracle``; ``rarity_basis`` says how the value arose within that arm.
+    Even on faf95 these bands are not ACMG PM2 — PM2 is Supporting-only evidence, not a gate,
+    and hprv assigns no ACMG weight.
     (2) Audit A-4: the proxy is the MAX over
     grpmax-eligible groups regardless of the cohort's ancestry composition, so effective
     stringency varies with the proband's ancestry and the loss is unevenly distributed across
@@ -1147,6 +1156,35 @@ def rarity_driven_by_single_group(grpmax_af, max_af, cfg=None) -> bool:
     return m / g > ratio
 
 
+HOMOZYGOUS_MODES = frozenset({"hom_recessive", "homozygous", "x_linked_recessive", "denovo_x_hemi"})
+
+
+def is_hom_alt_call(gt, ref="", inheritance="") -> bool:
+    """True when the proband's call is homozygous or hemizygous ALT.
+
+    **`child_gt` is a cyvcf2 `gt_bases` string** (`T/T`, `A/T`, haploid `T`), never the `0/1`
+    index form — Step 5 writes it that way and Step 8 carries it verbatim. A test against
+    ``"1/1"`` therefore never fired on pipeline output, so every hom_recessive /
+    x_linked_recessive / denovo_x_hemi call was pushed through the HET allele-balance band, failed
+    it at AB ~1.0 and lost 2 points with a false ``het_AB … outside`` reason. Decide from the
+    alleles instead: one distinct allele that is not REF (or not ``0`` in index form), with the
+    mode as a fallback for the three homozygous/hemizygous modes and hand-made tables that carry
+    no genotype at all.
+    """
+    mode = _s(inheritance).lower()
+    if mode in HOMOZYGOUS_MODES:
+        return True
+    alleles = [a for a in re.split(r"[/|]", _s(gt)) if a != ""]
+    if not alleles or len(set(alleles)) != 1:
+        return False                      # het (incl. 1/2), or no call at all
+    a = alleles[0]
+    if a in ("0", "."):
+        return False                      # index-form hom-REF, or missing
+    if ref and a.upper() == _s(ref).upper():
+        return False                      # base-form hom-REF
+    return True
+
+
 def genotype_qc(row, cfg=None):
     """-> (pass: bool, fail_reason: str) for the PROBAND only. A failing call is flagged and
     penalised, NEVER dropped.
@@ -1160,6 +1198,8 @@ def genotype_qc(row, cfg=None):
     cleaner-looking Mendelian patterns than the raw data support.
 
     Missing metrics are ``unknown``, not failures: a blank GQ means Step 5 did not record it.
+    Zygosity comes from ``is_hom_alt_call`` (base-form ``child_gt`` / the mode), never from a
+    string compare against ``"1/1"``.
     """
     cfg = cfg or {}
     min_gq = _f(cfg, "filters.genotype_qc.min_gq", 20.0)
@@ -1176,7 +1216,8 @@ def genotype_qc(row, cfg=None):
     if dp is not None and dp < min_dp:
         reasons.append(f"DP={dp:.3g}<{min_dp:g}")
     if ab is not None:
-        hom_alt = gt in ("1/1", "1|1")
+        # base-form GT (`T/T`) or index form (`1/1`) or the mode — see is_hom_alt_call
+        hom_alt = is_hom_alt_call(gt, row.get("ref"), row.get("inheritance"))
         if hom_alt and ab < ab_hom:
             reasons.append(f"homalt_AB={ab:.3g}<{ab_hom:g}")
         elif not hom_alt and not (ab_lo <= ab <= ab_hi):
@@ -1195,8 +1236,8 @@ def nhf_state(row, threshold: float = 0.5, min_reads: int = 5):
     """-> (state, max_fraction, max_reads) where state is ``clean`` | ``flagged`` |
     ``not_screened``.
 
-    **Blank is NOT zero**, and this is the load-bearing rule (copied from
-    ``prepare_igv_variants.py:nhf_status``):
+    **Blank is NOT zero**, and this is the load-bearing rule (shared with the group's
+    igv-review ``prepare_igv_variants.py``):
       * blank  = NOT SCREENED — the member is not an ALT carrier, has no mini-CRAM, or Step 8b
         never ran (no kraken2 DB).
       * ``0.0`` = SCREENED, and every read classified human.
@@ -1293,6 +1334,15 @@ def moi_coherence(inheritance, gene_moi, long_gene=False):
         caveat = "long_gene_comphet_drift"
     if not curated:
         return "unknown", caveat
+    # HEMIZYGOUS observations (a male's single X, or a hom-alt daughter with a hemizygous
+    # father) are compatible with BOTH X-linked recessive and X-linked dominant curation, so they
+    # are `coherent` with any XL* token and `unknown` (exactly neutral) otherwise. Routing them
+    # through the autosomal dominant/recessive split charged an XLD gene's hemizygous male -1.0
+    # and labelled a hemizygous de novo in an XLR gene `moi_mismatch_het_in_recessive_gene`.
+    if mode in HEMIZYGOUS_MODES:
+        has_xl = any(t.startswith("XL") or t.replace("-", "_") in ("X_LINKED", "XLINKED")
+                     for t in curated)
+        return ("coherent" if has_xl else "unknown"), caveat
     dominant_like = {"AD", "AUTOSOMAL DOMINANT", "DOMINANT", "XLD", "SD"}
     recessive_like = {"AR", "AUTOSOMAL RECESSIVE", "RECESSIVE", "XLR", "XL"}
     # The overlay's own MOI vocabulary is richer than a bare token: the FA rows read
@@ -1520,19 +1570,24 @@ def constraint_gate(variant_tier, inheritance, cfg=None) -> float:
 
 
 def gene_is_constrained(gene_row, cfg=None) -> bool:
-    """pLI >= 0.9 or LOEUF < 0.35 (hprv canonical defaults). ``s_het >= 0.1`` is specified as a
-    short-gene route but is TARGET: it is not in the gnomAD constraint columns this step reads.
+    """The canonical "constrained" predicate, identical to Step 6's: pLI >= 0.9 **or**
+    LOEUF < 0.35 **or** s_het >= 0.1 **or** pHaplo >= 0.86 (``filters.constraint_weighting.*``).
+    ``s_het``/``phaplo`` come from the joined ``--constraint`` table (``join_constraint.py``);
+    absent columns simply never fire.
     """
     cfg = cfg or {}
     pli_min = _f(cfg, "filters.constraint_weighting.pli_min", 0.90)
     loeuf_max = _f(cfg, "filters.constraint_weighting.loeuf_v2_tier1", 0.35)
     shet_min = _f(cfg, "filters.constraint_weighting.shet_min", 0.10)
+    phaplo_min = _f(cfg, "filters.constraint_weighting.phaplo_min", 0.86)
     pli = _num(gene_row.get("pLI") if gene_row.get("pLI") is not None else gene_row.get("pli"))
     loeuf = _num(gene_row.get("oe_lof_upper"))
     shet = _num(gene_row.get("s_het"))
+    phaplo = _num(gene_row.get("phaplo"))
     return bool((pli is not None and pli >= pli_min)
                 or (loeuf is not None and loeuf < loeuf_max)
-                or (shet is not None and shet >= shet_min))
+                or (shet is not None and shet >= shet_min)
+                or (phaplo is not None and phaplo >= phaplo_min))
 
 
 def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
@@ -1554,12 +1609,8 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
     out["pts_molecular"] = float(w["molecular"].get(vt, 0.0))
 
     # --- 1.2 rarity ---
-    # THE SAME PRECEDENCE annotations.frequency() applies at the screen: faf95 first, the grpmax
-    # point-estimate proxy second. Step 9 must not rank on a different quantity than the screen
-    # gated on, or a variant kept because its CI lower bound was low would then be scored as if
-    # it carried the higher point estimate. `rarity_oracle` records which one was actually used,
-    # per variant — the two coexist in one run (faf95 is absent wherever no ancestry group has a
-    # confidently non-zero AF), so a single run-level label would be wrong.
+    # ONE oracle per run (resources.gnomad.oracle), and Step 9 must rank on exactly the quantity
+    # the screen gated on — never re-derive it from the raw columns.
     # The SCREEN resolved this once (Step 5 writes rarity_af/rarity_oracle/rarity_basis from
     # annotations.frequency(), the single chokepoint). Step 9 CONSUMES it and never re-derives:
     # the raw columns for "gnomAD published no faf95" and "gnomAD has no record" are identical,
@@ -1586,8 +1637,13 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
     rs = rarity_strength(af_col, cfg)
     out["rarity_strength"] = rs
     out["pts_rarity"] = float(w["rarity"].get(rs, 0.0))
+    # The comparison is point estimate vs point estimate — `grpmax_af` (eligible groups) against
+    # `max_af` (all groups) — exactly as the docstring says. It was fed `af_col`, the ORACLE value,
+    # which under the default faf95 arm is a CI lower bound (0.0 on every zero_ci row), so the
+    # flag fired on essentially every gnomAD-observed low-count allele and said nothing about
+    # population structure.
     out["rarity_driven_by_single_group"] = rarity_driven_by_single_group(
-        af_col, row.get("max_af"), cfg)
+        row.get("grpmax_af"), row.get("max_af"), cfg)
 
     # --- 1.3 gene constraint, MECHANISM-GATED (never unconditional) ---
     gate = constraint_gate(vt, row.get("inheritance"), cfg)
@@ -1616,7 +1672,13 @@ def score_variant(row, gene_row=None, cfg=None, gene_prior=False) -> dict:
 
     # --- 1.5 quality penalties ---
     gt_ok, gt_reason = genotype_qc(row, cfg)
-    nhf_thr = _f(cfg, "prioritization.composite.nhf.flag_fraction", 0.5)
+    # ONE threshold for Step 8's `nhf_flag` and this `nhf_status`: outputs.igv.nonhuman_screen.
+    # flag_fraction (the retired prioritization.composite.nhf.flag_fraction is honoured as a
+    # fallback so an older config keeps its value).
+    _nhf_thr = get(cfg, "outputs.igv.nonhuman_screen.flag_fraction", None)
+    if _nhf_thr is None:
+        _nhf_thr = get(cfg, "prioritization.composite.nhf.flag_fraction", 0.5)
+    nhf_thr = float(_nhf_thr)
     nhf_min_reads = _i(cfg, "outputs.igv.nonhuman_screen.min_reads", 5)
     nhf, nhf_frac, nhf_reads = nhf_state(row, nhf_thr, nhf_min_reads)
     partner_unknown = _s(row.get("inheritance")).lower() == "compound_het"
