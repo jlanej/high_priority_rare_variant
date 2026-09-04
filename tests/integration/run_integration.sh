@@ -5,9 +5,9 @@
 # Exercises resolve + Steps 0-9 for real (bcftools + the python steps). ONLY the `vep`
 # binary itself is mocked (its cache is 24 GB — too heavy for CI): mock_vep.py writes a
 # VEP-shaped CSQ, and Step 2 then runs for real via its --vep-vcf ingest path, so the
-# build checks, the split-vep lift, the transcript selector and the frequency guard are
-# all under test. There is no gnomAD/ClinVar transfer to exercise — under the VEP-only
-# contract those annotations come from the CSQ.
+# build checks, the split-vep lift, the transcript selector, the frequency guard and the
+# gnomAD joint-slim transfer (a real bcftools annotate onto a tiny mock slim) are all under
+# test. The ClinVar transfer is exercised only by its absence (stars must read UNAVAILABLE).
 #
 # Requires on PATH: bcftools, samtools, bgzip, tabix, and a python with
 # cyvcf2/pysam/numpy/scipy/pyyaml. Runs on a laptop (conda env) or in CI.

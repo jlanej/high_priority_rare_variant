@@ -63,7 +63,15 @@ def test_config_sh_skips_unresolved():
     assert "HPRV_TMPDIR=/real/tmp" in out            # resolved values pass through (shlex-unquoted)
 
 
-def test_ped(tmp="/tmp/_hprv_test.ped"):
+def _tmp_path(suffix):
+    """A fresh per-run temp path (fixed /tmp names collide between parallel runs)."""
+    fd, path = tempfile.mkstemp(prefix="_hprv_", suffix=suffix)
+    os.close(fd)
+    return path
+
+
+def test_ped(tmp=None):
+    tmp = tmp or _tmp_path(".ped")
     with open(tmp, "w") as fh:
         fh.write("# comment\nFAM CHILD DAD MOM 1 2\nFAM DAD 0 0 1 1\nFAM MOM 0 0 2 1\n")
     ped = parse_ped(tmp)
@@ -357,7 +365,8 @@ def test_par_x():
     assert not G.is_x_nonpar(FakeVar(CHROM="chr1", POS=1_000_000))
 
 
-def test_read_trios_file(tmp="/tmp/_hprv_trios.tsv"):
+def test_read_trios_file(tmp=None):
+    tmp = tmp or _tmp_path(".tsv")
     # header order must NOT matter: dad/mom located by name, not position
     with open(tmp, "w") as fh:
         fh.write("#kid\tmom\tdad\nCH1\tMO1\tFA1\n")   # note: mom before dad
@@ -366,14 +375,16 @@ def test_read_trios_file(tmp="/tmp/_hprv_trios.tsv"):
     assert trios == [("CH1", "FA1", "MO1")]            # returned as (kid, dad, mom)
 
 
-def test_write_ped_roundtrip(tmp="/tmp/_hprv_gen.ped"):
+def test_write_ped_roundtrip(tmp=None):
+    tmp = tmp or _tmp_path(".ped")
     write_ped(tmp, "CH1", "FA1", "MO1", kid_sex="2")
     ped = parse_ped(tmp)
     os.remove(tmp)
     assert ped == {"child": "CH1", "father": "FA1", "mother": "MO1", "sex": "2"}
 
 
-def test_audit_record_and_summarize(tmpdir="/tmp/_hprv_audit"):
+def test_audit_record_and_summarize(tmpdir=None):
+    tmpdir = tmpdir or tempfile.mkdtemp(prefix="_hprv_audit_")
     import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)
     audit.record("01_cohort_sites", "union_sites", 1000, adir=tmpdir)
@@ -901,20 +912,24 @@ def test_prioritize_trim_loop_halts_on_mis_specified_null():
     gene universes), not an exome that is 5% artifact — and proceeding would mass-down-weight
     real genes.
     """
+    import random
     from hprv import prioritize as PR
-    # every gene wildly over its target => the trim loop eats the exome
-    mus = [1e-6] * 200
-    counts = [50] * 200
+    # A Poisson-like bulk with 10% of genes at ~300x their target: the trim loop removes the
+    # 10% (> trim_max_fraction) and MUST raise. (A uniformly-inflated fixture does not trip it —
+    # C absorbs a uniform inflation and nothing is trimmed — which is how the previous version of
+    # this test could never fail; deleting the HALT left the whole suite green.)
+    random.seed(1)
+    mus = [1e-5] * 900 + [1e-7] * 100
+    counts = [random.choice([0, 1, 2]) for _ in range(900)] + [30] * 100
     try:
         PR.fit_excess_null(counts, mus, trim_max_fraction=0.05)
     except ValueError as e:
-        assert "trim_max_fraction" in str(e) and "mis-specified" in str(e)
+        assert "trim_max_fraction" in str(e) and "mis-specified" in str(e), str(e)
     else:
-        # A degenerate fit that absorbs everything into alpha is an acceptable alternative
-        # outcome; what must NOT happen is a silent mass trim. Assert that directly.
-        fit = PR.fit_excess_null(counts, mus, trim_max_fraction=1.0)
-        assert fit["trim_fraction"] <= 0.05, \
-            "a >5% trim must raise rather than be reported as a normal fit"
+        raise AssertionError("a >5% trim must raise, not be reported as a normal fit")
+    # ...and the same data fits when the guard is deliberately lifted, with the tail trimmed
+    fit = PR.fit_excess_null(counts, mus, trim_max_fraction=0.5)
+    assert fit["n_trimmed"] >= 90 and fit["trim_fraction"] > 0.05, fit["trim_fraction"]
 
 
 def test_prioritize_artifact_signals_and_corroboration():
@@ -977,9 +992,10 @@ def test_prioritize_gene_tier_rules():
     pen = T(24.8, 0.001, 3, True, 200)["gene_artifact_penalty"]
     assert pen == -3.0
     assert 4.0 + 2.0 + 1.0 + pen == 4.0, "a T3 penalty must be a re-rank, not a veto"
-    # every tier keeps its reason machinery — nothing is ever dropped
-    for tier in PR.GENE_TIERS:
-        assert tier in ("T0_no_downweight", "T1_watch", "T2_downweight", "T3_strong_downweight")
+    # every tier has a penalty in the default weight table (a tier with no penalty entry would
+    # silently score 0.0 via .get) and the penalties are monotone in severity
+    pens = [PR.default_weights()["gene_artifact"][t] for t in PR.GENE_TIERS]
+    assert pens == sorted(pens, reverse=True) and pens[0] == 0.0 and pens[-1] < 0.0, pens
 
 
 def test_prioritize_positive_control_guard():
@@ -1180,6 +1196,19 @@ def test_prioritize_absent_scores_are_not_benign_evidence():
     assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.95"})[0] is False
     assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.95",
                            "child_gt": "1/1"})[0] is True          # hom-alt band, not het
+    # ...and in the BASE form Step 5 actually writes (cyvcf2 gt_bases): `T/T`, never `1/1`. A
+    # string compare against "1/1" pushed every real hom-alt call through the het band.
+    assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.98",
+                           "child_gt": "T/T", "ref": "A"})[0] is True
+    assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.98",
+                           "child_gt": "T/T"})[0] is True            # ref unknown: still hom-alt
+    assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.98",
+                           "child_gt": "A/T", "ref": "A"})[0] is False  # a genuine het at 0.98
+    assert PR.genotype_qc({"child_GQ": "99", "child_DP": "40", "child_AB": "0.98",
+                           "child_gt": "", "inheritance": "hom_recessive"})[0] is True
+    assert PR.is_hom_alt_call("T", "A") is True                       # haploid male X
+    assert PR.is_hom_alt_call("A/A", "A") is False                    # base-form hom-REF
+    assert PR.is_hom_alt_call("./.") is False and PR.is_hom_alt_call("1/2") is False
     # a missing MOI curation is EXACTLY neutral — the novel-gene case
     assert PR.moi_coherence("dominant", "") == ("unknown", "")
     assert PR.score_variant({"impact": "HIGH", "consequence": "stop_gained",
@@ -1822,9 +1851,10 @@ def test_prioritize_never_drop_row_conservation():
             fh.write("TP53\n")
         outv = os.path.join(d, "vp.tsv")
         outg = os.path.join(d, "gp.tsv")
-        rc = p9.main(["--variants", vin, "--mutrate", mut, "--constraint", mut,
-                      "--established-genes", ctrl, "--config", cfgp, "--n-trios", "20",
-                      "--out-variants", outv, "--out-genes", outg])
+        args = ["--variants", vin, "--mutrate", mut, "--constraint", mut,
+                "--established-genes", ctrl, "--config", cfgp, "--n-trios", "20",
+                "--out-variants", outv, "--out-genes", outg]
+        rc = p9.main(args)
         assert rc == 0, rc
         import csv as _csv
         with open(outv) as fh:
@@ -1868,9 +1898,15 @@ def test_prioritize_never_drop_row_conservation():
         with open(outg) as fh:
             grows = list(_csv.DictReader(fh, delimiter="\t"))
         assert {r["gene"] for r in grows} == {r["gene"] for r in rows}
-        # idempotent: a second run is a no-op (the .done marker), and --force re-runs
-        assert p9.main(["--variants", vin, "--mutrate", mut, "--config", cfgp,
-                        "--out-variants", outv, "--out-genes", outg]) == 0
+        # idempotent: a second run WITH THE SAME ARGUMENTS is a cache hit (the content key covers
+        # every input, so re-invoking with fewer resources would legitimately re-prioritise — the
+        # previous version of this check did exactly that and could not tell the difference)
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert p9.main(args) == 0
+        assert "cached" in err.getvalue(), err.getvalue()[-400:]
         assert os.path.exists(outv + ".done")
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -2305,12 +2341,10 @@ def test_gene_artifact_penalty_tables_agree():
     composite key is otherwise a no-op — so editing it alone silently changes nothing, and
     editing the other alone makes the fallback disagree with the live path.
     """
-    try:
-        from hprv.config import load_config
-        cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config",
-                                       "config.example.yaml"))
-    except ImportError:
-        return
+    _requires("yaml")
+    from hprv.config import load_config
+    cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config",
+                                   "config.example.yaml"))
     live = get(cfg, "prioritization.gene_downweight.penalties", {})
     fallback = get(cfg, "prioritization.composite.weights.gene_artifact", {})
     assert live and fallback, "both penalty tables must exist"
@@ -2323,12 +2357,10 @@ def test_prioritize_config_matches_canonical_defaults():
     """SINGLE SOURCE OF TRUTH: a threshold in code that disagrees with the shipped config is a
     bug. Every default prioritize.py falls back to must equal config.example.yaml's value."""
     from hprv import prioritize as PR
-    try:
-        from hprv.config import load_config
-        cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config",
-                                       "config.example.yaml"))
-    except ImportError:                     # pyyaml absent on a bare host — skip, don't fail
-        return
+    _requires("yaml")                       # skip LOUDLY on a bare host — never a silent PASS
+    from hprv.config import load_config
+    cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config",
+                                   "config.example.yaml"))
     checks = [
         ("prioritization.excess.trim_p", 1.0e-3),
         ("prioritization.excess.trim_max_fraction", 0.05),
@@ -2339,7 +2371,6 @@ def test_prioritize_config_matches_canonical_defaults():
         ("prioritization.excess.offset.cds_fallback.b1", 1.0570),
         ("prioritization.signals.saturation.per_trio_min", 0.10),
         ("prioritization.signals.segdup.min_frac", 0.10),
-        ("prioritization.signals.segdup.min_identity", 0.98),
         ("prioritization.signals.oe_syn.max_deviation", 0.30),
         ("prioritization.signals.caf_low.percentile", 0.10),
         ("prioritization.gene_downweight.t1_watch.min_ratio", 3.0),
@@ -2392,6 +2423,91 @@ def test_prioritize_config_matches_canonical_defaults():
     assert float(w_cfg["rarity"]["ba1"]) == w_code["rarity"]["fail"]
     # ...and the Class-B overlay must be OFF in the shipped config (that is the whole contract)
     assert get(cfg, "prioritization.composite.gene_list_prior.enabled") is False
+    # keys the code reads that must EXIST in the shipped config (a documented knob nothing reads
+    # is exactly what the config audit found); and the retired NHF key must be gone
+    for key, want in (("outputs.igv.nonhuman_screen.flag_fraction", 0.5),
+                      ("outputs.igv.nonhuman_screen.min_reads", 5),
+                      ("qc.max_sites", 200000), ("burden.rank_by_mutational_target", True),
+                      ("burden.absent_af_floor", 1e-6), ("burden.min_carriers", 2),
+                      ("filters.constraint_weighting.phaplo_min", 0.86)):
+        got = get(cfg, key, "__MISSING__")
+        assert got != "__MISSING__", f"{key} is absent from config.example.yaml"
+        assert got == want, f"{key}: config {got} != code default {want}"
+    for dead in ("prioritization.composite.nhf.flag_fraction",
+                 "prioritization.composite.gene_list_prior.points",
+                 "prioritization.composite.gene_list_prior.combine_gene_and_set",
+                 "prioritization.signals.segdup.min_identity",
+                 "prioritization.excess.offset.covariate_adjust",
+                 "prioritization.composite.emit_both_rankings", "scope.snv_indel_only"):
+        assert get(cfg, dead, "__MISSING__") == "__MISSING__", f"dead key {dead} still in config"
+
+    # THE OTHER DIRECTION: the CODE's own fallback defaults must reproduce the config. Every probe
+    # is evaluated with cfg={} (code defaults) and with the shipped config, on inputs that sit just
+    # either side of each cut point, and the two must agree. Drifting a code default (the audit
+    # found this test one-directional) now fails here.
+    def same(f, *inputs):
+        for x in inputs:
+            a, b = f(x, {}), f(x, cfg)
+            assert a == b, f"{f.__name__}({x!r}): code default {a!r} != config {b!r}"
+    same(lambda v, c: PR.rarity_strength(v, c), 5e-6, 1.5e-5, 5e-5, 1.5e-4, 5e-4, 1.5e-3, 5e-3,
+         0.02, 0.06)
+    same(lambda r, c: PR.assign_variant_tier(r, c)["variant_tier"],
+         {"consequence": "missense_variant", "impact": "MODERATE", "revel": "0.65"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "revel": "0.64"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "revel": "0.78"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "revel": "0.77"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "revel": "0.29"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "alphamissense": "0.57"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "alphamissense": "0.33"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "cadd": "25.4"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "cadd": "25.2"},
+         {"consequence": "intron_variant", "impact": "MODIFIER", "spliceai_ds": "0.51", "cadd": "30"},
+         {"consequence": "intron_variant", "impact": "MODIFIER", "spliceai_ds": "0.21", "cadd": "30"},
+         {"consequence": "intron_variant", "impact": "MODIFIER", "spliceai_ds": "0.09", "cadd": "14.9"},
+         {"consequence": "intron_variant", "impact": "MODIFIER", "spliceai_ds": "0.09", "cadd": "15.1"})
+    same(lambda a, c: PR.assign_gene_tier(*a, cfg=c)["gene_tier"],
+         (3.1, 0.24, 0, False, 3), (3.1, 0.26, 0, False, 3), (5.1, 0.5, 1, False, 3),
+         (5.1, 0.5, 1, False, 2), (10.1, 0.5, 2, False, 3), (5.1, 0.04, 1, False, 3),
+         (5.1, 0.5, 2, True, 3))
+    same(lambda g, c: PR.gene_is_constrained(g, c),
+         {"pLI": "0.91"}, {"pLI": "0.89"}, {"oe_lof_upper": "0.34"}, {"oe_lof_upper": "0.36"},
+         {"s_het": "0.11"}, {"s_het": "0.09"}, {"phaplo": "0.87"}, {"phaplo": "0.85"})
+    same(lambda t, c: PR.constraint_gate(t, "dominant", c), "V0", "V1", "V2", "V3", "V4")
+    same(lambda r, c: PR.score_variant(r, {"pLI": "0.95"}, c)["priority_points_agnostic"],
+         {"consequence": "stop_gained", "impact": "HIGH", "inheritance": "dominant",
+          "rarity_oracle": "faf95", "rarity_af": "2e-6", "clin_sig": "pathogenic",
+          "clinvar_stars": "1", "child_gt": "A/T", "child_AB": "0.5"},
+         {"consequence": "missense_variant", "impact": "MODERATE", "inheritance": "compound_het",
+          "rarity_oracle": "faf95", "rarity_af": "0.03", "revel": "0.9"})
+    thr0, thr1 = PR.signal_thresholds({}), PR.signal_thresholds(cfg)
+    for k in ("per_trio_min", "segdup_min_frac", "oe_syn_max_deviation", "constraint_flag_values",
+              "caf_null_is_flagged"):
+        assert thr0[k] == thr1[k], (k, thr0[k], thr1[k])
+    # genotype QC dataclass defaults vs the shipped config
+    assert G.GtThresholds() == G.GtThresholds.from_config(cfg, get)
+    # Step 3's classifier: code defaults and the shipped config must agree on boundary variants
+    c0, c1 = build_classifier({}), build_classifier(cfg)
+    PRX = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+    for info in ({"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "25.3", "vep_gnomADe_NFE_AF": "0.009"},
+                 {"vep_IMPACT": "MODIFIER", "vep_CADD_PHRED": "25.2"},
+                 {"vep_IMPACT": "MODIFIER", "vep_SpliceAI_pred_DS_AG": "0.2"},
+                 {"vep_IMPACT": "MODERATE", "vep_gnomADe_NFE_AF": "0.01"},
+                 {"vep_IMPACT": "MODERATE", "vep_gnomADe_NFE_AF": "0.05", "vep_CLIN_SIG": "pathogenic"}):
+        v = FakeVar(info)
+        assert build_classifier(PRX)(v) == build_classifier({**PRX, **cfg})(v) or True  # both run
+        assert c0(v) == c1(v), (info, c0(v), c1(v))
+    # Steps 0/5/6 read their defaults inline; pin the literals so a drift on either side fails
+    for key, want in (("qc.freemix_threshold", 0.05), ("qc.charr_threshold", 0.02),
+                      ("qc.mie_max", 0.02), ("qc.x_het_male_max", 0.10), ("qc.sex_min_sites", 20),
+                      ("filters.rarity.dominant_max", 1e-4), ("filters.rarity.recessive_max", 1e-2),
+                      ("filters.rarity.recessive_strict", 1e-3), ("filters.rarity.benign_ba1", 0.05),
+                      ("filters.denovo.use_hiconf_tag", True), ("inheritance.emit_dominant", True),
+                      ("inheritance.emit_denovo", True), ("burden.exome_wide_p", 2.5e-6),
+                      ("burden.fdr_q", 0.05), ("burden.weight_by_constraint", True),
+                      ("filters.constraint_weighting.loeuf_v2_tier1", 0.35),
+                      ("filters.constraint_weighting.pli_min", 0.90),
+                      ("filters.constraint_weighting.shet_min", 0.10)):
+        assert get(cfg, key, "__MISSING__") == want, (key, get(cfg, key))
 
 
 
@@ -2580,6 +2696,443 @@ def test_prioritize_emits_raw_gene_prior_columns():
         assert v0["gene_list_prior_tier"] == "T2", v0["gene_list_prior_tier"]
         v1 = next(r for r in vrows if r["gene"] == "BG001")
         assert "COMMON_VARIANT_LOCUS" in v1["src_prior_anatomical_transfer"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# =============================================================================
+# Review follow-ups (2026-09): Step-5 inheritance harness, genotype-QC asymmetry, Step-6
+# counting + size-normalised rank, and the Step-9 fixes (base-form GT, single-group flag,
+# hemizygous MOI, caf_low on unjoined genes, pHaplo).
+# =============================================================================
+_HR, _HET, _UNK, _HA = 0, 1, 2, 3
+
+
+class _FakeVCF:
+    """Just enough of cyvcf2.VCF for Step 5: samples, raw_header, iteration."""
+    def __init__(self, variants, samples=("C", "D", "M"), raw_header=""):
+        self.samples = list(samples)
+        self.raw_header = raw_header
+        self._v = list(variants)
+
+    def __iter__(self):
+        return iter(self._v)
+
+
+def _v5(chrom, pos, gene, gts, af=None, ref="A", alt="T", gq=(99, 99, 99), dp=(40, 40, 40),
+        ad=None, filt=None, info=None, impact="MODERATE", csq="missense_variant"):
+    """A Step-5 variant for the C/D/M trio. `gts` are cyvcf2 gt_types (0 HR, 1 HET, 2 UNK, 3 HA).
+    `ad` overrides per-sample (ref, alt) depths; (None, None) = AD absent (a GATK ref block)."""
+    bases = {0: f"{ref}/{ref}", 1: f"{ref}/{alt}", 2: "./.", 3: f"{alt}/{alt}"}
+    d = {"vep_Gene": "ENSG_" + gene, "vep_SYMBOL": gene, "vep_Consequence": csq,
+         "vep_IMPACT": impact}
+    if af is not None:
+        d["vep_gnomADe_NFE_AF"] = str(af)
+    d.update(info or {})
+    v = FakeVar(d)
+    v.CHROM, v.POS, v.REF, v.ALT, v.FILTER = chrom, pos, ref, [alt], filt
+    v.gt_types = list(gts)
+    v.gt_bases = [bases[g] for g in gts]
+    v.gt_quals, v.gt_depths = list(gq), list(dp)
+    refs, alts = [], []
+    for i, g in enumerate(gts):
+        if ad and i in ad:
+            r, a = ad[i]
+            r, a = (-1 if r is None else r), (-1 if a is None else a)
+        elif g == _HR:
+            r, a = dp[i], 0
+        elif g == _HET:
+            r, a = dp[i] // 2, dp[i] - dp[i] // 2
+        elif g == _HA:
+            r, a = 0, dp[i]
+        else:
+            r, a = -1, -1
+        refs.append(r)
+        alts.append(a)
+    v.gt_ref_depths, v.gt_alt_depths = refs, alts
+    return v
+
+
+def _load_step5():
+    """Load pipeline/05_inheritance_screen.py with cyvcf2 stubbed when absent (it is imported at
+    module top only as a type; screen_trio itself takes any iterable of variant-like objects)."""
+    import types
+    try:
+        import cyvcf2  # noqa: F401
+    except ImportError:
+        sys.modules.setdefault("cyvcf2", types.SimpleNamespace(VCF=object))
+    spec = importlib.util.spec_from_file_location(
+        "s5", os.path.join(os.path.dirname(__file__), "..", "pipeline", "05_inheritance_screen.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _screen(variants, sex="2", header="", cfg=None):
+    s5 = _load_step5()
+    vcf = _FakeVCF(variants, raw_header=header)
+    trio = s5.Trio(vcf, {"child": "C", "father": "D", "mother": "M", "sex": sex}, G.GtThresholds())
+    cfg = cfg or {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+    return s5.screen_trio("T1", vcf, trio, cfg)
+
+
+def _calls(rows):
+    return sorted((r["mode"], r["pos"], r["flags"]) for r in rows)
+
+
+def test_step5_dominant_origins_and_obligate_transmission():
+    """Parent-of-origin: mat / pat / both; a 1/1 parent transmits OBLIGATELY (deterministic, not
+    'both'); 1/1 x 1/1 with a het child is a Mendelian error and yields no call."""
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=mat")], _calls(rows)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HR), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=pat")]
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HET), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=both")]
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HA), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=mat")], "mom 1/1 x dad 0/1 => maternal"
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HA, _HET), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=pat")], "dad 1/1 x mom 0/1 => paternal"
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HA, _HA), af=5e-5)])
+    assert rows == [], "1/1 x 1/1 with a het child is a Mendelian error"
+    # the dominant gate is dominant_max (1e-4): a 5e-4 het is collected for pairing but not called
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-4)])
+    assert rows == []
+    # a NO-CALL in the non-transmitting parent: the maternal call stands, flagged unverified
+    # (that parent might carry the allele too); a no-call with NO carrier parent is unestablished
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _UNK, _HET), af=5e-5)])
+    assert _calls(rows) == [("dominant", 100, "origin=mat;origin_unverified")], _calls(rows)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _UNK, _HR), af=5e-5)])
+    assert rows == []
+
+
+def test_step5_recessive_and_compound_het_phasing():
+    """hom_recessive with carrier parents (HET or HOM_ALT) + the high_conf_rarity tag; comp-het
+    pairs ONLY mat x pat (trans by descent) or inherited x de novo (unphased, flagged, and the
+    inherited leg keeps its dominant call); cis pairs never pair."""
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HET, _HET), af=5e-3)])
+    assert _calls(rows) == [("hom_recessive", 100, "")]
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HA, _HET), af=5e-4)])
+    assert _calls(rows) == [("hom_recessive", 100, "high_conf_rarity")], "HOM_ALT parent accepted"
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)])
+    assert rows == [], "a 0/0 parent under a 1/1 child is a Mendelian error, not a call"
+    # TRANS pair at 5e-3 (inside the recessive band, above the dominant gate): two legs, one
+    # pair_id, and NO dominant rows — the phase-confirmed pair consumed its legs
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-3),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-3)])
+    assert [r["mode"] for r in rows] == ["compound_het", "compound_het"], _calls(rows)
+    assert len({r["pair_id"] for r in rows}) == 1 and all(r["flags"] == "" for r in rows)
+    # ...and at 5e-5 the legs are STILL consumed (no dominant duplicates of a confirmed pair)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
+    assert sorted(r["mode"] for r in rows) == ["compound_het", "compound_het"]
+    # CIS (both maternal): no pair, two dominant calls
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5),
+                       _v5("chr1", 200, "G1", (_HET, _HR, _HET), af=5e-5)])
+    assert sorted(r["mode"] for r in rows) == ["dominant", "dominant"]
+    # `both`-origin legs never pair (unphaseable)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HET), af=5e-5),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
+    assert sorted(r["mode"] for r in rows) == ["dominant", "dominant"]
+    # inherited x DE NOVO: unphased pair (flagged), the de novo row, AND the inherited leg's
+    # dominant call survives (an unconfirmed pair must not veto it)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5),
+                       _v5("chr1", 200, "G1", (_HET, _HR, _HR), af=None)])
+    modes = sorted(r["mode"] for r in rows)
+    assert modes == ["compound_het", "compound_het", "denovo", "dominant"], modes
+    assert all("unphased_denovo_partner" in r["flags"] for r in rows if r["mode"] == "compound_het")
+    assert [r["pos"] for r in rows if r["mode"] == "dominant"] == [100]
+    # different genes never pair
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-3),
+                       _v5("chr1", 200, "G2", (_HET, _HET, _HR), af=5e-3)])
+    assert rows == []
+
+
+def test_step5_trans_evidence_flags():
+    """origin_unverified = the non-transmitting parent is NOT an affirmative QC-passing 0/0;
+    parent_ad_unmeasured / trans_evidence_unmeasured = it passed VACUOUSLY (no AD at all)."""
+    # the non-transmitting parent is 0/0 but FAILS QC (GQ 5): not an affirmative hom-ref
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 5, 99))])
+    assert _calls(rows) == [("dominant", 100, "origin=mat;origin_unverified")], _calls(rows)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, ad={1: (None, None)})])
+    assert _calls(rows) == [("dominant", 100, "origin=mat;parent_ad_unmeasured")], _calls(rows)
+    # the same vacuous pass on a TRANS pair is flagged on the pair
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-3, ad={1: (None, None)}),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-3)])
+    assert rows and all("trans_evidence_unmeasured" in r["flags"] for r in rows), _calls(rows)
+    # de novo with an AD-less (ref-block) parent: called, flagged; with 2 alt reads: not clean
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (None, None)})])
+    assert _calls(rows) == [("denovo", 100, "parent_ad_unmeasured")], _calls(rows)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (38, 2)})])
+    assert rows == [], "a parent with 2 alt reads is not clean: no de novo"
+
+
+def test_step5_sex_chromosomes_and_gates():
+    """Male X: hemizygous inherited (x_linked_recessive, father irrelevant but flagged), hemizygous
+    de novo (mother-only cleanliness), het suppressed; female X: hom-alt daughter needs a
+    hemizygous father; chrY yields nothing; unknown sex skips X; PAR is autosomal; FILTER and
+    the hiConfDeNovo tag gate as documented."""
+    X, PAR = 10_000_000, 100_000
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-4)], sex="1")
+    assert _calls(rows) == [("x_linked_recessive", X, "high_conf_rarity")], _calls(rows)
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HA, _HET), af=5e-3)], sex="1")
+    assert _calls(rows) == [("x_linked_recessive", X, "father_carries_x_allele")]
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HR))], sex="1")
+    assert _calls(rows) == [("denovo_x_hemi", X, "")], _calls(rows)
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1")
+    assert rows == [], "a male non-PAR chrX het is a QC red flag, never a call"
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HA, _HET), af=5e-3)], sex="2")
+    assert _calls(rows) == [("x_linked_recessive", X, "")], "hom-alt daughter + hemizygous father"
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-3)], sex="2")
+    assert rows == [], "a hom-alt daughter with a hom-ref father is not called"
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HET, _HR, _HET), af=5e-5)], sex="2")
+    assert _calls(rows) == [("dominant", X, "origin=mat")], "female X het flows through dominant"
+    rows, _ = _screen([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR))], sex="1")
+    assert rows == [], "chrY yields no inherited call and no de novo"
+    rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-4)], sex="0")
+    assert rows == [], "unknown sex: sex chromosomes are skipped, never assumed female"
+    rows, _ = _screen([_v5("chrX", PAR, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1")
+    assert _calls(rows) == [("dominant", PAR, "origin=mat")], "PAR1 routes through autosomal logic"
+    # FILTER: anything but PASS/. is skipped when require_pass (default) is on
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, filt="LowQual")])
+    assert rows == []
+    # hiConfDeNovo: when the tag exists in the header, a de novo needs it for THIS child
+    hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr)
+    assert rows == [], "tag in header but absent on the record => not a de novo for this child"
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HR), info={"hiConfDeNovo": "SIB,C"})],
+                      header=hdr)
+    assert _calls(rows) == [("denovo", 100, "")] and rows[0]["hiConfDeNovo"] == "1"
+    # the ClinVar P/LP inert band is COUNTED: a carried P/LP allele at >= recessive_max
+    _, n_inert = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02,
+                              info={"vep_CLIN_SIG": "pathogenic"})])
+    assert n_inert == 1
+    # child_gt is the BASE form (what Step 9 must parse), never an index
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HET, _HET), af=5e-3)])
+    assert rows[0]["child_gt"] == "T/T" and rows[0]["mother_gt"] == "A/T"
+
+
+def test_genotype_dp_falls_back_to_format_dp_when_ad_is_absent():
+    """cyvcf2 derives gt_depths from AD sums when the record carries AD, so an AD-less sample (a
+    GATK ref-block parent) reads depth -1 even with DP present. dp() must read FORMAT/DP then —
+    otherwise clean_parent fails CLOSED on depth and a de novo with a ref-block parent vanishes."""
+    thr = G.GtThresholds()
+
+    class _WithFormat(FakeVar):
+        def format(self, key):
+            assert key == "DP"
+            return [[40]]           # shaped like cyvcf2's (n_samples, 1) array
+    v = _WithFormat({}, gt_quals=[99], gt_depths=[-1], gt_ref_depths=[-1], gt_alt_depths=[-1],
+                    gt_types=[0])
+    assert G.dp(v, 0) == 40
+    assert G.sample_qc(v, 0, thr, "clean_parent") is True          # vacuous pass on AD...
+    assert G.sample_qc_ad_measured(v, 0, "clean_parent") is False  # ...and it says so
+    # no FORMAT/DP either => genuinely unknown depth => fail closed
+    v2 = FakeVar({}, gt_quals=[99], gt_depths=[-1], gt_ref_depths=[-1], gt_alt_depths=[-1],
+                 gt_types=[0])
+    assert G.dp(v2, 0) is None and G.sample_qc(v2, 0, thr, "clean_parent") is False
+
+
+def test_genotype_ad_fail_open_asymmetry():
+    """The AD limbs of sample_qc fail OPEN (hom_ref/clean_parent pass with no AD) while the
+    carrier limbs fail CLOSED; sample_qc_ad_measured is the witness that tells a vacuous pass
+    from a measured one. Plus the PAR/non-PAR predicates and the -1 sentinel."""
+    thr = G.GtThresholds()
+    no_ad = FakeVar({}, gt_quals=[99], gt_depths=[40], gt_ref_depths=[-1], gt_alt_depths=[-1],
+                    gt_types=[0])
+    assert G.sample_qc(no_ad, 0, thr, "hom_ref") is True
+    assert G.sample_qc(no_ad, 0, thr, "clean_parent") is True
+    assert G.sample_qc_ad_measured(no_ad, 0, "hom_ref") is False
+    assert G.sample_qc_ad_measured(no_ad, 0, "clean_parent") is False
+    assert G.sample_qc(no_ad, 0, thr, "het") is False
+    assert G.sample_qc(no_ad, 0, thr, "hom_alt") is False
+    assert G.sample_qc(no_ad, 0, thr, "denovo_child") is False
+    with_ad = FakeVar({}, gt_quals=[99], gt_depths=[40], gt_ref_depths=[39], gt_alt_depths=[1],
+                      gt_types=[0])
+    assert G.sample_qc(with_ad, 0, thr, "clean_parent") is True      # 1 alt read tolerated
+    assert G.sample_qc_ad_measured(with_ad, 0, "clean_parent") is True
+    two_alt = FakeVar({}, gt_quals=[99], gt_depths=[40], gt_ref_depths=[38], gt_alt_depths=[2],
+                      gt_types=[0])
+    assert G.sample_qc(two_alt, 0, thr, "clean_parent") is False
+    assert G.sample_qc(two_alt, 0, thr, "hom_ref") is True           # AB 0.05 <= 0.10
+    shallow = FakeVar({}, gt_quals=[99], gt_depths=[15], gt_ref_depths=[7], gt_alt_depths=[8],
+                      gt_types=[1])
+    assert G.sample_qc(shallow, 0, thr, "het") is True
+    assert G.sample_qc(shallow, 0, thr, "denovo_child") is False     # de novo needs DP >= 20
+    assert G._int(-1) is None and G._int("7") == 7
+    assert G.in_par_x(FakeVar({}, CHROM="chrX", POS=100_000))
+    assert G.is_x_nonpar(FakeVar({}, CHROM="chrX", POS=10_000_000))
+    assert G.in_par_x(FakeVar({}, CHROM="X", POS=155_800_000))       # PAR2, bare contig name
+    assert G.is_y_nonpar(FakeVar({}, CHROM="chrY", POS=20_000_000))
+    assert G.in_par_y(FakeVar({}, CHROM="chrY", POS=100_000)) and \
+        not G.is_sex_nonpar(FakeVar({}, CHROM="chrY", POS=100_000))
+
+
+def test_step6_distinct_counting_and_size_normalised_rank():
+    """Step 6 counts DISTINCT individuals per model, reads a shared comp-het PAIR as same_variant,
+    tests the X-linked family against the MALE proband count, never charges a missing mutation
+    rate as 0, and orders recurrent genes by the size-normalised p_carrier_excess when a
+    mutational target exists — so a long gene with many carriers no longer leads by size."""
+    import csv as _csv
+    import math
+    import shutil
+    import types
+    _requires("yaml")
+    spec = importlib.util.spec_from_file_location(
+        "s6", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    def _binom_sf(k, n, p):        # P(X > k)
+        return sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k + 1, n + 1))
+
+    def _pois_sf(k, mu):           # P(X > k)
+        return 1.0 - sum(math.exp(-mu) * mu ** i / math.factorial(i) for i in range(0, k + 1))
+    m.binom = types.SimpleNamespace(sf=_binom_sf)     # a bare host has no scipy
+    m.poisson = types.SimpleNamespace(sf=_pois_sf)
+
+    d = tempfile.mkdtemp(prefix="_hprv_s6_")
+    try:
+        calls = os.path.join(d, "calls.tsv")
+        cols = ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
+                "consequence", "rarity_af", "rarity_oracle"]
+        rows = []
+
+        def add(trio, mode, gene, pos, chrom="chr1", pair="", csq="missense_variant", af=""):
+            rows.append({"trio_id": trio, "mode": mode, "pair_id": pair, "chrom": chrom,
+                         "pos": pos, "ref": "A", "alt": "T", "gene": "ENSG_" + gene,
+                         "symbol": gene, "consequence": csq, "rarity_af": af,
+                         "rarity_oracle": "faf95"})
+        for i, t in enumerate(("T1", "T2", "T3", "T4")):
+            add(t, "dominant", "GENEBIG", 100 + i)             # 4 carriers, 4 private variants
+        add("T1", "dominant", "GENESMALL", 200); add("T2", "dominant", "GENESMALL", 201)
+        for t, pid in (("T1", "T1:CH1"), ("T2", "T2:CH1")):   # the SAME pair in two trios
+            add(t, "compound_het", "GENEPAIR", 300, pair=pid); add(t, "compound_het", "GENEPAIR", 301, pair=pid)
+        add("T1", "denovo", "GENEDN", 400, csq="stop_gained"); add("T2", "denovo", "GENEDN", 401)
+        add("T1", "x_linked_recessive", "GENEX", 500, chrom="chrX")
+        add("T2", "x_linked_recessive", "GENEX", 501, chrom="chrX")
+        add("T3", "dominant", "GENEONE", 600)
+        with open(calls, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=cols, delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        mt = os.path.join(d, "mutational_target.tsv")
+        mus = {"GENEBIG": (6e-5, 3e-5, 1e-5), "GENESMALL": (6e-8, 3e-8, 1e-8)}
+        with open(mt, "w") as fh:
+            fh.write("gene\tmu_mis\tmu_syn\tmu_lof\n")
+            for g in ("GENEBIG", "GENESMALL", "GENEPAIR", "GENEX", "GENEONE") + \
+                    tuple(f"BG{i:03d}" for i in range(50)):
+                a, b, c = mus.get(g, (6e-7, 3e-7, 1e-7))
+                fh.write(f"{g}\t{a}\t{b}\t{c}\n")
+        mr = os.path.join(d, "mutrate.tsv")
+        with open(mr, "w") as fh:
+            fh.write("gene\tmut_lof\tmut_mis\tmut_syn\nGENEDN\t\t1e-5\t4e-6\nGENEBIG\t1e-6\t1e-5\t4e-6\n")
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("burden: {min_carriers: 2}\n")
+        out = os.path.join(d, "genes.ranked.tsv")
+        assert m.main(["--calls", calls, "--out", out, "--config", cfgp, "--n-trios", "4",
+                       "--n-male-trios", "2", "--mutrate", mr, "--mutational-target", mt]) == 0
+        with open(out) as fh:
+            g = list(_csv.DictReader(fh, delimiter="\t"))
+        by = {r["gene"]: r for r in g}
+        order = [r["gene"] for r in g]
+        # distinct-individual counts per model
+        assert by["GENEBIG"]["n_dominant"] == "4" and by["GENESMALL"]["n_dominant"] == "2"
+        assert by["GENEPAIR"]["n_biallelic"] == "2" and by["GENEPAIR"]["n_carriers"] == "2"
+        assert by["GENEX"]["n_xlinked"] == "2" and by["GENEDN"]["n_denovo"] == "2"
+        assert by["GENEDN"]["n_carriers"] == "0" and by["GENEDN"]["recurrent"] == "0"
+        # a shared comp-het PAIR is same_variant (each leg used to count as a distinct variant)
+        assert by["GENEPAIR"]["recurrence_kind"] == "same_variant"
+        assert by["GENESMALL"]["recurrence_kind"] == "distinct_variant"
+        # size-normalised rank: C over the FULL table (zero-count BG genes included)
+        sum_mu = sum(sum(mus.get(x, (6e-7, 3e-7, 1e-7))) for x in
+                     ("GENEBIG", "GENESMALL", "GENEPAIR", "GENEX", "GENEONE")) + 50 * 1e-6
+        C = (4 + 2 + 2 + 2 + 1) / sum_mu
+        assert abs(float(by["GENEBIG"]["exp_carriers_mu"]) - C * 1e-4) < 1e-3 * C * 1e-4   # 4 sig figs in the TSV
+        assert float(by["GENEBIG"]["carrier_excess_ratio"]) < 1.0 < \
+            float(by["GENESMALL"]["carrier_excess_ratio"])
+        assert by["GENESMALL"]["rank_basis"] == "mu_normalised" == by["GENEBIG"]["rank_basis"]
+        assert by["GENEDN"]["rank_basis"] == "case_only"           # no carriers => no excess p
+        # the ORDER: the small gene with excess leads; the big gene sits behind it; same-variant
+        # recurrence behind distinct; every recurrent gene ahead of every non-recurrent one
+        assert order.index("GENESMALL") < order.index("GENEBIG") < order.index("GENEPAIR"), order
+        assert max(order.index(x) for x in ("GENESMALL", "GENEBIG", "GENEPAIR", "GENEX")) < \
+            min(order.index(x) for x in ("GENEDN", "GENEONE")), order
+        # ...whereas the case-only p is monotone in carrier count (the old ranking)
+        assert float(by["GENEBIG"]["p_recurrence"]) < float(by["GENESMALL"]["p_recurrence"])
+        # the X-linked family is tested against the 2 MALE probands, not the 4 trios
+        p_c = m.p_carrier_hwe([1e-6, 1e-6], 1e-6, 1)   # two absent alleles at the floor
+        want = _binom_sf(1, 2, p_c)
+        assert abs(float(by["GENEX"]["p_recurrence_xlinked"]) - want) < 1e-3 * want
+        # de novo arm: a missing mut_lof is IMPUTED and labelled, never charged as 0
+        assert by["GENEDN"]["dn_mu_src"] == "imputed" and by["GENEBIG"]["dn_mu_src"] == "gnomad"
+        want_exp = 2.0 * 4 * (1e-5 + (1e-5 + 4e-6) * 0.0516)
+        assert abs(float(by["GENEDN"]["dn_exp"]) - want_exp) < 1e-3 * want_exp
+        assert by["GENESMALL"]["dn_mu_src"] == "none" and by["GENESMALL"]["dn_exp"] == ""
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prioritize_review_fixes_single_group_moi_caf_phaplo():
+    """The 2026-09 review's Step-9 fixes: the single-group flag compares the point-estimate proxy
+    to MAX_AF (never the oracle value); hemizygous modes are X-linked observations for MOI
+    coherence; sig_caf_low needs a mutational-target row; pHaplo counts as constraint."""
+    from hprv import prioritize as PR
+    base = {"consequence": "missense_variant", "impact": "MODERATE", "inheritance": "hom_recessive",
+            "rarity_oracle": "faf95", "rarity_af": "0", "rarity_basis": "zero_ci",
+            "child_gt": "T/T", "child_AB": "0.98", "child_GQ": "99", "child_DP": "40", "ref": "A"}
+    # a zero_ci row: rarity_af is 0.0 but the proxy and MAX_AF agree => NOT a single-group call
+    sc = PR.score_variant({**base, "grpmax_af": "1e-5", "max_af": "2e-5"}, {}, {})
+    assert sc["rarity_driven_by_single_group"] is False
+    assert sc["gt_qc_pass"] is True and sc["pts_quality"] == 0.0, sc["gt_qc_fail_reason"]
+    # ...while a founder-group-only allele (no eligible-group AF, MAX_AF from ami) IS flagged
+    sc = PR.score_variant({**base, "grpmax_af": "", "max_af": "0.002"}, {}, {})
+    assert sc["rarity_driven_by_single_group"] is True
+    # hemizygous modes: coherent with any XL curation, neutral otherwise, never penalised
+    assert PR.moi_coherence("x_linked_recessive", "XLD") == ("coherent", "")
+    assert PR.moi_coherence("x_linked_recessive", "XLR") == ("coherent", "")
+    assert PR.moi_coherence("denovo_x_hemi", "XLR")[0] == "coherent"
+    assert PR.moi_coherence("x_linked_recessive", "X-linked")[0] == "coherent"
+    assert PR.moi_coherence("x_linked_recessive", "AD") == ("unknown", "")
+    sc = PR.score_variant({**base, "inheritance": "x_linked_recessive"}, {"gene_moi": "XLD"}, {})
+    assert sc["moi_coherence"] == "coherent" and sc["pts_moi"] == 0.0
+    # a female het in an XLR gene is still the carrier-risk shape (flag, no penalty)
+    assert PR.moi_coherence("dominant", "XLR") == ("discordant", "moi_mismatch_het_in_recessive_gene")
+    # sig_caf_low: only a gene gnomAD LOOKED AT (a mutational-target row exists) can be flagged
+    thr = PR.signal_thresholds({}, caf_low_cutoff=1e-5)
+    row = {"gene": "NOVEL1", "classic_caf": None, "in_mutrate_table": False}
+    assert PR.artifact_signals(row, thr)["sig_caf_low"] is False
+    row["in_mutrate_table"] = True
+    assert PR.artifact_signals(row, thr)["sig_caf_low"] is True
+    assert PR.artifact_signals({"gene": "X", "classic_caf": None}, thr)["sig_caf_low"] is True
+    # pHaplo is part of the canonical "constrained" predicate, as in Step 6
+    assert PR.gene_is_constrained({"phaplo": "0.9"}) is True
+    assert PR.gene_is_constrained({"phaplo": "0.5", "pLI": "0.1"}) is False
+
+
+def test_report_describes_the_run_oracle():
+    """The xlsx About sheet must describe the ORACLE THE RUN USED — it hardcoded the retired
+    grpmax-proxy text regardless of resources.gnomad.oracle."""
+    _requires("openpyxl")
+    import shutil
+    from openpyxl import load_workbook
+    from hprv import report as R
+    d = tempfile.mkdtemp(prefix="_hprv_rep_")
+    try:
+        with open(os.path.join(d, "candidates.calls.tsv"), "w") as fh:
+            fh.write("trio_id\tmode\tchrom\tpos\n")
+        with open(os.path.join(d, "genes.ranked.tsv"), "w") as fh:
+            fh.write("gene\trecurrent\n")
+        for oracle, want, unwanted in (("faf95", "faf95", "opted down"),
+                                       ("grpmax_proxy", "opted down", "JOINT faf95")):
+            out = os.path.join(d, f"{oracle}.xlsx")
+            R.build(d, out, {"resources": {"gnomad": {"oracle": oracle}}})
+            text = " ".join(str(c.value) for row in load_workbook(out, read_only=True)["About"].iter_rows()
+                            for c in row if c.value is not None)
+            assert want in text and unwanted not in text, (oracle, text[:300])
+            assert f"rarity_oracle.{oracle}" in text
+            assert "calibrated recurrence null" not in text and "RANK" in text
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

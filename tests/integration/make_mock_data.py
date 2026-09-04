@@ -115,6 +115,21 @@ add(file="A", chrom="chr1", pos=15000, gene="GENE5", csq="stop_gained", impact="
 # 7) non-PASS -> dropped at Step 1
 add(file="A", chrom="chr1", pos=17000, gene="GENE6", csq="stop_gained", impact="HIGH", filter="VQSRTrancheSNP99.00to99.90+", hidenovo="CH_A",
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)})
+# 6b) de novo whose father is a GATK REF-BLOCK-derived 0/0: GT:DP:GQ with NO AD (a ref block carries
+#     no allele depths). clean_parent passes VACUOUSLY on him (the AD limbs fail open), so the call
+#     must still be made (never-drop) but flagged parent_ad_unmeasured — the flag that makes a
+#     vacuous pass distinguishable from a measured one.
+add(file="A", chrom="chr1", pos=16000, gene="GENEDN2", csq="stop_gained", impact="HIGH",
+    hidenovo="CH_A",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)},
+    adov={"FA_A": "."})
+# 6c) HALF-CALLED father (`0/.`). With cyvcf2's default strict_gt=False this reads as HOM_REF and
+#     would satisfy "both parents confidently hom-ref"; Step 5 opens with strict_gt=True so it is a
+#     NO-CALL: no de novo, and no dominant call either (parent-of-origin is unestablished).
+add(file="A", chrom="chr1", pos=16500, gene="GENEDN3", csq="stop_gained", impact="HIGH",
+    hidenovo="CH_A",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/.", 99, 40), "MO_A": ("0/0", 99, 40)},
+    adov={"FA_A": "40,0"})
 # 8) ClinVar P/LP but LOW impact (synonymous) -> kept at Step 3 via clinvar_plp override
 add(file="A", chrom="chr2", pos=8000, gene="GENE7", csq="synonymous_variant", impact="LOW",
     af=2e-4, clnsig="pathogenic",  # > dominant_max: kept via ClinVar but not a dominant call
@@ -507,11 +522,13 @@ def main(argv=None) -> int:
                          f"{v['revel']}\t{v['alphamissense']}\t"
                          f"{v['faf95']}\t{v['faf95_group']}\t{v['nhomalt']}\n")
 
-    # Step-6 tables
+    # Step-6 tables. The de novo rate table carries mut_syn too, and a gene (GENE5) whose mut_lof
+    # is MISSING: Step 6 must impute it from mis+syn (dn_mu_src=imputed), never charge it as 0.
     with open(os.path.join(W, "mutrate.tsv"), "w") as fh:
-        fh.write("gene\tmut_lof\tmut_mis\n")
-        for g in ("GENE1", "GENE2", "GENE3", "GENE5", "GENEX"):
-            fh.write(f"{g}\t1e-6\t1e-5\n")
+        fh.write("gene\tmut_lof\tmut_mis\tmut_syn\n")
+        for g in ("GENE1", "GENE2", "GENE3", "GENEX"):
+            fh.write(f"{g}\t1e-6\t1e-5\t4e-6\n")
+        fh.write("GENE5\t\t1e-5\t4e-6\n")
     with open(os.path.join(W, "constraint.tsv"), "w") as fh:
         fh.write("gene\toe_lof_upper\tpli\ts_het\n")
         fh.write("GENE1\t0.2\t0.98\t0.15\n")
@@ -646,6 +663,11 @@ def main(argv=None) -> int:
                 info.append(f"nhomalt_joint={v['nhomalt']}")
             rows.append((v["chrom"], v["pos"], refbase(v["pos"]), altbase(v["pos"]),
                          ";".join(info)))
+            if v.get("alt2"):
+                # both alleles of a multiallelic site — a real slim is split, one row per ALT.
+                # Omitting the second leg made it "absent from gnomAD" while the cache carried an
+                # AF for it: the orphan class the Step-5 join-coverage guard exists to catch.
+                rows.append((v["chrom"], v["pos"], refbase(v["pos"]), v["alt2"], ";".join(info)))
         for c, pos, r, a, info in sorted(rows, key=lambda x: (x[0], x[1])):
             fh.write(f"{c}\t{pos}\t.\t{r}\t{a}\t.\t.\t{info}\n")
     # bgzip/tabix are run by run_integration.sh, which owns every tool invocation here.

@@ -66,6 +66,9 @@ def main(argv=None) -> int:
     check(("chr1", 12000) not in plaus, "BA1-common variant dropped at Step 3")
     check(("chr1", 17000) not in plaus, "non-PASS variant dropped before Step 3")
     check(("chr1", 5000) in plaus, "de novo site retained as plausible")
+    # GENEMID must SURVIVE Step 3 (it is gated only at Step 5's dominant_max under faf95), so the
+    # Step-5 "gated" assertion below cannot pass for the wrong reason (dropped at selection)
+    check(("chr2", 17500) in plaus, "the mid-enriched allele survives Step 3 (gated later, at Step 5)")
 
     # --- VEP-only contract: CADD is the ONLY functional predictor, hence the ONLY way any
     # variant below MODERATE impact can survive. If this regresses the screen silently goes
@@ -131,7 +134,8 @@ def main(argv=None) -> int:
     genec = [r for r in calls if r["trio_id"] == "CH_A" and r["symbol"] == "GENEC"]
     check(genec and all(r["mode"] != "compound_het" for r in genec),
           "cis (same-parent) GENEC pair NOT called compound_het")
-    check(any(r["mode"] == "dominant" for r in genec), "cis GENEC variants emitted as dominant instead")
+    check(len([r for r in genec if r["mode"] == "dominant"]) == 2,
+          "BOTH cis GENEC variants are emitted as dominant (neither lost)")
     # --- A HOM-ALT transmitting parent makes parent-of-origin DETERMINISTIC (a 1/1 parent transmits
     # the alt obligately, so a HET child took the alt from it and the ref from the other) — it is NOT
     # the genuine 50/50 "both" case. Collapsing it to "both" barred the pair from trans-pairing, and
@@ -154,6 +158,19 @@ def main(argv=None) -> int:
     # autosomal hom-recessive with a HOM-ALT parent (carrier rule accepts HET or HOM_ALT parents)
     check(has("CH_A", "hom_recessive", "chr1", 8500, "GENE2H"), "hom recessive called with a HOM-ALT parent")
     check(not has("CH_A", "denovo", "chr1", 15000), "low-GQ pseudo-de-novo NOT called (QC gate)")
+    # --- The AD fail-open asymmetry, end to end. A ref-block father (no AD) passes clean_parent
+    # VACUOUSLY: the de novo must still be called (never-drop) and must carry parent_ad_unmeasured,
+    # so a vacuous pass is distinguishable from a measured one. ---
+    dn2 = [r for r in calls if r["trio_id"] == "CH_A" and r["pos"] == "16000"]
+    check(any(r["mode"] == "denovo" for r in dn2),
+          "de novo with a REF-BLOCK (AD-less) father is still called (never-drop)")
+    check(dn2 and all("parent_ad_unmeasured" in (r.get("flags") or "")
+                      for r in dn2 if r["mode"] == "denovo"),
+          "...and is flagged parent_ad_unmeasured (a vacuous clean_parent pass, not a measured one)")
+    # --- strict_gt=True is load-bearing: a HALF-CALLED `0/.` father is a NO-CALL, not hom-ref, so
+    # neither a de novo nor a dominant call may be made at chr1:16500. ---
+    check(not any(r["trio_id"] == "CH_A" and r["pos"] == "16500" for r in calls),
+          "a half-called (0/.) parent yields NO call — strict_gt=True keeps it a no-call")
     # dominant model: rare functional inherited het, recurrent across individuals
     check(has("CH_A", "dominant", "chr2", 10000, "GENED"), "CH_A dominant inherited het GENED")
     check(has("CH_B", "dominant", "chr2", 10000, "GENED"), "CH_B dominant inherited het GENED")
@@ -195,14 +212,33 @@ def main(argv=None) -> int:
     check(genes.get("GENEDD", {}).get("recurrence_kind") == "distinct_variant", "GENEDD = distinct-variant recurrence")
     check(genes.get("GENEDD", {}).get("n_dominant") == "2", "GENEDD has 2 dominant carriers")
     check(genes.get("GENE1", {}).get("n_denovo") == "2", "GENE1 has 2 de novo carriers (secondary)")
-    # calibrated recurrence null: a rare variant recurring in 2 individuals is significant
+    # the case-only recurrence null (a RANK, not a calibrated test): a rare variant recurring in
+    # 2 individuals clears the exome-wide line even in a 2-trio mock — which is the point
     check(float(genes.get("GENED", {}).get("p_recurrence") or 1) < 1e-4,
-          "GENED has a small calibrated recurrence p-value")
+          "GENED has a small case-only recurrence p-value")
     check(genes.get("GENED", {}).get("recurrence_exome_wide_sig") == "1",
-          "GENED recurrence is exome-wide significant")
-    # GENE1 (de novo only) must NOT get an inherited recurrence p-value
-    check(not genes.get("GENE1", {}).get("p_recurrence"),
+          "GENED recurrence clears the exome-wide line (case-only null saturates on rare alleles)")
+    # GENE1 (de novo only) must NOT get an inherited recurrence p-value — and it must be PRESENT
+    # (an absent gene would pass a bare `not get()` for the wrong reason)
+    check("GENE1" in genes, "GENE1 is present in genes.ranked.tsv")
+    check("GENE1" in genes and not genes["GENE1"].get("p_recurrence"),
           "GENE1 (de novo only) has no inherited recurrence p-value")
+    # --- SIZE-NORMALISED rank: the mutational-target table gives every gene an expected carrier
+    # count, so recurrent genes are ordered by p_carrier_excess (rank_basis=mu_normalised), not by
+    # the size-monotone case-only p. Both GENED and GENEDD are in the table. ---
+    for g in ("GENED", "GENEDD"):
+        check(genes.get(g, {}).get("rank_basis") == "mu_normalised",
+              f"{g} is ranked on the size-normalised p_carrier_excess (rank_basis=mu_normalised)")
+        check(float(genes.get(g, {}).get("exp_carriers_mu") or 0) > 0,
+              f"{g} carries a positive expected carrier count from the mutational target")
+        check(float(genes.get(g, {}).get("carrier_excess_ratio") or 0) > 1,
+              f"{g} (2 carriers against a tiny target) shows carrier excess > 1")
+    # --- de novo arm: a MISSING mu_lof is imputed and labelled, never charged as 0 ---
+    check(genes.get("GENE1", {}).get("dn_mu_src") == "gnomad",
+          "GENE1's de novo expectation uses its measured rates (dn_mu_src=gnomad)")
+    g5 = genes.get("GENE5", {})
+    check((not g5) or g5.get("dn_mu_src") in ("imputed", "none"),
+          "a gene with no mut_lof is imputed or untested, never charged mu_lof=0")
 
     # --- chrM is OUT OF SCOPE and must never reach any output. The mock carries a near-fixed
     # rCRS haplogroup variant (m.8860A>G, whole trio hom-alt) in BOTH trios. Un-excluded it fires
@@ -246,6 +282,28 @@ def main(argv=None) -> int:
         # regresses a reviewer silently receives a shortened list with no counter recording it.
         check(len(pv) == len(src),
               f"never-drop: prioritized rows == input rows ({len(src)}; got {len(pv)})")
+        # --- Genotype QC must READ the base-form GT Step 5 writes (`T/T`, never `1/1`). Every
+        # hom-alt call carries AB ~1.0, so a zygosity test that never fires pushed them all through
+        # the het band: gt_qc_pass=0 and -2 points on every recessive candidate. ---
+        homs = [r for r in pv if r["inheritance"] in ("hom_recessive", "x_linked_recessive")]
+        check(homs and all(r["gt_qc_pass"] == "1" for r in homs),
+              "every hom_recessive / x_linked_recessive call passes genotype QC on its hom-alt band "
+              f"({[r['gt_qc_fail_reason'] for r in homs if r['gt_qc_pass'] != '1'][:3]})")
+        check(homs and all("/" in r["child_gt"] and not r["child_gt"].startswith("1")
+                           for r in homs),
+              "child_gt is the base-form gt_bases string (the fixture really exercises the trap)")
+        # --- n_observed counts DISTINCT (trio, variant) observations; n_rows counts rows. GENE1
+        # carries an unphased de-novo partner, so its four paternal hets are each emitted once per
+        # pair AND as dominant rows: rows must exceed observations there. ---
+        g1 = pg.get("GENE1", {})
+        check(int(g1.get("n_rows") or 0) > int(g1.get("n_observed") or 0),
+              f"GENE1: n_rows ({g1.get('n_rows')}) > n_observed ({g1.get('n_observed')}) — pair legs "
+              "are counted once per pair in rows, once per variant in observations")
+        check(g1.get("n_observed") == "6",
+              f"GENE1 has 6 distinct (trio, variant) observations (got {g1.get('n_observed')})")
+        o4 = pg.get("OR4Q3", {})
+        check(o4.get("n_rows") == o4.get("n_observed") == "4",
+              "OR4Q3 (no pairs) has n_rows == n_observed == 4")
         check({(r["chrom"], r["pos"], r["ref"], r["alt"], r["trio_id"]) for r in pv} ==
               {(r["chrom"], r["pos"], r["ref"], r["alt"], r["trio_id"]) for r in src},
               "never-drop: the prioritized set is exactly the input set (no substitutions)")
@@ -540,6 +598,22 @@ def main(argv=None) -> int:
 
         # --- IDEMPOTENCY: the .done marker means a re-run is a no-op. ---
         check(os.path.exists(vpath9 + ".done"), "Step 9 wrote its .done marker (idempotent)")
+        # --- the C-over-the-full-universe contract: the zero-count background genes were IN the
+        # fit (the mock has 120 BG genes with no candidate), and the Step-5 join-coverage guard
+        # found NO orphan (a variant with a cache AF but no gnomAD record => broken transfer). ---
+        check(int(acount.get(("09_prioritize", "gene_universe_zero_count")) or 0) >= 100,
+              "the null was fit over the FULL universe incl. zero-count genes "
+              f"(zero-count = {acount.get(('09_prioritize', 'gene_universe_zero_count'))})")
+        check(acount.get(("05_inheritance", "rarity_faf95_absent_but_cache_has_af")) == "0",
+              "no call has a cache AF but no gnomAD record (the faf95 join covered every variant)")
+        # the distinct-observation unit is recorded, and the MOI term is exercised on a hemizygous
+        # male call as an X-linked observation (never charged as an autosomal recessive one)
+        check(("09_prioritize", "observations_distinct") in acount,
+              "audit records the distinct-observation count Step 9 measures excess on")
+        xl = [r for r in pv if r["inheritance"] == "x_linked_recessive"]
+        check(xl and all(r["moi_coherence"] in ("coherent", "unknown") and float(r["pts_moi"]) == 0.0
+                         for r in xl),
+              "hemizygous male calls are never charged an autosomal MOI discordance")
 
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")
