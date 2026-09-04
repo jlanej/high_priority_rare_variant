@@ -21,6 +21,7 @@ import sys
 
 from cyvcf2 import VCF, Writer
 
+from hprv import annotations as A
 from hprv import audit
 from hprv.config import load_config
 from hprv.selection import build_classifier
@@ -37,6 +38,21 @@ def main(argv=None) -> int:
     classify = build_classifier(cfg)
 
     vcf = VCF(args.inp)
+    # HEADER GUARD for the faf95 arm. Under `oracle: faf95` the rarity value of every variant is
+    # read from the gnomAD joint transfer; if that transfer never happened (a failed or skipped
+    # Step 2 transfer, or an ingest run without the slim) frequency() returns None for EVERY
+    # variant, every gate passes, and BA1-common alleles become candidates while the run exits 0.
+    # Step 2 now halts on that too; this is the belt to its braces.
+    if A.rarity_oracle(cfg) == "faf95":
+        witness = A.F["gnomad_af_joint"]
+        if f"##INFO=<ID={witness}," not in vcf.raw_header:
+            sys.stderr.write(
+                f"ERROR: resources.gnomad.oracle is 'faf95' but {args.inp} declares no INFO/"
+                f"{witness} — the gnomAD joint slim was never transferred in Step 2, so every "
+                "variant would read as ABSENT from gnomAD (= rarest) and no rarity gate would "
+                "fire. Fix the slim (resources.gnomad.sites_slim) and re-run Step 2, or set "
+                "oracle: grpmax_proxy deliberately.\n")
+            return 1
     vcf.add_info_to_header({
         "ID": "hprv_keep_reason", "Number": "1", "Type": "String",
         "Description": "Why this site was retained by Step 3 (evidence category)",

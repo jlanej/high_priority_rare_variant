@@ -17,9 +17,10 @@
 # price, both prefixed with their own namespace so the different oracle is visible at a glance,
 # and both guarded by a 0-match check below:
 #   - clinvar_* : ClinVar review status / GOLD STARS (CLNREVSTAT is absent from the cache).
-#   - gnomad_*  : faf95 + nhomalt from the gnomAD v4.1 JOINT slim (OPTIONAL). faf95's CI
-#                 correction needs AC/AN, which the cache omits. Without it the rarity oracle
-#                 falls back to the grpmax point-estimate proxy — see annotations.frequency().
+#   - gnomad_*  : faf95 + nhomalt from the gnomAD v4.1 JOINT slim — REQUIRED under the default
+#                 oracle (resources.gnomad.oracle: faf95; a run halts without it), optional only
+#                 under grpmax_proxy. faf95's CI correction needs AC/AN, which the cache omits.
+#                 ONE oracle per run; the arms never cross — see annotations.frequency().
 #
 # The remaining cost is real and deliberate; see docs/allele_frequency.md for the ledger:
 #   - no LOFTEE (pLoF confidence), no exome/genome discordance flag
@@ -92,43 +93,47 @@ VEP_VERSION="${HPRV_VEP_VERSION:-115}"
 
 # The $OUT-complete short-circuit applies only to run styles that PRODUCE $OUT (default, ingest,
 # gather). --shard-contig produces a per-contig shard and --emit-shard-manifest produces a manifest.
+# --- CONTENT KEYS ------------------------------------------------------------------------------
+# Two keys, because two things are cached:
+#   _vkey — everything that shapes a per-contig VEP SHARD: the sites union, the cache (dir +
+#           version) and the plugin score files. EVERY shard .done carries it. It used to be an
+#           existence-only marker while only $OUT carried a key, so a re-unioned cohort (a trio
+#           added) or a newly supplied plugin file was annotated from the STALE shards and $OUT was
+#           then re-stamped with the NEW key — a third run said "already complete" (reproduced).
+#   _skey — _vkey plus everything else that shapes $OUT: the two bcftools transfers (ClinVar, the
+#           gnomAD slim), the CSQ selector and the oracle. A new ClinVar release, a newly supplied
+#           REVEL/AlphaMissense/SpliceAI/CADD file, or `csq_select: mane` all change this output
+#           while leaving the union byte-identical, so an input-only key would serve the old
+#           annotation forever.
+# Resource identity is path+size+mtime, NOT a content hash: these are 0.2-80 GB of static,
+# version-pinned reference data whose bytes never change in place, and cksum'ing ~80 GB of CADD on
+# every invocation would dominate the step's startup. The key source is the sites union normally,
+# the ingested VEP VCF under --vep-vcf (where --sites is not required, so $SITES may be empty).
+_kin="$SITES"; is_set "$PRE_VEP" && _kin="$PRE_VEP"
+_vkey=""; _skey=""
+if [[ -f "$_kin" ]]; then
+    _vkey="$(cksum < "$_kin" | awk '{print $1"-"$2}')"
+    _vkey+="-$(cksum <<<"cache=${HPRV_VEP_CACHE:-}|v=${VEP_VERSION}" | awk '{print $1}')"
+    for _res in "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
+                "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
+                "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}"; do
+        if is_set "$_res" && [[ -e "$_res" ]]; then
+            _vkey+="-$(cksum <<<"$_res$(hprv_stat_key "$_res")" | awk '{print $1}')"
+        else
+            _vkey+="-0"   # absent is itself a state: supplying the file later must invalidate
+        fi
+    done
+    _skey="$_vkey"
+    for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_GNOMAD_SITES:-}"; do
+        if is_set "$_res" && [[ -e "$_res" ]]; then
+            _skey+="-$(cksum <<<"$_res$(hprv_stat_key "$_res")" | awk '{print $1}')"
+        else
+            _skey+="-0"
+        fi
+    done
+    _skey+="-$(cksum <<<"sel=${HPRV_CSQ_SELECT:-}|oracle=${HPRV_GNOMAD_ORACLE:-faf95}" | awk '{print $1}')"
+fi
 if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
-    # Keyed to the INPUT that produced $OUT, so a re-unioned cohort (Step 1 rebuilt because the trio
-    # set changed) correctly invalidates the annotated union instead of being masked by a bare
-    # existence marker. Without this, Step 1's keyed invalidation would not propagate: Step 2 would
-    # skip and Step 3 would select from stale annotations.
-    # The key source differs by run style: the sites union normally, the ingested VEP VCF under
-    # --vep-vcf (where --sites is not required at all, so $SITES may be empty).
-    _kin="$SITES"; is_set "$PRE_VEP" && _kin="$PRE_VEP"
-    _skey=""; [[ -f "$_kin" ]] && _skey="$(cksum < "$_kin" | awk '{print $1"-"$2}')"
-    # The ANNOTATION RESOURCES are part of the key, not just the input sites. A new ClinVar
-    # release reclassifies variants and a newly-supplied REVEL/AlphaMissense file adds columns —
-    # both change this output while leaving the sites union byte-identical, so a sites-only key
-    # reports "already complete" and serves the old annotation forever. (Exactly the staleness
-    # Step 9's content key was rewritten to close.) Identity is path+size+mtime, NOT a content
-    # hash: these are 0.2-80 GB of static, version-pinned reference data whose bytes never change
-    # in place, and cksum'ing the ~80 GB of CADD on every invocation to detect a swap that shows
-    # up in the stat anyway would dominate the step's startup.
-    if [[ -n "$_skey" ]]; then
-        # EVERY annotation resource, not just the new ones. SpliceAI matters MOST here and was
-        # the omission that made this a bug rather than a nicety: it is a SELECTION keep-path
-        # (selection.py checks it before CADD), so a run made with spliceai_required:false and
-        # re-run after downloading the scores would hit `is_done`, match the key, and screen
-        # forever against a union that has no SpliceAI — silently, since the "configured but
-        # nothing lifted" warning lives inside the skipped path. CADD has the same shape and
-        # needs no non-default config at all.
-        for _res in "${HPRV_CLINVAR_VCF:-}" "${HPRV_GNOMAD_SITES:-}" \
-                    "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" \
-                    "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
-                    "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}"; do
-            if is_set "$_res" && [[ -e "$_res" ]]; then
-                _skey+="-$(cksum <<<"$_res$(stat -c '%s-%Y' "$_res" 2>/dev/null \
-                          || stat -f '%z-%m' "$_res" 2>/dev/null)" | awk '{print $1}')"
-            else
-                _skey+="-0"   # absent is itself a state: supplying the file later must invalidate
-            fi
-        done
-    fi
     # An unreadable input leaves the key empty -> never skip; recomputing is the safe direction
     # (the missing input then fails loudly below rather than silently reusing a stale annotation).
     if [[ -n "$_skey" ]] && is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_skey" ]]; then
@@ -137,8 +142,10 @@ if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
 fi
 
 outdir="$(abspath_dir "$OUT")"; mkdir -p "$outdir"
-# Bind every resource dir so tool calls see them inside/outside the container.
-binds="$outdir"
+# Bind every resource dir so tool calls see them inside/outside the container — including the
+# scratch dir, where the per-contig subsets, split-vep output and the transfer outputs live.
+mkdir -p "$HPRV_TMPDIR"
+binds="$outdir $HPRV_TMPDIR"
 for r in "$SITES" "$REF" "$PRE_VEP" "${HPRV_VEP_CACHE:-}" "${HPRV_VEP_PLUGINS:-}" \
          "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
          "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
@@ -163,7 +170,15 @@ enum_contigs() { hprv_run -- bcftools index -s "$SITES" | awk -F'\t' '($3+0)>0{p
 annotate_one_contig() {  # $1 = contig ; requires vep_args set
     local c="$1" sd; sd="$(shard_dir)"; mkdir -p "$sd"
     local out="$sd/vep.${c}.vcf.gz"
-    if is_done "$out"; then log "  [$c] cached (resume)"; return 0; fi
+    # Resume ONLY on a matching VEP-input key (see _vkey above). A shard made from an older union or
+    # without a plugin that is configured now is stale, and must be re-annotated, not reused.
+    if is_done "$out"; then
+        if [[ -n "$_vkey" && "$(cat "$out.done" 2>/dev/null)" == "$_vkey" ]]; then
+            log "  [$c] cached (resume)"; return 0
+        fi
+        log "  [$c] shard is STALE (union/cache/plugin inputs changed) — re-annotating"
+        rm -f "$out" "$out.done" "$out.tbi" "$out.csi"
+    fi
     local sub="${HPRV_TMPDIR:-/tmp}/sites.${c}.$$.vcf.gz"
     # Brace-quote the contig as a whole region: htslib's region parser splits an unquoted
     # `contig:pos` on ':', so a GRCh38 ALT_HLA contig (e.g. `HLA-A*01:01:01:01`, present in the
@@ -174,7 +189,7 @@ annotate_one_contig() {  # $1 = contig ; requires vep_args set
     hprv_run -- bcftools view -r "{$c}" -Oz -o "$sub" "$SITES"
     log "  [$c] VEP ($(count_variants "$sub") sites)"
     hprv_run -- vep "${vep_args[@]}" -i "$sub" -o "$out"
-    require_intact_bgzip "$out"; mark_done "$out"; rm -f "$sub"
+    require_intact_bgzip "$out"; printf '%s\n' "$_vkey" > "$out.done"; rm -f "$sub"
 }
 # Verify EVERY expected shard is complete, then concat (file order = sorted) into $vep_vcf. The
 # verify IS the coherence guarantee: gather never builds a PARTIAL call set even if a scheduler
@@ -185,12 +200,15 @@ gather_shards() {  # writes $vep_vcf
     local c so missing=0
     while IFS= read -r c; do
         so="$sd/vep.${c}.vcf.gz"
-        if is_done "$so"; then printf '%s\n' "$so" >> "$list"
+        if is_done "$so" && [[ -n "$_vkey" && "$(cat "$so.done" 2>/dev/null)" == "$_vkey" ]]; then
+            printf '%s\n' "$so" >> "$list"
+        elif is_done "$so"; then
+            warn "gather: shard for contig '$c' is STALE (made from different VEP inputs): $so"; missing=$((missing + 1))
         else warn "gather: shard for contig '$c' is missing/incomplete: $so"; missing=$((missing + 1)); fi
     done < <(enum_contigs)
     [[ -s "$list" ]] || die "gather: no completed shards under $sd — run the scatter first"
-    [[ "$missing" -eq 0 ]] || die "gather: $missing contig shard(s) missing/incomplete — the call set \
-would be PARTIAL. Re-run the scatter (only contigs without a .done re-run), then gather again."
+    [[ "$missing" -eq 0 ]] || die "gather: $missing contig shard(s) missing/incomplete/stale — the call set \
+would be PARTIAL or MIXED. Re-run the scatter (only contigs without a current .done re-run), then gather again."
     log "Step 2: gather — concatenating $(wc -l < "$list" | tr -d ' ') annotated contig shards"
     hprv_run -- bcftools concat -f "$list" -Oz -o "$vep_vcf"
     require_intact_bgzip "$vep_vcf"
@@ -236,6 +254,36 @@ coordinate downstream assumes GRCh38. Proceeding on the assumption it is GRCh38.
         *"##VEP=\"v${VEP_VERSION}"*) ;;
         *) warn "--vep-vcf was not made by VEP v${VEP_VERSION} (resources.vep.version) — transcript models and cached frequencies may differ from what the config documents";;
     esac
+    # SHAPE + COVERAGE, both fatal. Step 3 selects from this file and Step 4 intersects every trio
+    # with it ALLELE-EXACTLY (`isec -c none`), so a union site the external VCF lacks — or carries
+    # only inside a multi-ALT record — is dropped from every trio with no counter. Multi-ALT is
+    # also wrong on its own: --flag_pick marks ONE consequence per RECORD, so `-s pick` would hand
+    # one allele's annotation to the site.
+    _n_multi="$(hprv_run -- bcftools query -i 'N_ALT>1' -f '\n' "$PRE_VEP" | wc -l | tr -d '[:space:]')"
+    [[ "${_n_multi:-0}" -eq 0 ]] || die "--vep-vcf carries $_n_multi multi-allelic record(s). Split it \
+first (bcftools norm -m- -f REF, as Step 1 does for the union): --flag_pick picks ONE consequence per \
+record, and Step 4's allele-exact intersect would silently drop every such site from every trio."
+    if [[ -n "$SITES" && -f "$SITES" ]]; then
+        _n_union="$(count_variants "$SITES")"
+        _ukeys="$HPRV_TMPDIR/union.keys.$$"
+        hprv_run -- bcftools query -f '%CHROM:%POS:%REF:%ALT\n' "$SITES" > "$_ukeys"
+        _n_cov="$(hprv_run -- bcftools query -f '%CHROM:%POS:%REF:%ALT\n' "$PRE_VEP" \
+                  | awk 'NR==FNR{k[$0]=1; next} ($0 in k){c++} END{print c+0}' "$_ukeys" -)"
+        rm -f "$_ukeys"
+        log "Step 2: ingest covers $_n_cov / $_n_union cohort union sites"
+        audit 02_annotate ingest_union_sites_uncovered "$((_n_union - _n_cov))"
+        if [[ "$_n_cov" -lt "$_n_union" ]]; then
+            if [[ "${HPRV_INGEST_ALLOW_PARTIAL:-0}" == "1" ]]; then
+                warn "--vep-vcf covers only $_n_cov of $_n_union union sites; the $((_n_union - _n_cov)) \
+uncovered site(s) will be DROPPED from every trio at Step 4 (HPRV_INGEST_ALLOW_PARTIAL=1; recorded in the audit)"
+            else
+                die "--vep-vcf covers only $_n_cov of the $_n_union cohort union sites; the \
+$((_n_union - _n_cov)) uncovered site(s) would be dropped from every trio at Step 4 with no counter. \
+Annotate the union itself ($SITES) with VEP, or set HPRV_INGEST_ALLOW_PARTIAL=1 to proceed and have \
+the loss recorded in audit/counts.tsv (02_annotate/ingest_union_sites_uncovered)."
+            fi
+        fi
+    fi
     vep_vcf="$PRE_VEP"
     audit 02_annotate input_sites "$n_sites"
 elif [[ "$GATHER" -eq 1 ]]; then
@@ -332,7 +380,8 @@ else
     # --gather; see pipeline/slurm/). CORRECTNESS: this stays byte-identical to a single run —
     # only the vep call is sharded, split-vep and the guards run once on the reassembled whole.
     # A sharded==single equivalence test guards this (tests/integration).
-    case "${HPRV_VEP_SHARD_BY_CONTIG:-1}" in 1|true|yes|on) vshard=1;; *) vshard=0;; esac
+    # `True` as well: config.py now emits lowercase booleans, but a hand-exported env var may not.
+    case "${HPRV_VEP_SHARD_BY_CONTIG:-1}" in 1|true|True|TRUE|yes|on) vshard=1;; *) vshard=0;; esac
     if [[ "$vshard" -eq 1 && ( -f "$SITES.tbi" || -f "$SITES.csi" ) ]]; then
         shard_tags=()
         while IFS= read -r _c; do shard_tags+=("$_c"); done < <(enum_contigs)
@@ -466,6 +515,34 @@ split_vcf="$HPRV_TMPDIR/split.vcf.gz"
 # option `--threads'"); passing it aborts the step. $THREADS applies to vep --fork above.
 hprv_run -- bcftools +split-vep -c "$have_fields" -s "$sel" -p vep_ \
     -Oz -o "$split_vcf" "$vep_vcf"
+
+# --- VALUE-level 0-lift guards for the plugin scores ---------------------------------------
+# The header checks above prove only that a plugin LOADED — it declares its CSQ keys either way.
+# A score file on the wrong build, with a bad tabix index or the wrong contig naming yields
+# declared-but-EMPTY columns with no error (tabix simply returns nothing, exit 0), which is
+# exactly the failure `spliceai_required` exists to catch and cannot see from a path test. Any
+# cohort union has thousands of scored SNVs, so 0 is a broken resource, never a rare cohort.
+# Same class as the frequency guard below, and it dies the same way.
+_n_present() { hprv_run -- bcftools query -i "INFO/$1!=\".\"" -f '\n' "$split_vcf" | wc -l | tr -d '[:space:]'; }
+if is_set "${HPRV_SPLICEAI_SNV:-}" && [[ -e "${HPRV_SPLICEAI_SNV:-}" ]] && _have SpliceAI_pred_DS_AG \
+   && [[ "${n_sites:-0}" -gt 0 ]]; then
+    _n_sai="$(_n_present vep_SpliceAI_pred_DS_AG)"
+    log "Step 2: SpliceAI delta scores present on $_n_sai / $n_sites sites"
+    [[ "${_n_sai:-0}" -gt 0 ]] || die "SpliceAI is configured and its plugin loaded, but NOT ONE of $n_sites sites \
+received a delta score — the score files are inert (wrong build, wrong contig naming, or a bad .tbi: tabix \
+returns nothing and exits 0). The splice keep-path would be silently dead. Verify the raw snv/indel VCFs \
+are GRCh38, chr-prefixed like this cohort, bgzipped and tabix-indexed; or set spliceai_required: false \
+and unset the paths to run deliberately without it."
+fi
+if is_set "${HPRV_CADD_SNV:-}" && [[ -e "${HPRV_CADD_SNV:-}" ]] && _have CADD_PHRED \
+   && [[ "${n_sites:-0}" -gt 0 ]]; then
+    _n_cadd="$(_n_present vep_CADD_PHRED)"
+    log "Step 2: CADD scores present on $_n_cadd / $n_sites sites"
+    [[ "${_n_cadd:-0}" -gt 0 ]] || die "CADD is configured and its plugin loaded, but NOT ONE of $n_sites sites \
+received a PHRED score — the score files are inert (wrong build, wrong contig naming, truncated download, or a \
+bad .tbi). CADD is the only keep-path for anything below MODERATE impact, so the screen would silently go \
+impact-only. Re-fetch/verify with prepare_resources.sh, or unset cadd_snv/cadd_indel to run deliberately without it."
+fi
 # $HPRV_TMPDIR defaults to the PERSISTENT $W/tmp and is never cleaned, while split.vcf.gz is
 # REWRITTEN every run. index_vcf() is a no-op when any index exists, so a stale index left by a run
 # that died after this point (e.g. at the frequency guard below) would be reused here and then
@@ -519,13 +596,21 @@ else
 fi
 
 # --- gnomAD joint slim: faf95 + nhomalt (the SECOND external transfer) ---------------------
-# THE most consequential optional resource. It replaces the rarity oracle's grpmax point-estimate
-# PROXY with gnomAD's real faf95 (the 95% CI lower bound), which is the quantity ACMG/ClinGen
-# specify for frequency filtering. The cache cannot supply it at any price: the CI correction
-# needs AC/AN, which the cache omits. Prefixed `gnomad_`.
+# THE most consequential resource, and REQUIRED under the default oracle. It supplies gnomAD's
+# real faf95 (the 95% CI lower bound), the quantity ACMG/ClinGen specify for frequency
+# filtering; the cache cannot supply it at any price (the CI correction needs AC/AN, which the
+# cache omits). Prefixed `gnomad_`.
+#
+# ONE ORACLE PER RUN (resources.gnomad.oracle -> HPRV_GNOMAD_ORACLE). The oracle is a config
+# choice, not a consequence of which files happen to exist, so under `faf95` a missing slim or a
+# FAILED transfer is a hard stop: warning-and-continuing would leave the run on the faf95 arm with
+# no gnomad_* fields at all, frequency() would read None for EVERY variant, every gate would pass
+# (BA1-common alleles included), rarity_basis would say `absent` on every row, and the run would
+# exit 0. Under `grpmax_proxy` the slim is genuinely optional and only nhomalt is lost.
 #
 # EXPECT MORE CANDIDATES, not fewer. faf95 <= the point estimate, so the same cutoffs stop
 # discarding low-count alleles whose confidence interval never justified the call.
+_oracle="${HPRV_GNOMAD_ORACLE:-faf95}"
 if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "${HPRV_GNOMAD_SITES:-}" ]]; then
     gn_out="$HPRV_TMPDIR/gnomad_annotated.vcf.gz"
     # Renamed on transfer so the INFO names are stable regardless of which gnomAD release the
@@ -541,15 +626,15 @@ if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "${HPRV_GNOMAD_SITES:-}" ]]; then
         index_vcf "$gn_out"
         # 0-MATCH GUARD. Same class as ClinVar's, and it matters more here because this feeds the
         # rarity gate: a slim on the wrong build or with the wrong contig naming transfers ZERO
-        # records and exits 0, every faf95 reads absent, frequency() silently falls back to the
-        # proxy for EVERY variant, and the run looks like a successful faf95 run that never was.
+        # records and exits 0, every variant then reads ABSENT from gnomAD (= rarest) under the
+        # faf95 arm, no gate fires, and the run looks like a successful faf95 run that never was.
         #
         # NB the denominator is deliberately "sites with ANY gnomAD INFO", not "sites with faf95".
         # A faf95 count of 0 is legitimate — gnomAD emits fafmax as MISSING wherever no group's CI
-        # lower bound clears 0, which is 80% of a chr22 sample. Guarding on faf95 alone would abort
+        # lower bound clears 0, roughly 80% of a chr22 sample. Guarding on faf95 alone would abort
         # correct runs; guarding on the JOIN proves the join. That same AF_joint field is also what
-        # lets annotations.frequency() tell "gnomAD says faf95 is 0" (rarest) from "gnomAD has
-        # never seen this" (use the proxy) — it is a witness, not just a reporting column.
+        # lets annotations.frequency() tell "gnomAD says faf95 is 0" (zero_ci, rarest) from "gnomAD
+        # has never seen this" (absent) — it is a witness, not just a reporting column.
         n_gn="$(hprv_run -- bcftools query -i 'INFO/gnomad_AF_joint!="."' -f '\n' "$gn_out" \
                 | wc -l | tr -d '[:space:]')"
         n_faf="$(hprv_run -- bcftools query -i 'INFO/gnomad_faf95!="."' -f '\n' "$gn_out" \
@@ -557,18 +642,29 @@ if is_set "${HPRV_GNOMAD_SITES:-}" && [[ -e "${HPRV_GNOMAD_SITES:-}" ]]; then
         log "Step 2: gnomAD joint matched $n_gn / $n_sites sites (faf95 present on $n_faf; absent faf95 = no group has a confidently non-zero AF, NOT an error)"
         if [[ "$n_gn" -eq 0 && "$n_sites" -gt 0 ]]; then
             die "0/$n_sites sites matched the gnomAD joint slim ($HPRV_GNOMAD_SITES) — the transfer \
-matched NOTHING, so faf95 would be absent everywhere and every rarity gate would silently fall back to \
-the grpmax proxy while the run looked like a faf95 run. A cohort union always overlaps gnomAD, so this \
-is a broken join: check the slim is GRCh38, its contigs match this cohort (chr-prefixed), and it is \
-tabix-indexed. Set resources.gnomad.sites_slim to '' to run on the proxy deliberately."
+matched NOTHING, so every variant would read ABSENT from gnomAD (= rarest) and no rarity gate would fire, \
+while the run looked like a faf95 run. A cohort union always overlaps gnomAD, so this is a broken join: \
+check the slim is GRCh38, its contigs match this cohort (chr-prefixed), and it is tabix-indexed. Set \
+resources.gnomad.oracle to grpmax_proxy (and sites_slim to '') to run on the point estimate deliberately."
         fi
         split_vcf="$gn_out"
     else
-        warn "gnomAD joint transfer failed (bcftools annotate returned non-zero) — continuing on the grpmax PROXY oracle; faf95/nhomalt will be absent"
         rm -f "$gn_out" "$gn_out".tbi "$gn_out".csi
+        if [[ "$_oracle" != "grpmax_proxy" ]]; then
+            die "gnomAD joint transfer FAILED (bcftools annotate returned non-zero) and resources.gnomad.oracle \
+is 'faf95'. Continuing would leave every variant with no oracle value at all (absent = rarest, no gate fires). \
+Fix the slim ($HPRV_GNOMAD_SITES: is it bgzipped + tabix-indexed, complete, GRCh38?) or set oracle: grpmax_proxy deliberately."
+        fi
+        warn "gnomAD joint transfer failed (bcftools annotate returned non-zero) — the run is on the grpmax PROXY oracle by config, so only nhomalt is lost"
     fi
 else
-    warn "no gnomAD joint slim configured (resources.gnomad.sites_slim) — rarity uses the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward dropping). No faf95, no nhomalt. See docs/allele_frequency.md"
+    if [[ "$_oracle" != "grpmax_proxy" ]]; then
+        die "resources.gnomad.oracle is 'faf95' but no gnomAD joint slim is configured/present \
+(resources.gnomad.sites_slim='${HPRV_GNOMAD_SITES:-}'). Prepare it with 'prepare_resources.sh --only gnomad_sites fetch', \
+or set oracle: grpmax_proxy to run on the VEP-cache point estimate deliberately. (run_pipeline.sh normally \
+halts on this at preflight; this guard covers direct and ingest invocations.)"
+    fi
+    warn "no gnomAD joint slim configured (resources.gnomad.sites_slim) — the run is on the grpmax POINT-ESTIMATE proxy by config (oracle: grpmax_proxy), which sits ~one CI-width stringent on low-count alleles (errs toward dropping). No nhomalt. See docs/allele_frequency.md"
 fi
 
 # --- no other external transfers ---
