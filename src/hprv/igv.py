@@ -20,8 +20,10 @@ from __future__ import annotations
 import csv
 import os
 
-# Flag a call when a MAJORITY of some screened member's ALT-supporting reads classify
-# non-human (over >= min_reads reads — passed in from the config's nonhuman_screen.min_reads).
+# Flag a call when this fraction of some screened member's ALT-supporting reads classify
+# non-human (over >= min_reads reads). Both numbers come from the config
+# (outputs.igv.nonhuman_screen.flag_fraction / .min_reads) so `nhf_flag` here and Step 9's
+# `nhf_status` read the SAME threshold; this constant is only the fallback default.
 NHF_FLAG_FRACTION = 0.5
 
 # Output column order: chrom/pos/ref/alt first (required), then recommended +
@@ -97,7 +99,8 @@ def _load_nhf_tsv(path):
     return m
 
 
-def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf_min_reads=5):
+def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf_min_reads=5,
+                       nhf_flag_fraction=NHF_FLAG_FRACTION):
     """Write variants.tsv. Track columns are populated only when the referenced
     mini-CRAM / VCF exists under data_dir (so the file always loads).
 
@@ -130,13 +133,14 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
         return nhf_cache[key]
 
     def nhf_flag(screened):
-        """1 if any screened member is majority-non-human over >= nhf_min_reads reads; else
-        0 if anything was screened for this variant; else '' (nothing screened)."""
+        """1 if any screened member's non-human fraction is >= nhf_flag_fraction over >=
+        nhf_min_reads reads; else 0 if anything was screened for this variant; else '' (nothing
+        screened)."""
         if not screened:
             return ""
         for frac, reads in screened:
             try:
-                if float(frac) >= NHF_FLAG_FRACTION and int(reads) >= nhf_min_reads:
+                if float(frac) >= float(nhf_flag_fraction) and int(reads) >= nhf_min_reads:
                     return "1"
             except (TypeError, ValueError):
                 continue

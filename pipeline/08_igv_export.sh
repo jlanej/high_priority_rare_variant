@@ -45,7 +45,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$HERE/lib/common.sh"
-export PYTHONPATH="${PYTHONPATH:-}:${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src"
+# prepend our src; avoid a leading ':' (which would put CWD on the import path) when unset
+export PYTHONPATH="${HPRV_HOME:-$(cd "$HERE/.." && pwd)}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # --ref is the CRAM ENCODING reference (needed to decode reference-compressed CRAMs),
 # which may differ from the variant-calling reference used elsewhere; run_pipeline.sh
@@ -90,6 +91,9 @@ WORK="" REF="${HPRV_CRAM_REF:-${HPRV_REF_FASTA:-}}" CRAM_MAP="${HPRV_CRAM_MAP:-}
 EXCLUDE_FLAGS=0
 NHF_EXCLUDE_FLAGS=1796
 KRAKEN2_DB="" NHF_MEMBERS=carriers NHF_CONF=0.05 NHF_MIN_READS=5 NHF_MMAP=""
+# The derived nhf_flag threshold (outputs.igv.nonhuman_screen.flag_fraction) — the SAME number
+# Step 9 reads for nhf_status, passed in rather than hardcoded so the two columns cannot disagree.
+NHF_FLAG_FRAC=0.5
 # NHF classification threads, DECOUPLED from --jobs. --jobs bounds concurrent CRAM slices and is
 # deliberately small (a flaky FUSE/SBFS mount); NHF classification is CPU-bound, reads only the
 # already-sliced mini-CRAMs, and scales with threads. Empty => fall back to --jobs (old behavior).
@@ -110,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --nhf-members) NHF_MEMBERS="$2"; shift 2;;
         --nhf-confidence) NHF_CONF="$2"; shift 2;;
         --nhf-min-reads) NHF_MIN_READS="$2"; shift 2;;
+        --nhf-flag-fraction) NHF_FLAG_FRAC="$2"; shift 2;;
         --nhf-memory-mapping) NHF_MMAP="--memory-mapping"; shift;;
         --nhf-threads) NHF_THREADS="$2"; shift 2;;
         --nhf-emit-manifest) NHF_EMIT_MANIFEST="$2"; shift 2;;
@@ -133,6 +138,7 @@ _nsub=0
 [[ "$_nsub" -le 1 ]] || die "--nhf-emit-manifest / --nhf-trio / --nhf-gather are mutually exclusive"
 NHF_SUBTASK="$_nsub"
 [[ "$NHF_MIN_READS" =~ ^[0-9]+$ ]] || die "--nhf-min-reads must be a non-negative integer"
+[[ "$NHF_FLAG_FRAC" =~ ^[0-9]*\.?[0-9]+$ ]] || die "--nhf-flag-fraction must be a number in [0,1]"
 [[ -n "$WORK" ]] || die "need --work"
 calls="$WORK/candidates.calls.tsv"; resolved="$WORK/trios.resolved.tsv"
 cand="$WORK/trios.candidates.tsv"
@@ -144,7 +150,8 @@ DATA="$WORK/igv"; mkdir -p "$DATA/crams" "$DATA/vcfs"
 # --- source-CRAM map (sample -> path); optional. Looked up on demand (no assoc
 #     arrays, for bash 3.2 portability), matching the bespoke get_cram approach. ---
 HAVE_MAP=0
-binds="$DATA"; is_set "$REF" && [[ -f "$REF" ]] && binds+=" $(abspath_dir "$REF")"
+mkdir -p "$HPRV_TMPDIR"
+binds="$DATA $HPRV_TMPDIR"; is_set "$REF" && [[ -f "$REF" ]] && binds+=" $(abspath_dir "$REF")"
 cram_for() { [[ -f "${CRAM_MAP:-/nonexistent}" ]] || return 0; awk -F'\t' -v s="$1" '$1==s{print $2; exit}' "$CRAM_MAP"; }
 if is_set "$CRAM_MAP" && [[ -f "$CRAM_MAP" ]]; then
     HAVE_MAP=1
@@ -360,6 +367,13 @@ _nhf_unavailable() {
     fi
     warn "Step 8b: $1 — skipping NHF screening"
 }
+# ...and that includes NO DB AT ALL: run_pipeline omits --kraken2-db (and only warns) when
+# resources.kraken2_db is unset or not a directory on this node, which used to make a
+# `--nhf-emit-manifest` plan write no manifest and the SLURM nhf-plan phase report "no trios need
+# NHF work" and go green having screened nothing.
+if [[ "$NHF_SUBTASK" -eq 1 && "$NHF_GATHER" -eq 0 ]] && ! is_set "$KRAKEN2_DB"; then
+    die "Step 8b sub-task requested but no --kraken2-db was supplied (resources.kraken2_db unset, or not a directory on this node — is it in HPRV_BINDS?)"
+fi
 if is_set "$KRAKEN2_DB" && [[ "$NHF_GATHER" -eq 0 ]]; then
     if [[ ! -d "$KRAKEN2_DB" ]]; then
         _nhf_unavailable "kraken2 DB '$KRAKEN2_DB' is not a directory"
@@ -509,12 +523,13 @@ fi
 # --- assemble variants.tsv + sample_qc.tsv + trios.tsv + curation.json ---
 # NHF columns fold in from nhf/<trio>/<sample>.variant_nhf.tsv when Step 8b produced them (the
 # join is on the 0-based key, pos-1); absent files => blank NHF columns (legacy behavior).
-python3 - "$calls" "$resolved" "$DATA" "$WORK/qc_report.tsv" "$NHF_MIN_READS" <<'PY'
+python3 - "$calls" "$resolved" "$DATA" "$WORK/qc_report.tsv" "$NHF_MIN_READS" "$NHF_FLAG_FRAC" <<'PY'
 import sys
 from hprv import igv
-calls, manifest, data, qc, nhf_min = sys.argv[1:6]
+calls, manifest, data, qc, nhf_min, nhf_frac = sys.argv[1:7]
 n = igv.build_variants_tsv(calls, manifest, data, f"{data}/variants.tsv",
-                           nhf_dir=f"{data}/nhf", nhf_min_reads=int(nhf_min))
+                           nhf_dir=f"{data}/nhf", nhf_min_reads=int(nhf_min),
+                           nhf_flag_fraction=float(nhf_frac))
 m = igv.write_sample_qc(qc, manifest, f"{data}/sample_qc.tsv")
 sys.stderr.write(f"  variants.tsv rows: {n}; sample_qc rows: {m}\n")
 PY
@@ -526,7 +541,9 @@ PY
 printf '{"genome": "%s"}\n' "$GENOME" > "$DATA/config.json"   # server --genome hint
 
 audit 08_igv variants "$(($(grep -cve '^[[:space:]]*$' "$DATA/variants.tsv") - 1))"
-audit 08_igv minicrams "$n_extracted"
+# The mini-CRAM count is only known to the run that SLICED them; a --nhf-gather skips Pass 2 and
+# would record 0 (last value wins in the audit summary).
+[[ "$NHF_SUBTASK" -eq 1 ]] || audit 08_igv minicrams "$n_extracted"
 # Gather reporting. UNLIKE Step 2's --annotate-gather, an unscreened member here is LEGITIMATE,
 # not a broken run: `members: carriers` deliberately skips hom-ref parents, a member may have no
 # mini-CRAM, and a failed classify is designed to degrade to blank NHF columns (which

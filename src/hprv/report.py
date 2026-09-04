@@ -19,6 +19,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from hprv import annotations as A
 from hprv.config import get
 
 FONT = "Calibri"
@@ -168,7 +169,9 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
         ("Gene consolidation", "Genes ranked by recurrence across individuals (dominant het / "
                                "biallelic / X-linked), weighted by constraint. The headline result."),
         ("Candidate calls", "One row per candidate per trio: inheritance mode, genotypes, and "
-                            "annotations (gnomAD grpmax AF, CADD, ClinVar)."),
+                            "annotations (gnomAD rarity — rarity_af, with rarity_oracle / "
+                            "rarity_basis saying which quantity and how it arose — CADD, "
+                            "SpliceAI, ClinVar)."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
         ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex, and contamination "
                "(verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),
@@ -195,19 +198,38 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     n_recsig = sum(1 for r in genes
                    if any(r[genes_h.index(c)] == "1" for c in _sig_cols)) if genes_h else 0
     line("Recurrence-significant genes",
-         f"{n_recsig} (exome-wide p < {get(cfg, 'burden.exome_wide_p', 2.5e-6):g} on the calibrated "
-         "recurrence null; any inherited model — dominant / biallelic / X-linked)")
+         f"{n_recsig} (exome-wide p < {get(cfg, 'burden.exome_wide_p', 2.5e-6):g} on the CASE-ONLY "
+         "recurrence null; any inherited model — dominant / biallelic / X-linked). READ AS A RANK, "
+         "NOT A CALIBRATED TEST: the null is built from the variants observed in the cohort, so "
+         "three carriers of private hets clear this line in any cohort of a few hundred trios. "
+         "Where a mutational-target table was supplied, genes.ranked.tsv orders recurrent genes by "
+         "the size-normalised p_carrier_excess (rank_basis) instead.")
     line("", "")
 
-    # key thresholds
+    # key thresholds. The rarity field is the RUN's oracle (resources.gnomad.oracle) — recorded
+    # here from the config, never hardcoded, so the workbook cannot describe the wrong quantity.
+    oracle = A.rarity_oracle(cfg)
     line("Key thresholds (configurable defaults)", "", h2=True)
-    line("Rarity field", f"{gnomad_label} grpmax-proxy AF = max AF over the grpmax-eligible ancestry "
-                         "groups (AFR/AMR/EAS/NFE/SAS), from the VEP cache. A POINT ESTIMATE: "
-                         "faf95 (the 95% CI lower bound) needs AC/AN, which the cache does not "
-                         "carry, so these gates run slightly stringent on low-count alleles.")
-    line("Dominant / de novo rarity", f"grpmax AF < {get(cfg, 'filters.rarity.dominant_max', 1e-4)}")
-    line("Recessive rarity", f"grpmax AF < {get(cfg, 'filters.rarity.recessive_max', 1e-2)}")
-    line("Benign (never rescued)", f"grpmax AF >= {get(cfg, 'filters.rarity.benign_ba1', 0.05)} (ClinGen BA1)")
+    if oracle == "faf95":
+        rarity_field = "faf95"
+        line("Rarity field", f"{gnomad_label} JOINT faf95 (fafmax_faf95_max_joint, transferred from "
+                             "the gnomAD joint sites slim in Step 2): the LOWER bound of the 95% CI "
+                             "on the filtering allele frequency, maximised over the FAF-eligible "
+                             "ancestry groups afr/amr/eas/mid/nfe/sas (Whiffin 2017) — the quantity "
+                             "ACMG/ClinGen specify. An allele gnomAD has but published no faf95 for "
+                             "reads 0 (rarity_basis=zero_ci); an allele with no gnomAD record reads "
+                             "absent (rarest). The VEP-cache point estimates ride along as grpmax_af "
+                             "for review only.")
+    else:
+        rarity_field = "grpmax-proxy AF"
+        line("Rarity field", f"{gnomad_label} grpmax-proxy AF = max AF over the grpmax-eligible "
+                             "ancestry groups (AFR/AMR/EAS/NFE/SAS), from the VEP cache. A POINT "
+                             "ESTIMATE (this run opted down from faf95 via resources.gnomad.oracle): "
+                             "it sits ~one CI-width high on low-count alleles, so these gates run "
+                             "slightly stringent (they err toward dropping).")
+    line("Dominant / de novo rarity", f"{rarity_field} < {get(cfg, 'filters.rarity.dominant_max', 1e-4)}")
+    line("Recessive rarity", f"{rarity_field} < {get(cfg, 'filters.rarity.recessive_max', 1e-2)}")
+    line("Benign (never rescued)", f"{rarity_field} >= {get(cfg, 'filters.rarity.benign_ba1', 0.05)} (ClinGen BA1)")
     line("Genotype QC", f"GQ >= {get(cfg, 'filters.genotype_qc.min_gq', 20)}, "
                         f"DP >= {get(cfg, 'filters.genotype_qc.min_dp', 10)}, "
                         f"het AB {get(cfg, 'filters.genotype_qc.het_ab_min', 0.25)}-"
@@ -220,7 +242,12 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
 
     # ---- provenance (P9): make the run bindable from the workbook itself ----
     line("Provenance", "", h2=True)
-    line("Frequency oracle", gnomad_label + " (from the VEP cache; the sole population-frequency source)")
+    line("Frequency oracle", f"{gnomad_label}, quantity = {oracle} — ONE oracle for the whole run "
+                             "(resources.gnomad.oracle; recorded in audit/counts.tsv as "
+                             f"rarity_oracle.{oracle}). "
+                             + ("Source: the gnomAD v4.1 JOINT sites slim (bcftools transfer, Step 2)."
+                                if oracle == "faf95" else
+                                "Source: the VEP cache's per-population gnomAD point estimates."))
     line("VEP", f"release {get(cfg, 'resources.vep.version', '115')}; cache "
                 f"{os.path.basename(str(get(cfg, 'resources.vep.cache_dir', '')).rstrip('/')) or '(unset)'}")
     cadd_snv = os.path.basename(str(get(cfg, 'resources.vep.cadd_snv', '')))

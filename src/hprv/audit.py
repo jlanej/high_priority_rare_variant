@@ -94,7 +94,10 @@ def summarize(adir, out_md=None):
               f"- genes nominated: {g('06_burden','genes_nominated')}; "
               f"recurrent: {g('06_burden','genes_recurrent')}",
               f"- recurrence exome-wide significant: {g('06_burden','genes_recurrence_exome_wide_sig')}; "
-              f"FDR significant: {g('06_burden','genes_recurrence_fdr_sig')}", ""]
+              f"FDR significant: {g('06_burden','genes_recurrence_fdr_sig')} "
+              "(case-only null — a RANK, not a calibrated test; see docs/gene_burden.md)",
+              f"- genes ranked by the size-normalised p_carrier_excess: "
+              f"{g('06_burden','genes_rank_mu_normalised')}", ""]
 
     text = "\n".join(lines)
     if out_md:
