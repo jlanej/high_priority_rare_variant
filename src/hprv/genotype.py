@@ -62,7 +62,28 @@ def gq(v, i):
 
 
 def dp(v, i):
-    return _int(v.gt_depths[i])
+    """Per-sample depth. Reads FORMAT/DP directly when cyvcf2's `gt_depths` is missing.
+
+    cyvcf2 derives `gt_depths` from the AD sums whenever the record carries an AD field, so a
+    sample with NO AD — a GATK ref-block-derived `0/0` parent, exactly the shape of a parent
+    under a de novo — reads -1 even though its own DP is present. Every `sample_qc` limb tests
+    depth before allele balance, so that sample failed CLOSED on depth: the "AD limbs fail open"
+    analysis never got to run, and a de novo with a ref-block parent was silently dropped rather
+    than called with `parent_ad_unmeasured`. Fall back to the sample's FORMAT/DP.
+    """
+    d = _int(v.gt_depths[i])
+    if d is not None:
+        return d
+    try:
+        arr = v.format("DP")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if arr is None:
+        return None
+    try:
+        return _int(arr[i][0])
+    except (IndexError, TypeError):
+        return None
 
 
 def alt_ad(v, i):
