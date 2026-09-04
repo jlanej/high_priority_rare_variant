@@ -20,14 +20,27 @@ enrichment vs a Samocha mutation model is reported when a mutation-rate table is
 
 See docs/gene_burden.md.
 
+**The recurrence p-values are a RANK, not a calibrated test.** The null is case-only: it is built
+from the frequencies of the variants OBSERVED in the cohort, so for carriers of private (absent)
+variants it saturates — two carriers at N=200 give p≈3e-7, three at N=1000 give 4e-8 — and it is
+monotone in the carrier count, i.e. in gene size. When the mutational-target table (`--mutrate`
+with mu_mis/mu_syn/mu_lof) is supplied, Step 6 therefore also computes a SIZE-NORMALISED rank:
+`exp_carriers_mu = C * mu_g` (C fit over the FULL table, zero-count genes included),
+`carrier_excess_ratio` and a Poisson tail `p_carrier_excess`, and with
+`burden.rank_by_mutational_target: true` (default) orders recurrent genes by that instead, so long
+genes no longer lead by size. See docs/gene_burden.md.
+
 Usage:
   06_gene_burden.py --calls candidates.calls.tsv --out genes.ranked.tsv --config cfg.yaml \
-      [--n-trios N] [--mutrate mutrate.tsv] [--constraint constraint.tsv]
+      [--n-trios N] [--n-male-trios N | --qc-report qc_report.tsv] [--mutrate mutrate.tsv]
+      [--constraint constraint.tsv]
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import gzip
+import io
 import sys
 
 from hprv import annotations as A
@@ -45,10 +58,18 @@ XLINKED_MODES = {"x_linked_recessive"}
 DENOVO_MODES = {"denovo", "denovo_x_hemi"}
 
 
+def _open_text(path):
+    """Open a TSV that may be bgzipped — the prepared mutational-target table IS (.bgz); a plain
+    open() dies on byte 2 with UnicodeDecodeError (the Step-9 gotcha, now shared here)."""
+    if path.endswith((".gz", ".bgz")):
+        return io.TextIOWrapper(gzip.open(path, "rb"))
+    return open(path)
+
+
 def _open_keyed(path, key_names):
     if not path:
         return {}, []
-    with open(path) as fh:
+    with _open_text(path) as fh:
         sniff = fh.readline()
         delim = "\t" if "\t" in sniff else ","
         fh.seek(0)
@@ -135,7 +156,16 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--n-trios", type=int, default=0)
-    ap.add_argument("--mutrate", default="")
+    ap.add_argument("--n-male-trios", type=int, default=0,
+                    help="MALE proband count for the X-linked (hemizygous) null; defaults to the "
+                         "count of inferred_sex==1 rows in --qc-report, else --n-trios")
+    ap.add_argument("--qc-report", default="", help="Step 0 qc_report.tsv (male proband count)")
+    ap.add_argument("--mutrate", default="",
+                    help="Samocha per-gene rate table for the SECONDARY de novo enrichment")
+    ap.add_argument("--mutational-target", default="",
+                    help="per-gene mu_mis/mu_syn/mu_lof table (the gnomAD v2.1.1 constraint file "
+                         "Step 9 also reads; .bgz ok) for the size-normalised recurrence rank. "
+                         "Falls back to --mutrate's columns when omitted.")
     ap.add_argument("--constraint", default="")
     ap.add_argument("--syn-denovo-count", type=int, default=-1,
                     help="[reserved] observed synonymous de novo count for calibration "
@@ -155,6 +185,9 @@ def main(argv=None) -> int:
     # For the recurrence null, an allele absent from gnomAD is floored at the detection
     # limit (~1 / 2*N_gnomAD alleles) so its expected carriers are tiny but non-zero.
     absent_floor = float(get(cfg, "burden.absent_af_floor", 1e-6))
+    rank_by_mu = bool(get(cfg, "burden.rank_by_mutational_target", True))
+    # Same imputation Step 9 uses for a null mu_lof (median mu_lof / (mu_mis + mu_syn)).
+    impute = float(get(cfg, "prioritization.excess.offset.mu_lof_impute_factor", 0.0516))
 
     # --- aggregate distinct individuals per gene, by model ---
     genes, trios = {}, set()
@@ -168,14 +201,15 @@ def main(argv=None) -> int:
             g = genes.setdefault(gene, {
                 "dom": set(), "bi": set(), "x": set(), "dn": set(), "all": set(),
                 "dom_faf": {}, "bi_faf": {}, "x_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
+                # per-trio SETS of variant keys, for same- vs distinct-variant recurrence
+                "dom_sets": {}, "bi_sets": {}, "x_sets": {},
             })
             g["all"].add(trio)
             # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
-            # grpmax_af is Step 5's rarity column (annotations.frequency()). It is a point
-            # estimate whenever faf95 is unavailable, and then sits ~one CI-width high on low-AC
-            # alleles (with the gnomAD slim configured it IS faf95); that makes
-            # the recurrence p slightly CONSERVATIVE (a larger q inflates the null probability
-            # of seeing carriers), which is the direction to prefer for a discovery claim.
+            # rarity_af is THE run oracle's value (annotations.frequency()): faf95 by default, the
+            # grpmax point-estimate proxy when the run opted down. On the proxy arm the value sits
+            # ~one CI-width high on low-AC alleles, which makes the recurrence p slightly
+            # CONSERVATIVE (a larger q inflates the null probability of seeing carriers).
             key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
             # THE RUN'S ORACLE, not the proxy column. Step 5 writes rarity_af (the value every
             # gate actually used) alongside the raw grpmax_af; reading the raw column here meant a
@@ -187,10 +221,13 @@ def main(argv=None) -> int:
                 faf = _num(r.get("grpmax_af"))
             if mode in DOMINANT_MODES:
                 g["dom"].add(trio); g["dom_faf"][key] = faf
+                g["dom_sets"].setdefault(trio, set()).add(key)
             elif mode in BIALLELIC_MODES:
                 g["bi"].add(trio); g["bi_faf"][key] = faf
+                g["bi_sets"].setdefault(trio, set()).add(key)
             elif mode in XLINKED_MODES:
                 g["x"].add(trio); g["x_faf"][key] = faf
+                g["x_sets"].setdefault(trio, set()).add(key)
             elif mode in DENOVO_MODES:
                 g["dn"].add(trio)
                 cls = classify(r.get("consequence"))
@@ -205,11 +242,33 @@ def main(argv=None) -> int:
     if not n_trios:
         sys.stderr.write("WARN: --n-trios not provided; recurrence null + de novo enrichment "
                          "SKIPPED (counts only). Pass the resolved-trio count for calibrated p-values.\n")
+    # The X-linked (hemizygous-male) family is tested against the MALE proband count: a female
+    # proband cannot be a hemizygous carrier, so N_trios overstates that denominator and the
+    # p-value was conservative by the sex ratio. Read Step 0's inferred sex when available.
+    n_male = args.n_male_trios or 0
+    if not n_male and args.qc_report and __import__("os").path.exists(args.qc_report):
+        with open(args.qc_report) as fh:
+            n_male = sum(1 for r in csv.DictReader(fh, delimiter="\t")
+                         if (r.get("inferred_sex") or "").strip() == "1")
+    n_x = n_male if n_male > 0 else n_trios
+    if n_trios and not n_male:
+        sys.stderr.write("WARN: no male proband count (--n-male-trios / --qc-report); the X-linked "
+                         "recurrence null uses N_trios as its denominator (conservative).\n")
 
     mut, mcols = _open_keyed(args.mutrate, {"gene", "gene_symbol", "symbol"})
     con, ccols = _open_keyed(args.constraint, {"gene", "gene_symbol", "symbol"})
+    # The size-normalisation table: a dedicated --mutational-target when given (the gnomAD
+    # v2.1.1 constraint table, the same file Step 9's offset reads), else --mutrate's own columns.
+    if args.mutational_target:
+        mtg, mtcols = _open_keyed(args.mutational_target, {"gene", "gene_symbol", "symbol"})
+    else:
+        mtg, mtcols = mut, mcols
+    mt_mis_c = _find(mtcols, "mu_mis", "mut_mis", "p_mis", "mis")
+    mt_syn_c = _find(mtcols, "mu_syn", "mut_syn", "p_syn", "syn")
+    mt_lof_c = _find(mtcols, "mu_lof", "mut_lof", "p_lof", "lof")
     mut_lof_c = _find(mcols, "mut_lof", "mu_lof", "p_lof", "lof")
     mut_mis_c = _find(mcols, "mut_mis", "mu_mis", "p_mis", "mis")
+    mut_syn_c = _find(mcols, "mut_syn", "mu_syn", "p_syn", "syn")
     loeuf_c = _find(ccols, "oe_lof_upper", "loeuf", "loeuf_v2")
     pli_c = _find(ccols, "pli", "pli_v2")
     shet_c = _find(ccols, "s_het", "shet")
@@ -220,13 +279,14 @@ def main(argv=None) -> int:
     # spans denovolyzeR-shaped tables, and a gnomAD **v4** `oe_lof_upper` wins the LOEUF chain and
     # is then compared against a **v2-calibrated** cutoff (filters.constraint_weighting.
     # loeuf_v2_tier1 = 0.35). The output columns are fixed names, so nothing downstream could tell.
-    for _lbl, _col in (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("loeuf", loeuf_c),
-                       ("pli", pli_c), ("s_het", shet_c), ("phaplo", phaplo_c)):
+    for _lbl, _col in (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("mut_syn", mut_syn_c),
+                       ("loeuf", loeuf_c), ("pli", pli_c), ("s_het", shet_c), ("phaplo", phaplo_c)):
         if _col:
             audit.record("06_gene_burden", f"resolved_column.{_lbl}.{_col}", 1)
     _resolved = ", ".join(f"{l}={c}" for l, c in
-                          (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("loeuf", loeuf_c),
-                           ("pli", pli_c), ("s_het", shet_c), ("phaplo", phaplo_c)) if c)
+                          (("mut_lof", mut_lof_c), ("mut_mis", mut_mis_c), ("mut_syn", mut_syn_c),
+                           ("loeuf", loeuf_c), ("pli", pli_c), ("s_het", shet_c),
+                           ("phaplo", phaplo_c)) if c)
     if _resolved:
         sys.stderr.write(f"Step 6: resolved constraint/mutrate columns: {_resolved}\n")
     # The LOEUF cutoff is calibrated on gnomAD v2.1.1. A v4 table uses the same column name for a
@@ -238,6 +298,46 @@ def main(argv=None) -> int:
             f"The column '{loeuf_c}' will be compared against a v2 boundary.\n")
 
     can_enrich = do_enrich and bool(mut) and poisson is not None and n_trios > 0
+
+    # --- SIZE-NORMALISED recurrence rank (the mutational-target offset) -------------------------
+    # mu_g = mu_mis + mu_syn + mu_lof per gene (lof imputed from mis+syn when gnomAD has none —
+    # the same rule Step 9 applies; a missing mis or syn means NO target, never 0). C is fit over
+    # the FULL table, zero-count genes included: the called list is a zero-truncated sample, and
+    # fitting on called genes only inflates C and hides every real excess. exp_carriers_mu = C*mu_g
+    # is what a gene of this mutational size is expected to collect; the Poisson tail on
+    # n_carriers against it is `p_carrier_excess`, the rank the case-only p cannot provide
+    # (that one is monotone in carrier count, i.e. in gene size). It is a size-normalised RANK,
+    # not an association test, and Step 9's artifact panel is what separates technical excess
+    # from biology.
+    def _mu_tot(mrow):
+        mis = _num(mrow.get(mt_mis_c)) if mt_mis_c else None
+        syn = _num(mrow.get(mt_syn_c)) if mt_syn_c else None
+        lof = _num(mrow.get(mt_lof_c)) if mt_lof_c else None
+        if mis is None or syn is None:
+            return None, "none"
+        if lof is None:
+            return (mis + syn) * (1.0 + impute), "imputed"
+        return mis + syn + lof, "gnomad"
+
+    mu_of = {}
+    for _g, _row in mtg.items():
+        _m, _src = _mu_tot(_row)
+        if _m is not None and _m > 0:
+            mu_of[_g] = _m
+    C_mu = None
+    if mu_of and n_trios > 0:
+        _sum_mu = sum(mu_of.values())
+        _sum_n = sum(len(g["dom"] | g["bi"] | g["x"]) for gene, g in genes.items() if gene in mu_of)
+        C_mu = (_sum_n / _sum_mu) if (_sum_mu > 0 and _sum_n > 0) else None
+    if (mtg or mut) and not mu_of:
+        sys.stderr.write("WARN: no usable mu_mis+mu_syn(+mu_lof) columns in --mutational-target/"
+                         "--mutrate; the size-normalised recurrence rank is unavailable — recurrent "
+                         "genes are ordered by the case-only p (a gene-size ranking). Pass the gnomAD "
+                         "v2.1.1 constraint table (prioritization.resources.mutational_target).\n")
+    elif not (mtg or mut):
+        sys.stderr.write("WARN: no --mutational-target (nor --mutrate): the size-normalised "
+                         "recurrence rank is unavailable; recurrent genes are ordered by the "
+                         "case-only p, which is a gene-size ranking.\n")
 
     rows = []
     for gene, g in genes.items():
@@ -256,32 +356,51 @@ def main(argv=None) -> int:
         # would be an ascertainment artifact). BH-FDR across genes on the primary p below.
         # (Case-only approximation using in-cohort variants; a gnomAD-derived per-gene
         # cumulative allele frequency, i.e. TRAPD/CoCoRV, is the natural upgrade.)
-        def _recur(n, faf_map, prob):
-            if binom is None or n_trios <= 0 or n < min_carriers or not faf_map:
+        def _recur(n, faf_map, prob, n_total=None):
+            n_total = n_trios if n_total is None else n_total
+            if binom is None or n_total <= 0 or n < min_carriers or not faf_map:
                 return None, None
             p = prob(list(faf_map.values()))
             if not p or p <= 0:
                 return None, None
-            return n_trios * p, float(binom.sf(n - 1, n_trios, p))
+            return n_total * p, float(binom.sf(n - 1, n_total, p))
 
         exp_car, p_recurrence = _recur(len(g["dom"]), g["dom_faf"],
                                        lambda f: p_carrier_hwe(f, absent_floor, 2))
         _, p_rec_bi = _recur(len(g["bi"]), g["bi_faf"],
                              lambda f: p_biallelic_hwe(f, absent_floor))
         _, p_rec_x = _recur(len(g["x"]), g["x_faf"],
-                            lambda f: p_carrier_hwe(f, absent_floor, 1))
+                            lambda f: p_carrier_hwe(f, absent_floor, 1), n_total=n_x)
+
+        # size-normalised rank (see above); None when the gene has no mutational target
+        mu_g = mu_of.get(gene)
+        exp_mu = (C_mu * mu_g) if (C_mu and mu_g) else None
+        excess_mu = (n_carriers / exp_mu) if (exp_mu and exp_mu > 0) else None
+        p_excess = (float(poisson.sf(n_carriers - 1, exp_mu))
+                    if (poisson is not None and exp_mu and exp_mu > 0 and n_carriers > 0) else None)
 
         # optional SECONDARY de novo Poisson enrichment
         p_enrich = exp = None
+        dn_mu_src = "none"
         if can_enrich and gene in mut:
             mrow = mut[gene]
-            # tolerate non-numeric cells ("NA", ".", "") instead of crashing on float()
-            mu = ((_num(mrow.get(mut_lof_c)) or 0.0) if mut_lof_c else 0.0) + \
-                 ((_num(mrow.get(mut_mis_c)) or 0.0) if mut_mis_c else 0.0)
-            exp = 2.0 * n_trios * mu
-            obs = g["denovo_lof"] + g["denovo_mis"]
-            if exp > 0:
-                p_enrich = float(poisson.sf(obs - 1, exp))
+            # A MISSING rate is never 0.0 (the rule everywhere in this repo): with no missense
+            # rate there is no expectation and no test; a missing pLoF rate is imputed from
+            # mis+syn exactly as Step 9 does, and the provenance rides out as dn_mu_src.
+            mu_lof = _num(mrow.get(mut_lof_c)) if mut_lof_c else None
+            mu_mis = _num(mrow.get(mut_mis_c)) if mut_mis_c else None
+            mu_syn = _num(mrow.get(mut_syn_c)) if mut_syn_c else None
+            mu = None
+            if mu_mis is not None:
+                if mu_lof is not None:
+                    mu, dn_mu_src = mu_lof + mu_mis, "gnomad"
+                elif mu_syn is not None:
+                    mu, dn_mu_src = mu_mis + (mu_mis + mu_syn) * impute, "imputed"
+            if mu is not None:
+                exp = 2.0 * n_trios * mu
+                obs = g["denovo_lof"] + g["denovo_mis"]
+                if exp > 0:
+                    p_enrich = float(poisson.sf(obs - 1, exp))
         loeuf = pli = shet = phaplo = None
         if gene in con:
             crow = con[gene]
@@ -305,23 +424,31 @@ def main(argv=None) -> int:
         # DISTINCT-variant recurrence (independent hits -> gene signal) vs SAME-variant recurrence
         # (one shared variant across carriers -> founder OR artifact; golden rule #2 treats internal
         # recurrence as artifact/blocklist-suspect, so it is ranked BELOW distinct-variant, not headlined).
+        # Compared as per-trio SETS of variant keys, so two trios sharing one compound-het PAIR
+        # read same_variant (each leg used to count as a distinct variant).
         rec_kind = ""
-        for cset, fmap in ((g["dom"], g["dom_faf"]), (g["bi"], g["bi_faf"]), (g["x"], g["x_faf"])):
+        for cset, per_trio in ((g["dom"], g["dom_sets"]), (g["bi"], g["bi_sets"]),
+                               (g["x"], g["x_sets"])):
             if len(cset) >= min_carriers:
-                rec_kind = "same_variant" if len(fmap) <= 1 else "distinct_variant"
+                distinct = {frozenset(v) for v in per_trio.values()}
+                rec_kind = "same_variant" if len(distinct) <= 1 else "distinct_variant"
                 break
         # rank by the STRONGEST recurrence signal across the applicable models (so recessive/X-only
         # recurrent genes are ordered by their own p, not left at 1.0)
         best_p = min([p for p in (p_recurrence, p_rec_bi, p_rec_x) if p is not None], default=None)
+        rank_basis = "mu_normalised" if (rank_by_mu and p_excess is not None) else "case_only"
         rows.append({
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
             "recurrent": "1" if n_carriers >= min_carriers else "0", "recurrence_kind": rec_kind,
             "exp_carriers": exp_car, "p_recurrence": p_recurrence, "best_p": best_p,
             "p_recurrence_biallelic": p_rec_bi, "p_recurrence_xlinked": p_rec_x,
+            "mu_tot": mu_g, "exp_carriers_mu": exp_mu, "carrier_excess_ratio": excess_mu,
+            "p_carrier_excess": p_excess, "rank_basis": rank_basis,
             "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
             "constrained": "1" if constrained else "0",
             "dn_exp": (f"{exp:.4g}" if exp is not None else ""), "dn_p_enrich": p_enrich,
+            "dn_mu_src": dn_mu_src,
             "modes": ";".join(modes),
         })
 
@@ -356,9 +483,14 @@ def main(argv=None) -> int:
 
     # Rank: recurrent first; DISTINCT-variant recurrence above SAME-variant (founder/artifact); then
     # by the strongest recurrence p across models; then constraint, counts, secondary de novo.
+    # The rank p: the SIZE-NORMALISED p_carrier_excess where a mutational target exists (so long
+    # genes stop leading by size), else the case-only best_p. `rank_basis` says which per gene.
     def rank_key(r):
         con_key = (r["constrained"] != "1") if weight_by_constraint else 0
-        prec = r["best_p"] if r["best_p"] is not None else 1.0
+        if r["rank_basis"] == "mu_normalised":
+            prec = r["p_carrier_excess"]
+        else:
+            prec = r["best_p"] if r["best_p"] is not None else 1.0
         return (r["recurrent"] != "1", r["recurrence_kind"] == "same_variant", prec, con_key,
                 -r["n_carriers"], -r["n_dominant"], -r["n_biallelic"],
                 r["dn_p_enrich"] if r["dn_p_enrich"] is not None else 1.0)
@@ -369,8 +501,9 @@ def main(argv=None) -> int:
                 "recurrence_exome_wide_sig",
                 "p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig",
                 "p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig",
+                "mu_tot", "exp_carriers_mu", "carrier_excess_ratio", "p_carrier_excess", "rank_basis",
                 "loeuf", "pli", "s_het", "phaplo", "constrained",
-                "dn_exp", "dn_p_enrich", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
+                "dn_exp", "dn_p_enrich", "dn_mu_src", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
     with open(args.out, "w") as out:
         out.write("\t".join(out_cols) + "\n")
         for r in rows:
@@ -389,6 +522,11 @@ def main(argv=None) -> int:
     n_rec_fdr = sum(1 for r in rows
                     if any(r.get(c) is not None and r[c] < fdr_q for c in _q_cols))
     audit.record("06_burden", "n_trios", n_trios)
+    audit.record("06_burden", "n_male_trios", n_male)
+    audit.record("06_burden", "genes_rank_mu_normalised",
+                 sum(1 for r in rows if r["rank_basis"] == "mu_normalised"))
+    if C_mu is not None:
+        audit.record("06_burden", "mu_scaling_C", f"{C_mu:.6g}")
     audit.record("06_burden", "genes_nominated", len(rows))
     audit.record("06_burden", "genes_recurrent", n_recurrent)
     audit.record("06_burden", "genes_recurrent_constrained", n_rec_con)
@@ -398,6 +536,10 @@ def main(argv=None) -> int:
         f"Step 6 complete: {len(rows)} genes, {n_trios} trios -> {args.out}\n"
         f"  recurrent (>= {min_carriers} carriers): {n_recurrent}; recurrent+constrained: {n_rec_con}\n"
         f"  recurrence exome-wide sig (p<{exome_p:g}): {n_rec_sig}; FDR q<{fdr_q}: {n_rec_fdr}\n"
+        f"  NOTE: p_recurrence is a case-only RANK (it saturates on private variants), not a "
+        f"calibrated test; {sum(1 for r in rows if r['rank_basis'] == 'mu_normalised')} genes are "
+        f"ordered by the size-normalised p_carrier_excess"
+        + ("" if C_mu is not None else " (none — no mutational target available)") + "\n"
     )
     if args.mutrate:
         sys.stderr.write(
