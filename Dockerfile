@@ -189,7 +189,7 @@ RUN find /opt/hprv/pipeline /opt/hprv/scripts -type f \
 
 # --- build-time sanity check: every core tool + python dep must resolve ------
 RUN set -eux; \
-    bcftools --version | head -1; \
+    bcftools --version >/dev/null; bcftools --version | head -1; \
     bedtools --version; \
     tabix --version | head -1; \
     slivar --help >/dev/null 2>&1 || slivar 2>/dev/null || true; \

@@ -105,6 +105,9 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         MANIFEST="$HPRV_WORK/igv/nhf_trios.txt"
         mkdir -p "$(dirname "$MANIFEST")"
         rp --from 8 --to 8 --nhf-emit-manifest "$MANIFEST"
+        # The manifest must EXIST. Step 8 now dies when a sub-task has no kraken2 DB, but an
+        # absent file here must never read as "nothing to do" — that was a green no-op.
+        [[ -f "$MANIFEST" ]] || { echo "nhf-plan: Step 8 wrote no NHF manifest at $MANIFEST (no kraken2 DB / no mini-CRAMs?)" >&2; exit 1; }
         n=$(grep -cve '^[[:space:]]*$' "$MANIFEST" 2>/dev/null || true); n=${n:-0}
         if [[ "$n" -eq 0 ]]; then
             log "no trios need NHF work — nothing to scatter; running gather to refresh variants.tsv"
@@ -136,6 +139,9 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         # concurrent tasks sharing one path would read each other's half-written files.
         export HPRV_TMPDIR="${HPRV_TMPDIR:-/tmp}/nhf.$trio.$$"
         mkdir -p "$HPRV_TMPDIR"
+        # `run()` execs the container with --cleanenv, which strips HPRV_TMPDIR; the *ENV_ prefixed
+        # forms survive it, so the task-private scratch actually reaches the step.
+        export APPTAINERENV_HPRV_TMPDIR="$HPRV_TMPDIR" SINGULARITYENV_HPRV_TMPDIR="$HPRV_TMPDIR"
         log "NHF trio $trio (array task $SLURM_ARRAY_TASK_ID)"
         rp --from 8 --to 8 --nhf-trio "$trio"
         ;;
@@ -146,13 +152,14 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         rp --from 8 --to 8 --nhf-gather
         ;;
     downstream)
-        # Range is configurable (DOWN_FROM..DOWN_TO, default 3..8). Some sites must stop the
-        # distributed graph at Step 7 and run Step 8 (mini-CRAM/igv export) elsewhere — e.g. the
-        # source CRAM store is a FUSE mount visible only on login/interactive nodes, not batch
-        # compute. Set DOWN_TO=7 in cluster.env and run Step 8 separately (see slurm/README.md).
-        df="${DOWN_FROM:-3}"; dt="${DOWN_TO:-8}"
-        [[ "$df" =~ ^[0-9]+$ && "$dt" =~ ^[0-9]+$ && "$df" -ge 3 && "$dt" -le 8 && "$df" -le "$dt" ]] \
-            || { echo "phase.sbatch: DOWN_FROM..DOWN_TO must satisfy 3<=FROM<=TO<=8 (got '$df'..'$dt')" >&2; exit 2; }
+        # Range is configurable (DOWN_FROM..DOWN_TO, default 3..9 — Step 9 reads only $W and runs
+        # here too). Some sites must stop the distributed graph at Step 7 and run Step 8
+        # (mini-CRAM/igv export) elsewhere — e.g. the source CRAM store is a FUSE mount visible only
+        # on login/interactive nodes, not batch compute. Set DOWN_TO=7 in cluster.env and run
+        # Steps 8-9 separately (see slurm/README.md).
+        df="${DOWN_FROM:-3}"; dt="${DOWN_TO:-9}"
+        [[ "$df" =~ ^[0-9]+$ && "$dt" =~ ^[0-9]+$ && "$df" -ge 3 && "$dt" -le 9 && "$df" -le "$dt" ]] \
+            || { echo "phase.sbatch: DOWN_FROM..DOWN_TO must satisfy 3<=FROM<=TO<=9 (got '$df'..'$dt')" >&2; exit 2; }
         log "Steps $df-$dt"
         rp --from "$df" --to "$dt"
         ;;

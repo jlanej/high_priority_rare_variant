@@ -11,6 +11,9 @@
 *.vcf.gz
 *.vcf.gz.tbi
 *.vcf.gz.csi
+*.vcf.bgz
+*.bgz.tbi
+*.bgz.csi
 *.bcf
 *.bam
 *.bai
