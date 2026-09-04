@@ -34,6 +34,11 @@ jobs:
         with:
           scandir: ./pipeline
           severity: error
+      - name: ShellCheck resource scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./scripts
+          severity: error
       - name: Hadolint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
@@ -52,11 +57,17 @@ jobs:
       # drive 09_prioritize.py:main() need yaml transitively (load_config -> `import yaml`) and
       # SKIP without it. Those are the never-drop and cache-invalidation guards, so CI installs
       # pyyaml to actually EXERCISE them instead of reporting a green run that skipped them.
-      # pyyaml only: everything else here stays dependency-free by design.
-      - name: Install the one dependency the Step-9 CLI tests need
-        run: python -m pip install --disable-pip-version-check --quiet pyyaml
-      - name: Pure-logic tests
-        run: python tests/test_pure.py
+      # openpyxl is the second: the xlsx About-sheet test (the workbook must describe the run's
+      # oracle) needs it. Everything else stays dependency-free by design.
+      - name: Install the two dependencies the Step-9 CLI and xlsx tests need
+        run: python -m pip install --disable-pip-version-check --quiet pyyaml openpyxl
+      # A skipped test must not read as a green run: the runner exits 0 but prints "NOT full
+      # coverage" and lists the skips, and the grep turns that into a failure here.
+      - name: Pure-logic tests (a skipped test fails the job)
+        run: |
+          set -o pipefail
+          python tests/test_pure.py 2>&1 | tee /tmp/pure.log | tail -5
+          ! grep -q "NOT full coverage" /tmp/pure.log
 
       # SLURM `plan` self-resubmit path (pure bash, no scheduler needed). Guards the
       # sbatch-spool-copy gotcha: under sbatch, BASH_SOURCE points at the job spool dir, so the
@@ -248,26 +259,34 @@ jobs:
       # docs/ROADMAP.md's restoration table. Their DATA is not fetched and they are not run.
       - name: Smoke test — real VEP + plugin code + Perl deps + resource prep
         run: |
+          # Every probe is `cmd || exit 1`: a failing left operand of `&&` does NOT trip errexit,
+          # so the previous `cmd && echo OK` shape could not fail on any condition it listed and a
+          # conda-Perl-shadow regression would still have published `latest`.
           docker run --rm hprv:ci bash -c '
             set -eu
             echo "vep interpreter: $(head -1 "$(command -v vep)")"
-            vep --help >/dev/null && echo "OK: vep --help (VEP + its Perl modules load)"
+            vep --help >/dev/null || { echo "FAIL: vep --help (VEP or its Perl modules do not load)"; exit 1; }
+            echo "OK: vep --help (VEP + its Perl modules load)"
             for m in DBI DBD::SQLite Bio::DB::BigFile Bio::Perl Bio::DB::HTS; do
-              perl -M"$m" -e1 && echo "OK: perl module $m"
+              perl -M"$m" -e1 || { echo "FAIL: perl module $m"; exit 1; }
+              echo "OK: perl module $m"
             done
             for p in LoF CADD dbNSFP SpliceAI; do
-              test -f "/plugins/$p.pm" && echo "OK: plugin code /plugins/$p.pm"
+              test -f "/plugins/$p.pm" || { echo "FAIL: plugin code /plugins/$p.pm missing"; exit 1; }
+              echo "OK: plugin code /plugins/$p.pm"
             done
             # split-vep must offer the `pick` selector Step 2 defaults to (bcftools >= 1.20),
             # in the image itself — the integration job asserts this against its own bcftools,
-            # which is a different install.
+            # which is a different install. `| head -1` would mask a failing bcftools, so assert
+            # first and print second.
+            bcftools --version >/dev/null || { echo "FAIL: bcftools does not run"; exit 1; }
             bcftools --version | head -1
-            command -v prepare_resources.sh >/dev/null && echo "OK: prepare_resources.sh on PATH"
-            # The in-image manifest must resolve. Assert on an export that still EXISTS under the
-            # VEP-only contract: this previously grepped GNOMAD_SITES and became a test of a
-            # deleted export the moment the gnomAD transfer was removed.
+            command -v prepare_resources.sh >/dev/null || { echo "FAIL: prepare_resources.sh not on PATH"; exit 1; }
+            echo "OK: prepare_resources.sh on PATH"
+            # The in-image manifest must resolve (assert on an export that exists).
             prepare_resources.sh --dir /tmp/_probe emit-env | grep -q "^export VEP_CACHE=" \
-              && echo "OK: in-image pinned manifest resolves (no host checkout needed)"
+              || { echo "FAIL: in-image pinned manifest does not resolve"; exit 1; }
+            echo "OK: in-image pinned manifest resolves (no host checkout needed)"
           '
 
       - name: Build and push
