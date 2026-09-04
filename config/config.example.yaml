@@ -46,11 +46,14 @@ reference:
 # frequency (gnomAD v4.1 per-population AFs) and ClinVar CLIN_SIG come out of the cache itself via
 # --af_gnomade/--af_gnomadg and --check_existing. What the contract still costs, in one place
 # (details in docs/allele_frequency.md):
-#   * faf95: WIRED (OPT-IN) — via resources.gnomad.sites_slim. The cache has no AC/AN, so the
-#                       95% CI correction can only come from the gnomAD data itself. WITHOUT the
-#                       slim, rarity falls back to a grpmax-PROXY point estimate, which runs
-#                       slightly stringent on low-count alleles (errs toward dropping). WITH it,
-#                       the same cutoffs RETAIN MORE. `rarity_oracle` reports which one fired.
+#   * faf95: THE DEFAULT ORACLE, REQUIRED — via resources.gnomad.sites_slim, selected by
+#                       resources.gnomad.oracle. The cache has no AC/AN, so the 95% CI correction
+#                       can only come from the gnomAD data itself; a run without the slim HALTS at
+#                       preflight unless it opts down to `grpmax_proxy`, the point-estimate arm
+#                       (runs slightly stringent on low-count alleles, i.e. errs toward dropping).
+#                       ONE oracle per run, never a per-variant blend; `rarity_oracle` records it
+#                       once and `rarity_basis` (measured|zero_ci|absent) is the per-variant
+#                       provenance. faf95 <= the point estimate, so the same cutoffs RETAIN MORE.
 #   * nhomalt: WIRED (same slim) — reported per variant, and biallelic calls whose allele gnomAD
 #                       already carries homozygotes for raise nhomalt_recessive_conflict.
 #   * SpliceAI: WIRED  — precomputed raw splice deltas via the SpliceAI plugin (resources.vep.
@@ -71,7 +74,8 @@ resources:
     cache_dir: ${VEP_CACHE}       # release-matched to the VEP binary in the image (115)
     version: 115
     plugins_dir: ${VEP_PLUGINS}   # plugin CODE — ships IN the image at /plugins; ${VEP_PLUGINS}
-                                  # defaults to /plugins via the image ENV. Only CADD is used.
+                                  # defaults to /plugins via the image ENV (CADD, SpliceAI,
+                                  # REVEL and AlphaMissense plugins).
     # Already have a VEP VCF? Point this at it and Step 2 skips the VEP call entirely, using
     # your file as cohort.sites.annotated.vcf.gz. Must be VEP 115 GRCh38 and carry the CSQ
     # fields above (Step 2 verifies the build and fails loudly if frequencies are absent).
@@ -151,8 +155,9 @@ resources:
     shard_by_contig: true
   gnomad:
     # The gnomAD v4.1 JOINT (exomes+genomes) sites slim — 5 of ~664 INFO fields, ~10 GB prepared.
-    # OPT-IN: `prepare_resources.sh --only gnomad_sites fetch`. It is not in the default set
-    # because preparing it streams ~877 GB (the slim is all that lands, and GCS egress is free).
+    # REQUIRED by the default oracle below: `prepare_resources.sh --only gnomad_sites fetch`
+    # (a separate step because preparing it streams ~877 GB; the slim is all that lands, and GCS
+    # egress is free). Without it the run halts at preflight unless oracle is set to grpmax_proxy.
     #
     # WHAT IT CHANGES, and it is the most consequential resource in the pipeline: it upgrades the
     # rarity oracle from a grpmax point-estimate PROXY to gnomAD's real **faf95** — the 95% CI
@@ -268,17 +273,19 @@ inputs:
 # --- Filtering thresholds (defaults = canonical; a ClinGen VCEP value overrides) ---
 filters:
   rarity:
-    # THE rarity field is chosen per variant in annotations.frequency(): real faf95 (from the
-    # optional gnomAD joint slim) first, else a gnomAD v4.1 grpmax PROXY — max AF over the
-    # grpmax-eligible ancestry groups (AFR/AMR/EAS/NFE/SAS) read from the VEP CSQ. This block sets
-    # the CUTOFFS, not the field. Two things to hold onto:
-    #  * WHICH oracle these cutoffs are applied to is per variant: real faf95 when
-    #    resources.gnomad.sites_slim is configured and gnomAD published one, else the grpmax
-    #    POINT ESTIMATE (the cache has no AC/AN, so that arm can never be CI-corrected). On the
-    #    point-estimate arm the gates sit ~one CI-width stringent (they err toward dropping).
-    #  * It deliberately EXCLUDES asj/fin/mid/ami/remaining, exactly as gnomAD's own grpmax does.
-    #    VEP's MAX_AF does not, and using it here would let one allele in a ~900-AN founder group
-    #    read as AF ~1e-3 and silently kill dominant candidates ten-fold under this cutoff.
+    # THE rarity field is annotations.frequency(), which reads the ONE oracle chosen for the whole
+    # run by resources.gnomad.oracle: real faf95 from the gnomAD joint slim (DEFAULT), or the
+    # gnomAD v4.1 grpmax PROXY — max point-estimate AF over the grpmax-eligible ancestry groups
+    # (AFR/AMR/EAS/NFE/SAS) read from the VEP CSQ. This block sets the CUTOFFS, not the field.
+    # Two things to hold onto:
+    #  * The arms NEVER cross. Under faf95 an allele gnomAD has but published no faf95 for reads
+    #    0 (zero_ci), and an allele with no gnomAD record reads absent (rarest) — the proxy is
+    #    never consulted. Under grpmax_proxy (a point estimate; the cache has no AC/AN, so that
+    #    arm can never be CI-corrected) the gates sit ~one CI-width stringent (err toward dropping).
+    #  * Both arms EXCLUDE the bottlenecked ami/asj/fin groups, as gnomAD's own grpmax does (the
+    #    FAF set additionally includes mid). VEP's MAX_AF does not, and using it here would let one
+    #    allele in a ~900-AN founder group read as AF ~1e-3 and silently kill dominant candidates
+    #    ten-fold under this cutoff.
     dominant_max: 1.0e-4          # dominant / de novo candidate
     recessive_max: 1.0e-2         # recessive / comp-het per-allele (permissive discovery)
     recessive_strict: 1.0e-3      # tags recessive/X-linked calls below this as high_conf_rarity
@@ -356,6 +363,11 @@ qc:
   mie_max: 0.02                   # flag a trio if its genome-wide Mendelian-error rate exceeds this
   x_het_male_max: 0.10            # chrX non-PAR het-ratio below this -> inferred male
   sex_min_sites: 20               # need >= this many informative chrX calls to infer sex (else unknown)
+  # CAP on the QC-passing sites scanned per trio — for the Mendelian-error/CHARR pass AND for the
+  # chrX sex scan. On WGS the MIE rate is therefore measured on a PREFIX of the genome (the first
+  # 200k QC-passing biallelic autosomal sites), not genome-wide: adequate as a swap/contamination
+  # detector, but a localised MIE cluster (UPD/CNV) outside that prefix is invisible to it.
+  max_sites: 200000
 
 # --- Inheritance modes (Step 5). Focus = INHERITED germline variation. ---
 inheritance:
@@ -381,6 +393,16 @@ burden:
   # low-count alleles, which inflates the null and makes these p-values conservative — the
   # right direction for a discovery claim.
   absent_af_floor: 1.0e-6         # gnomAD detection-limit floor for variants absent from gnomAD
+  # READ p_recurrence AS A RANK, NOT A CALIBRATED TEST. The null is case-only — built from the
+  # variants OBSERVED in the cohort — so it saturates on private variants (2 carriers at N=200
+  # give p~3e-7; 3 at N=1000 give 4e-8) and is monotone in the carrier count, i.e. in gene size.
+  # With a mutational-target table (resources.mutation_rate_table carrying mu_mis/mu_syn/mu_lof,
+  # or prioritization.resources.mutational_target), Step 6 also computes exp_carriers_mu = C*mu_g
+  # (C over the FULL table, zero-count genes included), carrier_excess_ratio and a Poisson tail
+  # p_carrier_excess, and orders recurrent genes by THAT when this is true — so long genes no
+  # longer lead by size (rank_basis says which rank each gene got). A size-normalised RANK, not an
+  # association test; Step 9's artifact panel is what separates technical excess from biology.
+  rank_by_mutational_target: true
   weight_by_constraint: true      # rank recurrent+constrained genes highest
   # OPTIONAL secondary signals (reported, not the primary rank):
   denovo_enrichment: true         # Samocha per-gene Poisson if a mutation_rate_table is given
@@ -463,7 +485,7 @@ prioritization:
       # E_g = C * mu_g, where mu_g = mu_mis + mu_syn + mu_lof from the gnomAD v2.1.1 per-gene
       # Samocha mutation-rate targets (Karczewski 2020, PMID 32461654). C is fit so the cohort
       # total is reproduced, and it is a COHORT property re-fit every run — never a constant.
-      components: [mu_mis, mu_syn, mu_lof]
+      # (The three components and the per-cohort refit are fixed in code, not knobs.)
       # mu_lof is NULL for ~505 of 19,643 genes. They are neither dropped nor charged
       # mu_lof = 0 (which would inflate their ratio ~5% for no reason): impute at the MEDIAN
       # mu_lof/(mu_mis+mu_syn) over the 19,138 genes that have it, and record the imputation in
@@ -476,15 +498,13 @@ prioritization:
       # i.e. a +/-30% band). A +/-30% offset error cannot support a 5x claim, which is exactly why
       # gene_downweight.cds_fallback_ceiling exists.
       cds_fallback: {b0: -18.4484, b1: 1.0570}
-      # Covariates were TESTED and REJECTED, and the rejection is deliberate. `+ log(gene_length)
-      # + oe_syn` improves the NB-GLM by dAIC = -121, so there IS real residual structure
-      # (candidate yield rises with genomic span and with oe_syn). It is not worth using because
-      # (a) Spearman(ratio, covariate-adjusted ratio) = 0.992 and 502 of 532 ratio>=5 genes are
-      # shared, so the adjustment is negligible where it matters, and (b) oe_syn is itself one of
-      # the six artifact signals below — regressing it into the offset would ABSORB the very
+      # Covariates were TESTED and REJECTED, and the rejection is deliberate (there is no knob).
+      # `+ log(gene_length) + oe_syn` improves the NB-GLM by dAIC = -121, so there IS real residual
+      # structure (candidate yield rises with genomic span and with oe_syn). It is not worth using
+      # because (a) Spearman(ratio, covariate-adjusted ratio) = 0.992 and 502 of 532 ratio>=5 genes
+      # are shared, so the adjustment is negligible where it matters, and (b) oe_syn is itself one
+      # of the six artifact signals below — regressing it into the offset would ABSORB the very
       # signal we must report separately, so a callability-defective gene would look normal.
-      covariate_adjust: false
-    refit_per_cohort: true        # C and alpha are cohort properties, never hardcoded constants
   # --- The six-signal artifact panel -> an integer corroboration count (0-6) ---------------
   # The excess statistic says a gene is ANOMALOUS. It cannot say WHY, and on its own it costs
   # sensitivity (BH-FDR at 5% alone triaged 5 established-control genes). The panel supplies the
@@ -504,11 +524,11 @@ prioritization:
       # excess in every tier rule below.
       per_trio_min: 0.10
     segdup:
-      # Fraction of the gene span covered by high-identity segmental duplications (10.1x). The
-      # thresholds are EMPIRICAL, not conventional: any-overlap is 1.9x, >=98% identity at
-      # any coverage is 6.0x, >=98% over >=10% of the gene is 10.1x, >=50% is 13.4x but halves
+      # Fraction of the gene span covered by high-identity (>=98%) segmental duplications
+      # (10.1x). The identity cut is a property of the PRECOMPUTED table (segdup98_frac), not a
+      # knob; the thresholds are EMPIRICAL, not conventional: any-overlap is 1.9x, >=98% identity
+      # at any coverage is 6.0x, >=98% over >=10% of the gene is 10.1x, >=50% is 13.4x but halves
       # the gene count — so >=10% is the operating point.
-      min_identity: 0.98
       min_frac: 0.10
       # COORDINATE BUILD IS LOAD-BEARING. gnomAD v2.1.1 constraint start/end are GRCh37/hg19
       # (verified: BRCA1 chr17:41,196,312-41,277,500), so the segdup track MUST be on the same
@@ -517,8 +537,8 @@ prioritization:
       # NEGATIVE result: this statistic detects segdup loci that emit TOO MANY calls and is blind
       # to those that emit too few (CYP21A2, SMN1/2, NCF1, STRC all have ZERO candidates against
       # non-trivial E). So segdup98_frac is emitted on EVERY gene regardless of tier, because it
-      # also marks genes where a NEGATIVE result is uninformative.
-      track_build: hg19
+      # also marks genes where a NEGATIVE result is uninformative. The shipped recipe builds the
+      # table from an hg19 segdup track, matching gnomAD v2.1.1.
       table: ${SEGDUP_TABLE}      # optional gene<TAB>segdup98_frac; absent => signal off (WARN)
     oe_syn:
       # |oe_syn - 1| > 0.3 (5.2x). Synonymous variation is the closest thing gnomAD offers to a
@@ -679,9 +699,9 @@ prioritization:
     # cherry-pick. The tier always reports which one spoke, in missense_evidence_source.
     #
     # REVEL first: its cut points are the ones Pejaver 2022 (PMID 36413997) calibrated —
-    # PP3 0.644 supporting / 0.773 moderate / 0.932 strong, BP4 <= 0.290 supporting / 0.183
-    # moderate. hprv assigns no ACMG weight; it uses the same cut points to ORDER candidates,
-    # which is why >= moderate reaches V4 while supporting-only sits at V3.
+    # PP3 0.644 supporting / 0.773 moderate (0.932 strong exists in Pejaver but is NOT a rung
+    # here), BP4 <= 0.290 supporting. hprv assigns no ACMG weight; it uses the same cut points to
+    # ORDER candidates, which is why >= moderate reaches V4 while supporting-only sits at V3.
     revel_supporting: 0.644
     revel_moderate: 0.773
     revel_benign_max: 0.290
@@ -701,10 +721,11 @@ prioritization:
     # without it nhomalt is absent and the flag never fires — absent is NOT 0.
     nhomalt_recessive_max: 0
     rarity:
-      # Rarity strength bands on the grpmax-PROXY AF. TWO CAVEATS TRAVEL WITH THIS COLUMN.
-      # (1) WHICH oracle produced the value is per variant and is reported in `rarity_oracle`:
-      # real faf95 with the gnomAD slim, else the grpmax POINT ESTIMATE. Do NOT present these
-      # bands as ACMG PM2 on either arm (hprv applies PM2 at
+      # Rarity strength bands on the run's oracle value (rarity_af). TWO CAVEATS TRAVEL WITH THIS
+      # COLUMN. (1) WHICH oracle produced the value is a RUN-level choice (resources.gnomad.oracle:
+      # faf95 by default, else the grpmax POINT ESTIMATE) and is reported in `rarity_oracle`;
+      # the band above permissive_max and below ba1 reads `permissive_fail` (0 points). Do NOT
+      # present these bands as ACMG PM2 on either arm (hprv applies PM2 at
       # Supporting only, and PM2 is evidence, not the gate). (2) Audit A-4, a validity AND equity
       # problem: the proxy is the MAX over grpmax-eligible groups REGARDLESS of the cohort's
       # actual ancestry composition, so in a multi-ancestry cohort like GMKF the effective
@@ -817,7 +838,8 @@ prioritization:
       # NEITHER CAP REMOVES THE VARIANT FROM THE OUTPUT.
       v0_benign_max: 0.0
       ba1_max: -4.0
-    nhf: {flag_fraction: 0.5}     # matches outputs.igv.nonhuman_screen (min_reads read from there)
+    # The NHF flag fraction and min_reads are read from outputs.igv.nonhuman_screen, so Step 8's
+    # nhf_flag and Step 9's nhf_status share ONE threshold.
     # --- The Class-B phenotype overlay: OFF by default, and it enters ONE term only ---------
     # This is what keeps Step 9 phenotype-agnostic. The overlay is a FILE PATH, never a list in
     # code; this module names no gene. With enabled: false and no path, rank_prior is IDENTICAL
@@ -840,7 +862,7 @@ prioritization:
       # explicit --gene-prior overrides that, so a stale path cannot silently start promoting
       # genes.
       path: ${GENE_PRIOR_OVERLAY}
-      points: 2                     # the MAXIMUM prior, scaled by prior_weight below
+      # The MAXIMUM prior is composite.weights.gene_list_prior above (+2), scaled by prior_weight.
       # THE JOIN IS ON GENE SYMBOL ONLY — deliberately MOI-AGNOSTIC, and this is load-bearing.
       # Routing a prior lookup by a gene's canonical mode of inheritance would silently miss every
       # hypothesis stated about a DIFFERENT genetic model than the gene is curated under. The
@@ -854,7 +876,7 @@ prioritization:
       # never-drop logic applied to the coherence layer.
       #
       # prior_weight is an UNCALIBRATED ordering default, NOT a likelihood ratio, and must never be
-      # reported as an odds ratio. It scales `points` (weight 1.0 -> the full +2, 0.35 -> +0.7).
+      # reported as an odds ratio. It scales weights.gene_list_prior (1.0 -> the full +2, 0.35 -> +0.7).
       # Set honor_prior_weight: false to treat every overlay member identically.
       honor_prior_weight: true
       max_prior_weight: 1.0         # the weight that maps to the full `points`
@@ -869,13 +891,11 @@ prioritization:
       # MAX, NEVER SUM. When both derive from the same study, summing double-counts one study —
       # the GCT resource's FA_HR_PATHWAY_23 (pooled OR 4.14, 95% CI 1.98-8.66, P = .0013) and its
       # per-gene FA rows both come from PMID 40906985, and its own usage contract says so. The
-      # code enforces this; a documented invariant is one nobody checks.
-      combine_gene_and_set: max     # max | gene_only  (sum is deliberately NOT an option)
-    # Non-optional in practice: both rankings ship on every run, plus
+      # code enforces this (MAX is not a knob); a documented invariant is one nobody checks.
+    # Both rankings ALWAYS ship (not a knob): rank_agnostic, rank_prior, and
     # rank_delta = rank_prior - rank_agnostic. A large negative delta means the variant was
     # promoted PURELY by list membership — exactly the set to scrutinise for confirmation bias,
     # and exactly the set that would be invisible under a single blended ranking.
-    emit_both_rankings: true
   resources:
     # THE ONE NEW RESOURCE: a per-gene mutational-target table. gnomAD v2.1.1 constraint
     # (lof_metrics.by_gene) carries everything the gene layer needs in one small public file
@@ -971,6 +991,9 @@ outputs:
       min_reads: 5                # denominator floor for the derived nhf_flag: an NHF over fewer than
                                   #   this many ALT reads is too noisy to flag (the raw *_nhf_reads
                                   #   count is ALWAYS emitted beside each *_nhf so the reviewer sees it).
+      flag_fraction: 0.5          # non-human fraction at/above which a screened member flags the
+                                  #   call. Read by BOTH Step 8 (nhf_flag) and Step 9 (nhf_status),
+                                  #   so the two columns can never disagree.
       memory_mapping: true        # mmap the kraken2 DB instead of loading it into private RAM, so
                                   #   concurrent tasks share one mapping instead of each faulting in a
                                   #   private copy. Put the DB on shared NVMe (NOT a FUSE mount, and
@@ -989,7 +1012,7 @@ outputs:
                                   #   nhf-scatter / nhf-gather). It requires a completed Step 8 first,
                                   #   since the array reads the mini-CRAMs that pass produces.
 
-# --- Honest scope limitations (documented, enforced as warnings) ---
-scope:
-  snv_indel_only: true            # CNV/SV not detected here — a known blind spot
-  warn_on_low_confidence_regions: true
+# --- Honest scope limitations (documented; nothing enforces these — see docs/limitations.md) ---
+#   * SNV/indel only: CNV/SV are not detected here — a known blind spot.
+#   * Pseudogene / segmental-duplication regions are neither flagged nor masked at the screen
+#     (Step 9's segdup signal is the only place they surface, and only when a table is supplied).
