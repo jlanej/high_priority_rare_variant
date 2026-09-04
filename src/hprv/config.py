@@ -92,6 +92,9 @@ SH_MAP = {
     # The gnomAD v4.1 JOINT sites slim — the second bcftools transfer, and the one that upgrades
     # the rarity oracle from a grpmax point-estimate PROXY to real faf95 (see annotations.frequency).
     "HPRV_GNOMAD_SITES": "resources.gnomad.sites_slim",
+    # The run-level frequency oracle (faf95 | grpmax_proxy). Exported so Step 2 can HALT when a
+    # faf95 run loses its slim transfer instead of warning and continuing on no oracle at all.
+    "HPRV_GNOMAD_ORACLE": "resources.gnomad.oracle",
     "HPRV_CRAM_MAP": "resources.cram_map",
     "HPRV_CRAM_REF": "resources.cram_ref",
     # kraken2 DB for Step-8b non-human-fraction screening (bind-mounted DATA, never baked).
@@ -104,6 +107,11 @@ def emit_sh(cfg: dict) -> None:
     unresolved = []
     for var, key in SH_MAP.items():
         val = get(cfg, key, "")
+        # YAML booleans must reach the shell as `true`/`false`: Python's str(True) is "True",
+        # which no `case ... in 1|true|yes|on)` guard matches — the shipped
+        # `resources.vep.shard_by_contig: true` was read by Step 2 as sharding OFF.
+        if isinstance(val, bool):
+            val = "true" if val else "false"
         val = "" if val is None else str(val)
         if "${" in val:
             # do NOT export an unresolved placeholder — a non-empty '${FOO}' string would
