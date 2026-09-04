@@ -5,23 +5,29 @@ Assigns molecular consequence and calibrated deleteriousness evidence to rare SN
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ### ⚠ Status: most of this document is reference science, not running code
+> ### ⚠ Status: what of this document runs
 >
-> The pipeline runs a **VEP-only contract** — a VEP 115 GRCh38 cache plus the CADD and SpliceAI
-> plugins, and nothing else. No LOFTEE, dbNSFP or ClinVar file is bcftools-transferred in.
+> The pipeline runs a **VEP-centric contract** — a VEP 115 GRCh38 cache plus the CADD, SpliceAI,
+> REVEL and AlphaMissense plugins (SpliceAI and REVEL/AlphaMissense required by default), plus two
+> `bcftools annotate` transfers (the ClinVar sites VCF and the gnomAD v4.1 joint slim). No LOFTEE or
+> dbNSFP file is transferred in.
 >
-> **What is IMPLEMENTED at the Step-3 screen is a three-rung ladder (an OR — any one keeps):**
+> **What is IMPLEMENTED at the Step-3 screen is a three-rung ladder (an OR — any one keeps), five
+> keep reasons in all (`clinvar_plp`, `impact_high`, `impact_moderate`, `spliceai`, `cadd`):**
 > 1. VEP `IMPACT` ∈ `keep_impacts` (`[HIGH, MODERATE]`) → keep;
-> 2. else `SpliceAI` max delta score ≥ `spliceai_ds_min` (0.2) → keep (when the SpliceAI plugin is
->    configured — the deep-intronic / synonymous splice keep-path);
+> 2. else `SpliceAI` max delta score ≥ `spliceai_ds_min` (0.2) → keep (the deep-intronic /
+>    synonymous splice keep-path; required by default);
 > 3. else `CADD_PHRED ≥ 25.3` → keep; else drop `not_functional`.
-> Plus a ClinVar `CLIN_SIG` P/LP override (**unstarred** — the cache carries no review status) and
-> a BA1 drop at AF ≥ 0.05. See [`src/hprv/selection.py`](../src/hprv/selection.py).
+> Plus a ClinVar `CLIN_SIG` P/LP override (**star-blind by design** — `clinvar_stars` is available
+> from the ClinVar transfer and ranks in Step 9, but gating the screen on it would violate
+> never-drop) and a BA1 drop at `rarity_af` ≥ 0.05. See [`src/hprv/selection.py`](../src/hprv/selection.py).
 >
-> **Not available:** LOFTEE (HC/LC, flags), REVEL, AlphaMissense, MPC, MetaRNN, BayesDel, VEST4,
-> ClinVar review status. Every threshold below that names one of them is a **TARGET**
-> for the tiering step in [ROADMAP.md](ROADMAP.md), not a filter that fires today. The science is
-> retained deliberately: it is the justification for that roadmap.
+> **Annotated but inert at the screen:** REVEL and AlphaMissense (missense-only; every missense is
+> MODERATE and kept at rung 1). Their consumer is **Step 9's missense tier** — REVEL 0.644/0.773,
+> then AlphaMissense 0.564, then off-label CADD, a fixed precedence. **Not available:** LOFTEE
+> (HC/LC, flags), MPC, MetaRNN, BayesDel, VEST4. Every threshold below that names one of those is a
+> **TARGET** for the tiering roadmap in [ROADMAP.md](ROADMAP.md), not a filter that fires today.
+> The science is retained deliberately: it is the justification for that roadmap.
 >
 > Full accounting of what the screen therefore cannot see, and what each gap costs to close:
 > **[limitations.md](limitations.md)**. Canonical, marked IMPLEMENTED-vs-TARGET thresholds:
@@ -29,12 +35,12 @@ Assigns molecular consequence and calibrated deleteriousness evidence to rare SN
 
 ## TL;DR
 
-- **IMPLEMENTED — the whole functional ladder:** **VEP IMPACT** (HIGH/MODERATE kept) → **SpliceAI max Δ ≥ 0.2** → **CADD PHRED ≥ 25.3** → drop. One annotation source (VEP 115 cache), two plugins (SpliceAI, CADD). Version-pin all.
+- **IMPLEMENTED — the whole functional ladder:** **VEP IMPACT** (HIGH/MODERATE kept) → **SpliceAI max Δ ≥ 0.2** → **CADD PHRED ≥ 25.3** → drop. One annotation source (VEP 115 cache), four plugins (CADD, SpliceAI, REVEL, AlphaMissense — the last two feed Step 9 only), two transfers (ClinVar, gnomAD joint slim). Version-pin all.
 - **IMPLEMENTED — ClinVar `CLIN_SIG` P/LP keeps a variant** and rescues it from the rarity gate, at **any** review status. Stars now exist (`clinvar_stars`, from the Step-2 ClinVar transfer) but are deliberately NOT consulted here: gating the screen on review status would violate never-drop. A 1★ assertion is kept and reviewed, and RANKED below a 3★ one by Step 9. This over-retains rather than over-drops — safe for a screen, costly in curation.
 - **CADD is on an off-label threshold.** 25.3 is Pejaver-2022's PP3-supporting cutoff, calibrated on **missense only**; missense never reaches the CADD rung (it is MODERATE, kept at rung 1), so 25.3 is applied *exclusively* to the non-coding variants it was never calibrated for. It is a **discovery rank (≈ top 0.3% genome-wide), not PP3 evidence**. See [CADD as the general-purpose predictor](#cadd-as-the-general-purpose-predictor--implemented-and-off-label).
 - **VEP IMPACT** (HIGH/MODERATE/LOW/MODIFIER) is a coarse convenience tier only — never rely on it alone for splice-adjacent variants. The screen layers **SpliceAI** on top of IMPACT (rung 2) to catch the deep-intronic / exonic-synonymous splice variants IMPACT bins as MODIFIER/LOW — when the SpliceAI plugin is configured (see below).
 - **TARGET — pLoF confidence = LOFTEE HC with no flags**; grade PVS1 via the Abou Tayoun 2018 decision tree (NMD-escape / last-exon / 3′-terminal-50 bp / single-exon downgrade), gated on ClinGen gene–disease validity ≥ Moderate and a known LoF mechanism.
-- **TARGET — missense primary = REVEL** (Pejaver-2022 calibrated): PP3 supporting **≥ 0.644**, moderate **≥ 0.773**, strong **≥ 0.932**; BP4 supporting **≤ 0.290**, moderate **≤ 0.183**. **AlphaMissense** (likely_pathogenic **≥ 0.564**) as orthogonal support only. These are **reporting/tiering** values: as a *screen* filter they are provably inert (see [the unreachability note](#why-the-missense-predictors-never-filtered-anything)).
+- **IMPLEMENTED (Step 9 tier only) — missense primary = REVEL** (Pejaver-2022 calibrated): supporting **≥ 0.644** (V3), moderate **≥ 0.773** (V4), benign **≤ 0.290** (V1); there is deliberately no 0.932 "strong" cut in code (V5 is unreachable). **AlphaMissense** (likely_pathogenic **≥ 0.564**, likely_benign **≤ 0.34**) is consulted second, off-label CADD third — a fixed precedence, never a max. Both plugins are required by default (`resources.vep.missense_predictors_required`). These are **tiering** values: as a *screen* filter they are provably inert (see [the unreachability note](#why-the-missense-predictors-never-filtered-anything)).
 - **TARGET — splicing = Walker-2023 calibrated SpliceAI, on RAW scores**: PP3 Δ **≥ 0.2**, BP4 Δ **≤ 0.1**, 0.1–0.2 uninformative; canonical ±1,2 with Δ **≥ 0.5** = high tier. If PVS1(splice) applies, do not also apply PP3.
 - **Report ONE predictor per variant — never stack correlated missense tools** as independent evidence; cap each tool at its Pejaver-calibrated strength.
 - A gene-specific **ClinGen VCEP** score cutoff always overrides these generic defaults.
@@ -79,12 +85,14 @@ LOFTEE is a VEP plugin that flags predicted LoF (stop-gained, frameshift, essent
 
 For rare-disease and germline pediatric-cancer screening, treat **HC, no-flag pLoF** in a haploinsufficient / known disease gene as PVS1-eligible. Grade the PVS1 strength with the **Abou Tayoun 2018 / ClinGen SVI decision tree**: NMD-escape (last exon or 3′-terminal 50 bp) and single-exon context downgrade PVS1 from Very Strong. PVS1 application is gated on **ClinGen gene–disease validity ≥ Moderate** and a **known LoF disease mechanism**. See [gene_constraint.md](gene_constraint.md) for the haploinsufficiency weighting (pHaplo, ClinGen HI) that informs "is LoF the mechanism here."
 
-## Missense / pathogenicity predictors — calibrated cutoffs — TARGET, not implemented
+## Missense / pathogenicity predictors — calibrated cutoffs — IMPLEMENTED for tiering, inert at the screen
 
-> **Not running.** No dbNSFP, REVEL or AlphaMissense file is present, so none of the scores in
-> this section are annotated. Everything below is the calibration reference for the planned
-> ACMG PP3/BP4 tiering step — **but read the next subsection before concluding the screen lost
-> discriminative power, because it did not.**
+> **REVEL and AlphaMissense are annotated** (VEP plugins over the dedicated files, required by
+> default) and consumed by Step 9's missense tier in a fixed precedence — REVEL, then AlphaMissense,
+> then off-label CADD, `missense_evidence_source` naming which spoke. No dbNSFP file is present, so
+> BayesDel / VEST4 / MPC / MetaRNN are **not** annotated. The calibration reference below is what
+> the tier's cut points come from — **but read the next subsection before concluding the screen
+> gained (or ever lost) discriminative power from them, because it did not.**
 
 ### Why the missense predictors never filtered anything
 
@@ -96,7 +104,7 @@ This document previously credited REVEL/AlphaMissense/MPC with doing work they *
 
 Therefore a variant could only reach a missense-predictor branch if it were simultaneously missense (to *have* a score) and not-MODERATE (to *get past* rung 1) — an empty set. **These branches were unreachable even back when the code contained them and dbNSFP was configured.** Their calibrated cutoffs did none of the discrimination this document advertised; removing dbNSFP cost the screen **exactly zero** selection power. `tests/integration/assert_integration.py` now asserts the `revel` / `alphamissense` / `mpc` / `loftee_hc` keep-reasons never fire (`spliceai` is deliberately excluded — it is wired and DOES fire, asserted at chr1:18700).
 
-The genuine loss is **reporting and tiering**, not screening: a curator no longer sees a REVEL score beside a missense candidate, and PP3/BP4 will need one. If that step is built, ClinGen SVI requires committing to **one** predictor chosen *before* seeing results — REVEL is the ClinGen-calibrated option (AlphaMissense postdates the 2022 calibration). The re-add is ~1.3 GB of *dedicated* files, **not** dbNSFP (see [dbNSFP](#dbnsfp-as-the-aggregation-resource--dead-url-and-not-the-right-vehicle)).
+What the predictors genuinely buy is **reporting and tiering**, not screening: a curator sees a REVEL/AlphaMissense score beside a missense candidate, and Step 9's missense tier is calibrated instead of an off-label CADD rank. ClinGen SVI requires committing to **one** predictor chosen *before* seeing results — hence the fixed precedence (REVEL first, the ClinGen-calibrated option; AlphaMissense second, now SVI-endorsed on par; CADD last and labelled `cadd_offlabel`), never a best-of-N. They are wired from ~1.3 GB of *dedicated* files, **not** dbNSFP (see [dbNSFP](#dbnsfp-as-the-aggregation-resource--dead-url-and-not-the-right-vehicle)).
 
 ### The calibration reference
 
@@ -199,8 +207,9 @@ Generic, parameterized invocations — substitute release, cache, and plugin dat
 **IMPLEMENTED** — what `pipeline/02_annotate_sites.sh` actually runs, once, on the cohort union (never per trio; Step 4 transfers annotations with `bcftools annotate`):
 
 ```bash
-# VEP-only contract: release-matched cache + the CADD and SpliceAI plugins. The cache supplies the
-# gnomAD v4.1 per-population AFs (the rarity oracle) and ClinVar CLIN_SIG — --af_gnomade/
+# VEP-centric contract: release-matched cache + the CADD, SpliceAI, REVEL and AlphaMissense
+# plugins. The cache supplies the gnomAD v4.1 per-population point AFs (the grpmax_proxy arm;
+# reporting columns under the default faf95 oracle) and ClinVar CLIN_SIG — --af_gnomade/
 # --af_gnomadg and --check_existing are load-bearing, not extras.
 vep \
   --cache --offline --dir_cache "${VEP_CACHE_DIR}" --cache_version "${VEP_RELEASE}" \
@@ -211,6 +220,8 @@ vep \
   --flag_pick --pick_order mane_select,mane_plus_clinical,canonical,rank \
   --plugin CADD,snv="${CADD_SNV}",indels="${CADD_INDEL}" \
   --plugin SpliceAI,snv="${SPLICEAI_SNV}",indel="${SPLICEAI_INDEL}" \
+  --plugin REVEL,"${REVEL_TSV}" \
+  --plugin AlphaMissense,file="${ALPHAMISSENSE_TSV}",transcript_match=1 \
   --fork "${THREADS}" -i "${IN_VCF}" -o "${OUT_VCF}"
 ```
 
@@ -222,14 +233,24 @@ vep \
 bcftools +split-vep -c "${FIELDS}" -s "${SEL}" -p vep_ -Oz -o "${SPLIT_VCF}" "${OUT_VCF}"
 ```
 
-**TARGET** — the full stack this document describes, for when the tiering step is built. None of these plugins is configured today; note `AlphaMissense.pm` emits `am_pathogenicity`/`am_class`, and prefer the dedicated REVEL/AlphaMissense files over dbNSFP:
+```bash
+# The two bcftools transfers — the ONLY annotations that do not come through the CSQ, each under
+# its own INFO namespace so the oracle is visible at a glance. Both die on a 0-match join; under
+# the default oracle a missing/failed gnomAD transfer is a hard stop.
+bcftools annotate -a "${CLINVAR_VCF}" \
+  -c INFO/clinvar_CLNREVSTAT:=INFO/CLNREVSTAT,INFO/clinvar_CLNSIG:=INFO/CLNSIG ...
+bcftools annotate -a "${GNOMAD_SITES_SLIM}" \
+  -c INFO/gnomad_faf95:=INFO/fafmax_faf95_max_joint,INFO/gnomad_faf95_group:=INFO/fafmax_faf95_max_gen_anc_joint,INFO/gnomad_nhomalt:=INFO/nhomalt_joint,INFO/gnomad_AF_joint:=INFO/AF_joint,INFO/gnomad_AF_grpmax:=INFO/AF_grpmax_joint ...
+```
+
+**TARGET** — the one plugin still not configured, for when PVS1 grading is built (the code is baked into the image at `/plugins`; the data is not fetched):
 
 ```bash
 vep ... \
-  --plugin LoF,loftee_path:/plugins,human_ancestor_fa:"${ANCESTOR_FA}",gerp_bigwig:"${GERP_BW}" \
-  --plugin AlphaMissense,file="${ALPHAMISSENSE_TSV}" \
-  --plugin REVEL,"${REVEL_TSV}"
+  --plugin LoF,loftee_path:/plugins,human_ancestor_fa:"${ANCESTOR_FA}",gerp_bigwig:"${GERP_BW}"
 ```
+
+Note `AlphaMissense.pm` emits `am_pathogenicity`/`am_class`, **not** dbNSFP's `AlphaMissense_score` — the split-vep `want` list must use the plugin spelling.
 
 ## Recommended defaults (this pipeline)
 
@@ -237,22 +258,22 @@ For per-trio GATK genotype-refinement VCFs (GRCh38, not cohort-joint), rare-dise
 
 | Layer | Status | Default | Notes |
 |---|---|---|---|
-| Annotation stack | **IMPLEMENTED** | VEP 115 (GRCh38 cache, MANE prioritized) + **CADD v1.7 and SpliceAI plugins** | The whole contract. No LOFTEE/dbNSFP/ClinVar file |
+| Annotation stack | **IMPLEMENTED** | VEP 115 (GRCh38 cache, MANE prioritized) + **CADD v1.7, SpliceAI, REVEL and AlphaMissense plugins** + two `bcftools annotate` transfers (ClinVar sites VCF, gnomAD v4.1 joint slim) | The whole contract. No LOFTEE/dbNSFP file |
 | Functional ladder | **IMPLEMENTED** | `keep_impacts: [HIGH, MODERATE]` → keep; **else** `spliceai_ds_min: 0.2` → keep; **else** `cadd_phred_supporting: 25.3` → keep; else drop `not_functional` | Three rungs; nothing else. `src/hprv/selection.py` |
 | CADD threshold | **IMPLEMENTED** | PHRED ≥ **25.3** | **Off-label**: missense-calibrated, applied only to non-coding. A discovery rank (≈ top 0.3%), *not* PP3 |
-| ClinVar override | **IMPLEMENTED** | `CLIN_SIG` P/LP → keep; also rescues from `too_common`; `conflicting` excluded | **No star gate** — the cache has no `CLNREVSTAT`. Unstarred 1★ P/LP is honored. ClinVar pinned at 2025-02 |
-| Hard benign | **IMPLEMENTED** | drop if AF ≥ **0.05** (BA1) | Never rescued, not even by ClinVar P/LP |
-| Annotation stack (full) | TARGET | + LOFTEE (`grch38` branch) + REVEL/AlphaMissense | Version-pin all; ~15 GB total. [limitations.md](limitations.md) |
+| ClinVar override | **IMPLEMENTED** | `CLIN_SIG` P/LP → keep; also rescues from `too_common`; `conflicting` excluded | **No star gate, by design** — `clinvar_stars` (from the ClinVar transfer) ranks in Step 9; the screen honors a 1★ P/LP and Step 9 ranks it below a 3★ one. The override reads the cache's `CLIN_SIG` (pinned at 2025-02) |
+| Hard benign | **IMPLEMENTED** | drop if `rarity_af` ≥ **0.05** (BA1) | Never rescued, not even by ClinVar P/LP |
+| Annotation stack (full) | TARGET | + LOFTEE (`grch38` branch) | ~13 GB, mostly the GERP bigwig. [limitations.md](limitations.md) |
 | pLoF confidence | TARGET | LOFTEE **HC, no flags** | NMD-escape / last-exon / 3′-50 bp / single-exon → downgrade PVS1 (Abou Tayoun tree) |
 | PVS1 gating | TARGET | ClinGen gene–disease validity ≥ Moderate + known LoF mechanism | See [gene_constraint.md](gene_constraint.md) |
-| Missense (primary) | TARGET | **REVEL** PP3 supporting ≥ 0.644 / moderate ≥ 0.773 / strong ≥ 0.932; BP4 ≤ 0.290 / ≤ 0.183 | **Tiering only** — inert as a screen filter (missense is MODERATE, kept a rung earlier) |
-| Missense (orthogonal) | TARGET | **AlphaMissense** likely_pathogenic ≥ 0.564; ambiguous 0.34–0.564; likely_benign ≤ 0.34 | Do not stack with REVEL as independent evidence |
+| Missense (primary) | **IMPLEMENTED (Step 9 tier)** | **REVEL** supporting ≥ 0.644 (V3) / moderate ≥ 0.773 (V4) / benign ≤ 0.290 (V1); no strong cut in code | **Tiering only** — inert as a screen filter (missense is MODERATE, kept a rung earlier). Required by default |
+| Missense (second in precedence) | **IMPLEMENTED (Step 9 tier)** | **AlphaMissense** likely_pathogenic ≥ 0.564; ambiguous 0.34–0.564; likely_benign ≤ 0.34 | Consulted only when REVEL is absent for the variant — never stacked with it |
 | Regional missense | TARGET | **MPC ≥ 2** up-weights; missense Z > 3.09 gene support | Missense-only ⇒ tiering only |
 | Splicing | **IMPLEMENTED** (keep-path; the PP3/BP4 tiering around it is TARGET) | **SpliceAI** PP3 Δ ≥ 0.2; BP4 Δ ≤ 0.1; 0.1–0.2 uninformative; canonical ±1,2 Δ ≥ 0.5 high tier | Walker calibrated on **RAW** Δ, window ±4,999 nt. No PP3 if PVS1(splice) applies |
 | Benign deprioritize (BP4) | TARGET | REVEL ≤ 0.183 **AND** AlphaMissense ≤ 0.34 **AND** SpliceAI Δ ≤ 0.1 | Deprioritize, not discard, if in a critical gene |
 | Evidence hygiene | TARGET | One calibrated predictor per variant; cap at Pejaver strength | Never sum correlated predictors |
 
-**Ordering:** apply the rarity gate first and genotype/QC gates (see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)) before functional tiering, so functional scoring runs only on variants that survive frequency and quality screening. Note the rarity gate is **not** `faf95` as implemented: the VEP cache carries no AC/AN, so faf95 cannot be computed at any price and the gate uses a grpmax **point-estimate proxy** over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — see [allele_frequency.md](allele_frequency.md). Calibrated functional evidence would then feed ACMG/AMP classification (see [clinical_classification.md](clinical_classification.md)); that step is not built, so today's output is a screen, not a classification.
+**Ordering:** apply the rarity gate first and genotype/QC gates (see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)) before functional tiering, so functional scoring runs only on variants that survive frequency and quality screening. The rarity gate is `rarity_af` — gnomAD **faf95** from the joint slim by default, the grpmax point-estimate proxy only under `oracle: grpmax_proxy` — see [allele_frequency.md](allele_frequency.md). Calibrated functional evidence would then feed ACMG/AMP classification (see [clinical_classification.md](clinical_classification.md)); that step is not built, so today's output is a screen, not a classification.
 
 ## Scope limitations (state honestly)
 
@@ -260,13 +281,13 @@ The complete ledger — every gap, why it exists, and what each costs to close �
 **[limitations.md](limitations.md)**. Read it before interpreting a negative result. Specific to
 this layer:
 
-- **The predictor stack is two predictors.** CADD, on a threshold calibrated for a variant class that never reaches it, plus SpliceAI for splice disruption. There is no pLoF confidence, no missense score, and no star-gated clinical evidence. A negative result from this layer means "no HIGH/MODERATE-impact variant, no SpliceAI-high and no CADD-high non-coding variant", **not** "nothing functional here".
+- **The screen's predictor stack is two predictors.** CADD, on a threshold calibrated for a variant class that never reaches it, plus SpliceAI for splice disruption. REVEL/AlphaMissense exist but only rank (Step 9); there is no pLoF confidence, and ClinVar review status ranks rather than gates. A negative result from this layer means "no HIGH/MODERATE-impact variant, no SpliceAI-high and no CADD-high non-coding variant", **not** "nothing functional here".
 - **SNV/indel only.** This layer does not detect CNV/SV, which account for ~10–15% of pediatric-cancer and rare-disease diagnoses (single-exon RB1/SMARCB1/DICER1/NF1 deletions, PMS2 rearrangements). LOFTEE and the missense predictors cannot see these either; a future GATK-gCNV / Manta / ExomeDepth module is required.
 - **Pseudogene / segmental-duplication regions** (PMS2/PMS2CL, CYP21A2, SMN1/2, NEB, GBA) yield low-confidence short-read calls and functional annotation on paralog-mapping variants is unreliable. **These regions are currently neither flagged nor masked** — that is a TARGET, not present behavior.
 - **Non-coding regulatory variants** fall in VEP MODIFIER, where prediction is weak; they are not scored to reportable tiers by this layer alone. They are nonetheless the only class the CADD rung acts on — sub-MODERATE variants with no SpliceAI signal — which is precisely the off-label problem above.
 - **Predictor calibration** is anchored to ClinVar-derived truth sets (Pejaver, Walker, AlphaMissense); performance on genes/regions under-represented in those sets is not guaranteed. Pipeline-wide sensitivity/precision **are unmeasured, not measured-and-acceptable** — GIAB/CMRG truth sets and a positive-control panel remain TODO.
 
-Every one of these is **additive to fix**: the VEP-only contract is a single seam — one `bcftools annotate`/plugin addition in Step 2 plus the INFO field in `annotations.F`. Nothing in the architecture forecloses any of it.
+Every one of these is **additive to fix**: the VEP-centric contract is a single seam — one `bcftools annotate`/plugin addition in Step 2 plus the INFO field in `annotations.F`. Nothing in the architecture forecloses any of it.
 
 ## Sources
 

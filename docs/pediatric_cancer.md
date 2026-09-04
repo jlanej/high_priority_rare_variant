@@ -5,29 +5,27 @@ How this pipeline recognizes and tiers germline cancer-predisposition-syndrome (
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ### ⚠ Status: this overlay is a **TARGET**; its rarity field depends on one optional resource
+> ### ⚠ Status: this overlay is a **TARGET**; the rarity, splice, missense and ClinVar-star inputs it would read ARE live
 >
 > The CPS tiering described here (gene-list union, second-hit boost, graded PVS1) is **not wired
-> into the pipeline** — it is the design for a reporting overlay. Corrections to the rarity
-> statements below, from the **VEP-centric contract** (VEP 115 cache + CADD/SpliceAI/REVEL/
-> AlphaMissense plugins, plus two `bcftools` transfers,
-> nothing else):
-> the shared rarity gate reads a gnomAD v4.1 **grpmax point-estimate proxy**, **not** `faf95` (the
-> cache has no AC/AN, so faf95 needs the optional gnomAD joint slim); and **`nhomalt` likewise
-> requires that slim**, so
-> every "absent-or-singleton + low `nhomalt`" condition below is a TARGET, not a live gate.
-> Likewise LOFTEE HC, REVEL/AlphaMissense and ClinVar **stars** are unavailable — a
-> "ClinVar P/LP at ≥ 2★" rule is currently **unimplementable**. **SpliceAI IS available** (a VEP
-> plugin over the precomputed raw scores, required by default), so splice-disrupting rules below
-> are live rather than TARGET — but only via the precomputed set, which covers all SNVs yet only
-> 1 nt insertions and deletions ≤ 4 nt.
+> into the pipeline** — it is the design for a reporting overlay. What the shared layers actually
+> supply, under the **VEP-centric contract** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense
+> plugins, plus two `bcftools` transfers): the shared rarity gate reads `rarity_af` — gnomAD v4.1
+> **`faf95`** from the joint slim by default (the grpmax point-estimate proxy only under
+> `oracle: grpmax_proxy`); **`nhomalt`** is transferred with the same slim and is reported (Step 9's
+> `nhomalt_recessive_conflict`), never gated, so every "absent-or-singleton + low `nhomalt`"
+> condition below is a TARGET rule, not a live gate; ClinVar **stars** are available
+> (`clinvar_stars`) and rank in Step 9 — a "ClinVar P/LP at ≥ 2★" *gate* stays unimplemented by
+> design (never-drop); **REVEL/AlphaMissense** are annotated and feed Step 9's missense tier;
+> **SpliceAI IS live** as a keep-path (precomputed raw scores, required by default — covering all
+> SNVs yet only 1 nt insertions and deletions ≤ 4 nt). **LOFTEE HC** remains unavailable.
 > Full ledger: **[limitations.md](limitations.md)**.
 
 ## TL;DR
 
 - **~8–10% of pediatric cancers carry a P/LP germline CPS variant** (Zhang 2015: 8.5%; Gröbner 2018: 7.6%), and **family history does NOT predict it** — pedigree cancer history is not a valid pre-filter.
 - **Gene list is a version-pinned union used as a PRIOR/TIER, never a hard include/exclude**: ACMG SF v3.3 (84 genes) cancer subset ∪ PanelApp GE green childhood panels ∪ a curated recessive CPS set. The never-drop rule preserves novel-gene discovery.
-- **Rarity default = the shared grpmax field** — a **point-estimate proxy** as implemented, `faf95` as the target (see the banner): dominant/de novo `< 1e-4`; recessive per-allele `< 1e-2` (permissive), `< 1e-3` high-confidence tier; `≥ 0.05` (BA1) → drop.
+- **Rarity default = the shared `rarity_af` field** — gnomAD `faf95` by default (see the banner): dominant/de novo `< 1e-4`; recessive per-allele `< 1e-2` (permissive), `< 1e-3` high-confidence tier; `≥ 0.05` (BA1) → drop.
 - **Zygosity by mechanism**: dominant CPS → report **het** P/LP; recessive CPS (CMMRD, Fanconi, AT, DIS3L2, BLM) → require **biallelic** (hom or trans compound-het via trio phasing).
 - **De novo** P/LP in a dominant CPS gene = **top tier** (trio design is a strength here); use GATK `hiConfDeNovo` then re-verify with DP/AB + parental-cleanliness.
 - **Second hit** (LOH, biallelic somatic loss, or a gene-specific hotspot like the DICER1 RNase-IIIb codons) = **tier boost, never a filter requirement** — Kids First per-trio VCFs are germline-only.
@@ -103,15 +101,15 @@ Store the panel version and download date with the container image (see [tooling
 
 ## Rarity, consequence, and clinical evidence
 
-Rarity and impact gating is applied **before and independently of** the CPS gene priors. All frequency filtering uses the shared frequency oracle in [allele_frequency.md](allele_frequency.md): **gnomAD v4.1** (GRCh38; 730,947 exomes + 76,215 genomes). **As implemented** the filter field is the **grpmax proxy** — a *point estimate* over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS), read from the VEP cache. **grpmax `faf95`** (the 95% CI lower bound) is the **TARGET**: it needs AC/AN, which the cache does not carry ([limitations.md §2](limitations.md)). Never use internal cohort AC/AN as a population frequency; the non-joint per-trio merge makes AN uninterpretable.
+Rarity and impact gating is applied **before and independently of** the CPS gene priors. All frequency filtering uses the shared frequency oracle in [allele_frequency.md](allele_frequency.md): **gnomAD v4.1** (GRCh38; 730,947 exomes + 76,215 genomes). **As implemented** the filter field is `rarity_af`: **grpmax `faf95`** (the 95% CI lower bound, from the gnomAD joint slim) by default, the VEP-cache **grpmax proxy** — a *point estimate* over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — only under the deliberate opt-down `oracle: grpmax_proxy` ([limitations.md §2](limitations.md)). Never use internal cohort AC/AN as a population frequency; the non-joint per-trio merge makes AN uninterpretable.
 
 | Layer | Default | Notes |
 |---|---|---|
-| Dominant / de novo rarity | grpmax **proxy** AF `< 1e-4` (target: faf95) | The de novo absent-or-singleton + low `nhomalt` add-on is a **TARGET** — no `nhomalt` field exists |
-| Recessive per-allele rarity | grpmax **proxy** AF `< 1e-2` (permissive); `< 1e-3` high-confidence tier | Applied **per variant**, not per gene (literature ranges 1e-3 to 1e-2 across sources) |
-| Hard benign (all modes) | grpmax **proxy** AF `≥ 0.05` (BA1) | Drop, never rescue |
-| Consequence | *TARGET:* LOFTEE HC (no flags) pLoF; missense with ClinVar P/LP or calibrated damaging in-silico. **Live: VEP IMPACT HIGH/MODERATE, else CADD ≥ 25.3** | See functional layer below |
-| ClinVar | *TARGET:* auto-promote P/LP at **≥ 2★** (no conflicts). **Unimplementable today — no `CLNREVSTAT`; unstarred P/LP is honored** | 1★ P/LP → prioritize + human review; VUS/Conflicting → flag, never auto-promote |
+| Dominant / de novo rarity | `rarity_af` `< 1e-4` (faf95 by default) | The de novo absent-or-singleton + low `nhomalt` add-on is a **TARGET** — `nhomalt` is reported (Step 9), never gated |
+| Recessive per-allele rarity | `rarity_af` `< 1e-2` (permissive); `< 1e-3` high-confidence tier | Applied **per variant**, not per gene (literature ranges 1e-3 to 1e-2 across sources) |
+| Hard benign (all modes) | `rarity_af` `≥ 0.05` (BA1) | Drop, never rescue |
+| Consequence | *TARGET:* LOFTEE HC (no flags) pLoF. **Live: VEP IMPACT HIGH/MODERATE, else SpliceAI ≥ 0.2, else CADD ≥ 25.3**; REVEL/AlphaMissense rank missense in Step 9 | See functional layer below |
+| ClinVar | **Live:** every P/LP is honored at the screen (star-blind by design); `clinvar_stars` from the ClinVar transfer ranks in Step 9. A ≥ 2★ auto-promote *gate* is retired (never-drop) | 1★ P/LP → ranked below 3★; VUS/Conflicting → never promoted, never dropped on ClinVar grounds |
 
 A gene-specific ClinGen VCEP BA1/BS1 value (or a Whiffin/Ware maximum credible AF) **overrides** these generic cutoffs whenever available.
 
@@ -135,14 +133,14 @@ Most high-yield dominant CPS genes (TP53, RB1, APC, the MMR genes, NF1, WT1, SMA
 | Parameter | Default | Override source |
 |---|---|---|
 | **Gene list** | ACMG SF v3.3 cancer subset ∪ PanelApp GE green childhood panels (pin `version`) ∪ recessive CPS set {MLH1, MSH2, MSH6, PMS2, FANC\*, BRCA2, ATM, DIS3L2, BLM} — used as PRIOR/TIER, never hard include/exclude | `config/config.example.yaml`; store panel version + download date in container |
-| **Population AF field** | **IMPLEMENTED:** gnomAD v4.1 grpmax **proxy** (point estimate, via the VEP cache). *TARGET:* joint grpmax `faf95` | [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md) |
-| **Dominant / de novo rarity** | proxy AF `< 1e-4`. *TARGET:* on faf95, + de novo absent-or-singleton / low `nhomalt` (**no `nhomalt` field exists**) | ClinGen VCEP / max credible AF |
-| **Recessive rarity** | proxy AF `< 1e-2` per allele (permissive); `< 1e-3` high-confidence | per-variant, not per-gene |
-| **Hard benign** | proxy AF `≥ 0.05` (BA1) → drop | — |
-| **Consequence** | *TARGET* (needs LOFTEE + a missense predictor): LOFTEE HC no-flag pLoF; missense with ClinVar P/LP or calibrated damaging in-silico; graded PVS1 only in LOF-mechanism genes. **Live screen = VEP IMPACT HIGH/MODERATE, else CADD ≥ 25.3** | [functional_annotation.md](functional_annotation.md) |
-| **ClinVar** | *TARGET:* auto-report P/LP at ≥ 2★, no conflicts (dated, pinned release). **Live: unstarred `CLIN_SIG` P/LP — no `CLNREVSTAT` in the cache** | [clinical_classification.md](clinical_classification.md) |
-| **Genotype QC** | Refined GQ ≥ 20; DP ≥ 10 (≥ 20 for de novo); het AB 0.25–0.75; FILTER = PASS | [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md) |
-| **De novo** | GATK `hiConfDeNovo` screen → re-verify DP/AB + parental cleanliness (each parent alt AD ≤ 1, DP ≥ 10); top tier in dominant CPS genes. The gnomAD absent/singleton add-on is **retired** (no `nhomalt`) | — |
+| **Population AF field** | **IMPLEMENTED:** gnomAD v4.1 joint grpmax `faf95` (default; joint slim) — the VEP-cache grpmax proxy only under `oracle: grpmax_proxy` | [allele_frequency.md](allele_frequency.md), [limitations.md §2](limitations.md) |
+| **Dominant / de novo rarity** | `rarity_af` `< 1e-4` (faf95 by default). *TARGET:* de novo absent-or-singleton / low `nhomalt` (`nhomalt` is reported, not gated) | ClinGen VCEP / max credible AF |
+| **Recessive rarity** | `rarity_af` `< 1e-2` per allele (permissive); `< 1e-3` high-confidence | per-variant, not per-gene |
+| **Hard benign** | `rarity_af` `≥ 0.05` (BA1) → drop | — |
+| **Consequence** | *TARGET* (needs LOFTEE): LOFTEE HC no-flag pLoF; graded PVS1 only in LOF-mechanism genes. **Live screen = VEP IMPACT HIGH/MODERATE, else SpliceAI ≥ 0.2, else CADD ≥ 25.3**; REVEL/AlphaMissense rank missense in Step 9 | [functional_annotation.md](functional_annotation.md) |
+| **ClinVar** | **Live:** star-blind `CLIN_SIG` P/LP keep at the screen; `clinvar_stars` (dated, pinned ClinVar VCF transfer) ranks in Step 9. A ≥ 2★ auto-report *gate* is retired by design | [clinical_classification.md](clinical_classification.md) |
+| **Genotype QC** | Refined GQ ≥ 20; DP ≥ 10 (≥ 20 for de novo); het AB 0.25–0.75; FILTER = `PASS` or `.` | [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md) |
+| **De novo** | GATK `hiConfDeNovo` screen → re-verify DP/AB + parental cleanliness (each parent alt AD ≤ 1, DP ≥ 10); top tier in dominant CPS genes. The gnomAD absent/singleton add-on is **retired by choice** (`nhomalt` is reported, not gated) | — |
 | **Zygosity** | Dominant → het P/LP reportable; recessive → biallelic (hom or trans compound-het by trio phasing) | — |
 | **Second-hit boost** | +1 tier if matched somatic LOH/biallelic loss or gene-specific hotspot (e.g., DICER1 RNase-IIIb E1705/D1709/E1788/D1810/E1813); never required | — |
 | **PMS2** | Pseudogene(PMS2CL)-aware calling/annotation; flag PMS2 exons 11–15 low-confidence | — |

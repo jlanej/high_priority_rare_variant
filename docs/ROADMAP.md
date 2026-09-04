@@ -5,9 +5,10 @@ From a 10-domain SOTA literature review (2023–2026) against the current repo. 
 constrained inherited variants = candidates*. Effort is "to add here." This is a living document —
 update it as items land. (Out of scope by design: de novo review, mtDNA — separate pipelines.)
 
-## Restoring the VEP-only contract's gaps (start here — best ROI in the repo)
+## Restoring the VEP-centric contract's gaps (mostly done)
 
-The first pass runs on a VEP 115 cache + the CADD and SpliceAI plugins; see
+The pipeline runs on a VEP 115 cache + the CADD/SpliceAI/REVEL/AlphaMissense plugins and two
+`bcftools annotate` transfers (the ClinVar sites VCF and the gnomAD joint slim); see
 **[limitations.md](limitations.md)** for
 the full ledger of what that costs and why each was an acceptable trade. Each row below is
 **additive**: one `bcftools annotate` transfer in `02_annotate_sites.sh` plus its INFO field in
@@ -15,10 +16,10 @@ the full ledger of what that costs and why each was an acceptable trade. Each ro
 
 | # | Restore | Size | Buys | Notes |
 |---|---------|:----:|------|-------|
-| R1 | **ClinVar VCF** | ~0.18 GB | `CLNREVSTAT` ⇒ the ≥2★ auto-promote gate, + a monthly release instead of the cache's ClinVar 2025-02 | Cheapest win by an order of magnitude. |
+| R1 | **✅ DONE — ClinVar VCF** | ~0.18 GB | `CLNREVSTAT` ⇒ `clinvar_stars`, + an independently pinned release beside the cache's ClinVar 2025-02 | Transferred in Step 2. Stars RANK in Step 9 (positive limb damped below `min_review_stars`); the ≥2★ auto-promote *gate* this row once proposed is deliberately NOT built — it would violate never-drop. |
 | R2 | **✅ DONE — SpliceAI** | ~28 GB | Deep-intronic + exonic-synonymous splice, as rung 2 of the functional ladder (Δ ≥ `spliceai_ds_min`, default 0.2) | Shipped BETTER than this row proposed: the FULL raw SNV+indel set as a VEP **plugin** (not a bcftools transfer, not the Δ≥0.1 MANE-only slim), **required by default** (`spliceai_required`). Remaining gap: the precomputed set covers only 1 nt insertions and deletions ≤ 4 nt, at ±50 nt — see limitations.md. Contig-naming guard still applies. |
-| R3 | **✅ DONE — gnomAD slim (5 of 664 INFO fields)** | ~10 GB | True `faf95` (restores the CI correction) + `nhomalt` | Implemented: `prepare_resources.sh --only gnomad_sites fetch` stream-slims the 24 joint chrom VCFs (nothing raw lands; needs htslib+libcurl, checked via `samtools --version`), Step 2 transfers them, and `annotations.frequency()` prefers faf95 with a per-variant proxy fallback reported as `rarity_oracle`. FAF groups verified as afr/amr/eas/mid/nfe/sas. |
-| R4 | **Dedicated REVEL (+ AlphaMissense)** | ~1.3 GB | Reporting/tiering columns; the ClinGen-calibrated predictor for a PP3/BP4 step | **Buys the *screen* nothing** — see limitations.md §7. Use the dedicated files, **not** dbNSFP (30 GB for 5 columns, and its URL is dead: S3 `NoSuchBucket`, now registration-gated). Trap: Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`, not `AlphaMissense_score`. |
+| R3 | **✅ DONE — gnomAD slim (5 of 664 INFO fields)** | ~10 GB | True `faf95` (restores the CI correction) + `nhomalt` | Implemented: `prepare_resources.sh --only gnomad_sites fetch` stream-slims the 24 joint chrom VCFs (nothing raw lands; needs htslib+libcurl, checked via `samtools --version`), Step 2 transfers them, and `annotations.frequency()` reads faf95 as the ONE oracle for the run (`resources.gnomad.oracle: faf95`, the default — required, halts without the slim); `grpmax_proxy` is the deliberate opt-down and the arms never cross. `rarity_oracle` is recorded once per run, `rarity_basis` (`measured`/`zero_ci`/`absent`) per variant. FAF groups verified as afr/amr/eas/mid/nfe/sas. |
+| R4 | **✅ DONE — Dedicated REVEL + AlphaMissense** | ~1.3 GB | Step 9's missense tier (REVEL → AlphaMissense → CADD, a fixed precedence); required by default | **Buys the *screen* nothing** — see limitations.md §7. Wired as VEP plugins over the dedicated files, **not** dbNSFP (30 GB for 5 columns, and its URL is dead: S3 `NoSuchBucket`, now registration-gated). Trap handled: Ensembl's `AlphaMissense.pm` emits `am_pathogenicity`, not `AlphaMissense_score`. |
 | R5 | **LOFTEE data** | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | Plugin code already in the image; near-inert for *selection* (HIGH impact already keeps every pLoF), so this is a tiering prerequisite. |
 
 Not a download, but on this list because it gates the same reasoning: **CADD's threshold is
@@ -38,10 +39,10 @@ no ClinGen-endorsed alternative to swap in. Region-stratified calibration is res
 
 | # | Gap | Impact | Effort | Why now |
 |---|-----|:------:|:------:|---------|
-| 1 | **✅ DONE.** **Calibrated recurrence null + cross-gene FDR.** From each qualifying variant's gnomAD `faf95` + N_trios, compute expected carriers → binomial/Poisson tail → BH-q **per gene**. | High | Low | *The* defensibility gap: today 2 carriers at faf95≈1e-4 rank the same as 2 truly-private carriers, and long/mutable genes float up uncorrected. Reuses the de-novo arm's `poisson.sf`/`bh_fdr`. *(Step 6: `p_recurrence`/`q_recurrence`/`recurrence_exome_wide_sig`.)* |
+| 1 | **✅ DONE (as a rank).** **Case-only recurrence null + cross-gene FDR, plus the mutational-target carrier expectation.** From each qualifying variant's `rarity_af` + N_trios, compute expected carriers → binomial tail → BH-q **per gene**; and, with a mutational-target table, `exp_carriers_mu`/`p_carrier_excess` (`burden.rank_by_mutational_target`). | High | Low | *The* defensibility gap: 2 carriers at faf95≈1e-4 once ranked the same as 2 truly-private carriers, and long/mutable genes floated up uncorrected. The binomial null is a case-only RANK — it saturates for private variants, so never call it calibrated; the mutational-target expectation is what stops long genes leading by size. *(Step 6: `p_recurrence`/`q_recurrence`/`recurrence_exome_wide_sig`, `p_carrier_excess`.)* |
 | 2 | **somalier: per-sample ancestry (1KG/HGDP PCs) + cross-cohort relatedness/dup/swap + joint sex.** | High | Low | A swapped/dup proband fabricates recurrence; ancestry-mismatched faf95 mis-estimates rarity. Already imaged, unused. **Unblocks CoCoRV**; also fixes the fragile chrX-only sex check. |
 | 3 | **◐ PARTIAL.** **Contamination screen (verifyBamID FREEMIX + a VCF-only raw proxy).** | High | Low | 1–3% contamination turns hom-ref→apparent-het, manufacturing false inherited hets / comp-het second hits. **FREEMIX path is production-ready**; the VCF-only fallback is a raw (uncorrected) ref-read fraction — a CHARR-*like* proxy, **not** the calibrated Lu-2023 statistic — that flags only gross (≳5–8%) contamination, so it does **not** yet catch the 1–3% band. *(Step 0: verifyBamID `FREEMIX` if `resources.selfsm_dir` set, else the raw proxy; `contam_flag` folds into the **advisory** `overall_pass`, which no step auto-excludes yet.)* **TODO:** a corrected CHARR (per-genotype mean `/mean(1−AF)`, baseline-subtracted, threshold re-derived from spike-ins) post-annotation, and/or config-gated exclusion of flagged trios from the recurrence tally. |
-| 3b | **◐ PARTIAL.** **Null calibration diagnostic + a graded artifact down-weight (Step 9).** | High | Med | *The* other half of the A-3 gap. **DONE:** a **mid-p calibration diagnostic** is computed for the fitted null and for the Poisson alternative on every run (`audit/counts.tsv` → `calibration.*`), so the NB-vs-Poisson choice is auditable rather than asserted — measured 2.51× Poisson anti-conservatism at α=1e-3 vs 0.31× for the NB. Plus a per-gene **excess-over-mutational-target** statistic (NB2, trimmed fit, BH-FDR), a six-signal artifact panel, and a four-tier graded down-weight that triaged **10.4% of the candidate list at 100% established-gene retention** — never a drop. *(Step 9: `variants.prioritized.tsv` / `genes.prioritized.tsv`; see [prioritization.md](prioritization.md).)* **TODO:** the **synonymous-λ** check and a positive-control **recovery** measurement on real data — neither needs a new resource, and λ ≫ 1 would mean every rank in the scheme inherits a filter bias. |
+| 3b | **◐ PARTIAL.** **Null calibration diagnostic + a graded artifact down-weight (Step 9).** | High | Med | *The* other half of the A-3 gap. **DONE:** a **mid-p calibration diagnostic** is computed for the fitted null and for the Poisson alternative on every run (`audit/counts.tsv` → `calibration.*`), so the NB-vs-Poisson choice is auditable rather than asserted — measured 2.41× Poisson anti-conservatism at α=1e-3 (arm trimmed; 1.82× untrimmed) vs 0.31× for the NB. Plus a per-gene **excess-over-mutational-target** statistic (NB2, trimmed fit, BH-FDR), a six-signal artifact panel, and a four-tier graded down-weight that triaged **9.57% of the candidate list at 100% established-gene retention** (default count floor; 10.36% at floor 1) — never a drop. *(Step 9: `variants.prioritized.tsv` / `genes.prioritized.tsv`; see [prioritization.md](prioritization.md).)* **TODO:** the **synonymous-λ** check and a positive-control **recovery** measurement on real data — neither needs a new resource, and λ ≫ 1 would mean every rank in the scheme inherits a filter bias. |
 | 4 | **PP1/BS4 co-segregation points** (ingest parent affected status from PED col 6) **+ a variant-keyed meiosis ledger** to sum segregations across families. | High | Low | The one informative meiosis per trio is discarded today; the ledger turns the cohort into the extended pedigree a single trio lacks. |
 | 5 | **UTRannotator** (5′UTR/uORF) VEP plugin. | High | Low | One-line VEP fix: uAUG-creating/uORF-disrupting variants in haploinsufficient CPS genes (NF1, RB1) are currently dropped as `not_functional`. Ships with VEP 115. |
 | 6 | **UPD screen (UPDhmm/UPDio)** to *rescue* apparent-Mendelian-error homozygous recessives. | High | Low | The recessive logic currently deletes the UPD case (1/1 child + 0/0 parent → "Mendelian error"); paternal UPD(11p15) → ~20% of Beckwith-Wiedemann. |
@@ -83,12 +84,13 @@ carriers show a second hit; high impact but a new matched-tumor pipeline.
   never rescue a molecularly-benign prediction — that is how gene-list priors turn into
   confirmation bias), it is a **prior and never a filter**, and it **defaults OFF** with the list
   living in a config file path rather than in code, so hprv itself names no gene. The
-  **MOI-consistency cross-check is also live** (`moi_coherent`/`discordant`/`unknown`, with
+  **MOI-consistency cross-check is also live** (`moi_coherence` ∈ `coherent`/`discordant`/`unknown`, with
   `unknown` scoring *exactly* 0 so novel genes are never punished, and the audit-A-6 long-gene
-  comp-het drift suppressing the discordance penalty). **TODO:** the version-pinned list *content*
-  — PanelApp GE green returned Cloudflare 403 to the retrieving client and no machine-readable
-  ACMG SF v3.3 source was reached, so both are absent from the established-gene union too, and the
-  100%-retention figure will move once they are added.
+  comp-het drift suppressing the discordance penalty). **Done since:** the version-pinned list
+  *content* — PanelApp 243 v5.12 / 259 v1.30 green and ACMG SF v3.3 were fetched and added to the
+  established-gene union (2,218 genes); the 100%-retention figure did **not** move. Residual: ACMG
+  SF v3.3 membership is recalled rather than machine-read — replace it with the published table
+  before publication (see prioritization.md §6).
 - **Constitutional-mosaic tier** (VAF 0.03–0.30, beta-binomial vs DP) — the rigid 0.25 AB floor drops
   mosaic TP53/NF1; shares VAF machinery with a **CHIP confounder flag**.
 - **Extended-window splicing** (SpliceVault / Pangolin) for deep-intronic/cryptic pseudoexons.

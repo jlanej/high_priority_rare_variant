@@ -177,11 +177,11 @@ Reproducibility of a *decision* is only as good as the pipeline's coverage. Stat
 | ensembl-vep | **115** (from the base image; matches the working annotate script) |
 | Python | `cyvcf2` / `pysam` (htslib 1.23) / `pandas` / `numpy`, version-pinned (`conda-lock` = TARGET) |
 | VEP cache | **external, bind-mounted, release-matched** to the VEP binary; annotate against **GRCh38** |
-| Frequency oracle | **gnomAD v4.1** (external only), read from the **VEP cache**; filter field is the grpmax **proxy** (point estimate). `faf95` = TARGET — the cache carries no AC/AN ([limitations.md §2](limitations.md)) |
+| Frequency oracle | **gnomAD v4.1** (external only), ONE quantity per run: `faf95` from the pinned gnomAD joint slim (default) or the VEP-cache grpmax **proxy** (opt-down) ([limitations.md §2](limitations.md)) |
 | CI / publish | buildx → **GHCR** per commit; tag by git SHA + branch; `provenance: true` + `sbom: true` + `attest-build-provenance`; **amd64-only**; consume by `@sha256:` digest |
 | Apptainer runtime | `APPTAINER_TMPDIR`/`CACHEDIR` → node scratch; **no `--containall`**; `--bind $SCRATCH/tmp:/tmp` + refs; `--cleanenv` |
 | Repo hygiene | config-driven paths + env vars; `.gitignore` all VCF/BAM/CRAM/PED/results; dbGaP data never committed |
-| Resource pinning | VEP cache release, gnomAD v4.1, dated ClinVar release, Exomiser 15.1.0 + matching data release — all version-pinned |
+| Resource pinning | VEP cache release; CADD, SpliceAI, REVEL, AlphaMissense files; the gnomAD v4.1 joint slim and the dated ClinVar VCF (`resources/manifest.env`); Exomiser 15.1.0 + matching data release (TARGET) — all version-pinned |
 
 All values are **configurable defaults** in `config/config.example.yaml`, not immutable law; a gene-specific ClinGen VCEP value overrides any generic cutoff.
 

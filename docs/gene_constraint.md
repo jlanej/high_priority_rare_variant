@@ -5,9 +5,11 @@ How this pipeline uses gene- and region-level constraint metrics as graded prior
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> **What is actually wired (Step 6):** only **LOEUF_v2 (`oe_lof_upper`) < 0.35**, **pLI ≥ 0.90**,
-> **s_het ≥ 0.10**, and **pHaplo ≥ 0.86**, read from the constraint TSV and collapsed into a single
-> boolean `constrained` flag that up-weights a gene's rank (`06_gene_burden.py`). Everything else
+> **What is actually wired:** only **LOEUF_v2 (`oe_lof_upper`) < 0.35**, **pLI ≥ 0.90**,
+> **s_het ≥ 0.10**, and **pHaplo ≥ 0.86**, read from the constraint TSV. Step 6 collapses them into
+> a single boolean `constrained` flag that up-weights a gene's rank (`06_gene_burden.py`, every
+> model alike); Step 9 applies the same four cutoffs (`gene_is_constrained`) as a mechanism-gated
+> `+1` term that is **zeroed for the recessive modes** (`zero_constraint_for_recessive_modes`). Everything else
 > below — **MPC**, **missense-Z**, **pTriplo**, **ClinGen HI/dosage**, **DOMINO**, and the Tier 1/2/3
 > scheme — is **TARGET / reference science, not yet wired**; no code reads those columns or tiers.
 
@@ -83,7 +85,7 @@ ClinGen dosage curation (`HI` / `TS`) is authoritative where present and is repo
 
 ## Interpreting constraint by inheritance model
 
-- **Dominant / haploinsufficient genes:** constraint is directly informative. Low LOEUF, high pLI, high s_het, high pHaplo, or ClinGen HI = 3 → strong prior for pLoF pathogenicity. A high-confidence pLoF (LOFTEE HC, no flags — see [functional_annotation.md](functional_annotation.md)) in a constrained gene is a top nomination. *(The LOFTEE HC qualifier is a **TARGET**: no LOFTEE data files are fetched under the VEP-only contract, so "pLoF" today means VEP `IMPACT=HIGH`, unfiltered for NMD-escape — [limitations.md §5](limitations.md).)*
+- **Dominant / haploinsufficient genes:** constraint is directly informative. Low LOEUF, high pLI, high s_het, high pHaplo, or ClinGen HI = 3 → strong prior for pLoF pathogenicity. A high-confidence pLoF (LOFTEE HC, no flags — see [functional_annotation.md](functional_annotation.md)) in a constrained gene is a top nomination. *(The LOFTEE HC qualifier is a **TARGET**: no LOFTEE data files are fetched under the VEP-centric contract, so "pLoF" today means VEP `IMPACT=HIGH`, unfiltered for NMD-escape — [limitations.md §5](limitations.md).)*
 - **Recessive genes:** most are **NOT** LoF-constrained (biallelic loss is rare in the population), so a tolerant pLI / high LOEUF does **not** argue against pathogenicity. **Do not down-weight recessive (compound-het / homozygous) candidates using pLoF constraint.** Missense metrics (MPC, missense Z) retain some value; rely otherwise on ClinGen recessive curation and variant-level evidence (see [inheritance_and_genotype_qc.md](inheritance_and_genotype_qc.md)).
 - **Pediatric cancer genes:** defer to curated lists (ClinGen HI = 3, COSMIC Cancer Gene Census germline, established predisposition genes — see [pediatric_cancer.md](pediatric_cancer.md)) over generic constraint, since several are recessive or tumor-suppressor genes with variable constraint.
 

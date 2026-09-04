@@ -5,33 +5,35 @@ How this pipeline uses GATK genotype-refinement annotations, per-genotype QC gat
 > Part of the high_priority_rare_variant methods reference. Thresholds here are the
 > configurable defaults defined in [Canonical defaults](README.md#canonical-defaults).
 
-> ### ⚠ The rarity field here is `faf95` ONLY when the gnomAD joint slim is configured
+> ### ⚠ The rarity field here is `rarity_af` — the run's ONE oracle (`faf95` by default)
 >
 > Annotations come from a VEP 115 GRCh38 cache plus the CADD/SpliceAI/REVEL/AlphaMissense plugins,
-> plus two `bcftools annotate` transfers. The cache itself carries **no AC/AN**, so `faf95` (a 95%
-> CI lower bound) can only come from the **optional gnomAD joint slim**
-> (`resources.gnomad.sites_slim`). With it, `frequency()` returns real faf95; without it — and per
-> variant wherever gnomAD published none — it returns the grpmax point-estimate proxy, and
-> `rarity_oracle` records which. Every rarity gate below
-> is applied to the **grpmax proxy**: the max gnomAD v4.1 point-estimate AF over the
-> grpmax-eligible groups (`AFR/AMR/EAS/NFE/SAS`), `annotations.frequency()`. The **numbers** are
-> unchanged; the **field** is a point estimate, so the gates run slightly stringent on low-count
-> alleles (a false-negative direction). Read `faf95` below as "the target field", `grpmax proxy` as
-> "what Step 5 actually reads". Never substitute VEP's `MAX_AF` (it maxes over bottlenecked founder
-> groups ⇒ drops real candidates) or a global AF (dilutes ⇒ over-retains).
-> Also **not available**: `nhomalt`, so the de novo homozygote condition is **retired**.
+> plus two `bcftools annotate` transfers (the ClinVar sites VCF and the gnomAD v4.1 joint slim).
+> The cache itself carries **no AC/AN**, so `faf95` (a 95% CI lower bound) comes only from the
+> **gnomAD joint slim** (`resources.gnomad.sites_slim`) — which the default configuration
+> REQUIRES: `resources.gnomad.oracle: faf95` halts at preflight without it. Every rarity gate
+> below is applied to **`rarity_af`**, the value `annotations.frequency()` returned under that one
+> oracle: real faf95 by default (an allele gnomAD has but published no faf95 for reads 0 —
+> `rarity_basis=zero_ci`; an allele with no gnomAD record reads absent — both rarest), or the
+> grpmax point-estimate proxy over `AFR/AMR/EAS/NFE/SAS` only under the deliberate opt-down
+> `oracle: grpmax_proxy` (which sits slightly stringent on low-count alleles). The arms never mix
+> within a run; `rarity_oracle` is recorded once and `rarity_basis` per variant. The **numbers**
+> below are the same on either arm. Never substitute VEP's `MAX_AF` (it maxes over bottlenecked
+> founder groups ⇒ drops real candidates) or a global AF (dilutes ⇒ over-retains).
+> `nhomalt` IS transferred with the slim and is **reported, not gated** (Step 9's
+> `nhomalt_recessive_conflict`); the old de novo homozygote condition stays **retired by choice**.
 > Full ledger: **[limitations.md](limitations.md)** (§2 faf95, §2a the MAX_AF trap, §3 nhomalt).
 
 ## TL;DR
 
 - Inputs are **per-trio** (mother–father–child) VCFs on GRCh38 from the GATK Genotype-Refinement workflow — **not** jointly genotyped across the cohort, so population frequency comes from external gnomAD v4.1, never from callset AC/AN (see [allele_frequency.md](allele_frequency.md)).
 - **Focus is inherited germline variation.** The four first-class inheritance modes are: **dominant** (rare inherited het), **autosomal recessive homozygous**, **compound het (in trans)**, and **X-linked recessive**. **De novo** is a *secondary* cross-reference only (its dedicated filtering/review lives in separate bespoke machinery). **mtDNA heteroplasmy** is out of scope here — handled by a separate dedicated pipeline.
-- **Dominant (new, first-class):** a rare (grpmax **proxy AF < 1e-4** — not `faf95`, see the banner above), functional, **inherited heterozygous** variant transmitted from ≥ 1 parent (parent-of-origin recorded: maternal / paternal / both) and **not** part of a compound-het pair. This is the key new signal — heterozygous variants become interesting when they **recur across multiple individuals in the same gene** (see gene consolidation, [gene_burden.md](gene_burden.md)).
-- Trust the **refined PP-derived GQ**, not raw PL/GQ. Default per-genotype gates: **GQ ≥ 20**, **DP ≥ 10** (DP ≥ 20 for de novo), het **AB 0.25–0.75**, hom-alt **AB ≥ 0.90**, hom-ref **AB ≤ 0.10**, **FILTER = PASS** only. AB is derived from AD (it is not a native FORMAT field).
+- **Dominant (new, first-class):** a rare (`rarity_af` **< 1e-4** — faf95 by default, see the banner above), functional, **inherited heterozygous** variant transmitted from ≥ 1 parent (parent-of-origin recorded: maternal / paternal / both) and **not** part of a compound-het pair. This is the key new signal — heterozygous variants become interesting when they **recur across multiple individuals in the same gene** (see gene consolidation, [gene_burden.md](gene_burden.md)).
+- Trust the **refined PP-derived GQ**, not raw PL/GQ. Default per-genotype gates: **GQ ≥ 20**, **DP ≥ 10** (DP ≥ 20 for de novo), het **AB 0.25–0.75**, hom-alt **AB ≥ 0.90**, hom-ref **AB ≤ 0.10**, **FILTER = `PASS` or `.`** (`require_pass`; Step 1 keeps `PASS,.`). AB is derived from AD (it is not a native FORMAT field).
 - **Compound het** = two rare hets in the *same gene* in **trans**, established by parent-of-origin (mat-only + pat-only) from the trio genotypes. A de novo second hit is a valid partner, but it **cannot be phased** from trio genotypes (~50/50 cis/trans), so such a pair is emitted with a `unphased_denovo_partner` flag rather than as confirmed trans. Read-backed **WhatsHap** phasing — which would resolve it — is a **TARGET**, not wired (the binary ships in the image but no step invokes it).
-- **De novo (secondary cross-reference):** detected via GATK **`hiConfDeNovo`** (child-membership checked via `annotations.is_hiconf_denovo_for`), then **re-verified** with DP/AB plus **parental cleanliness** (each parent alt AD ≤ 1, DP ≥ 10). The former gnomAD absent/singleton + `nhomalt` condition is **retired** — the cache carries no `nhomalt` ([limitations.md](limitations.md) §3). It is **not** the driver here — dedicated bespoke machinery handles de novo filtering and review.
+- **De novo (secondary cross-reference):** detected via GATK **`hiConfDeNovo`** (child-membership checked via `annotations.is_hiconf_denovo_for`), then **re-verified** with DP/AB plus **parental cleanliness** (each parent alt AD ≤ 1, DP ≥ 10). The former gnomAD absent/singleton + `nhomalt` condition stays **retired by choice** — `nhomalt` is transferred with the gnomAD slim and reported in Step 9 (`nhomalt_recessive_conflict`), never gated ([limitations.md](limitations.md) §3). It is **not** the driver here — dedicated bespoke machinery handles de novo filtering and review.
 - **X/hemizygous:** apply sex-aware ploidy, **drop male non-PAR chrX/chrY het calls**, separate PAR from non-PAR. **mtDNA heteroplasmy** is handled by a dedicated pipeline (out of scope).
-- Sample/pedigree QC via **Peddy** (parent–child IBS0 ≈ 0, relatedness ≈ 0.5), genome-wide **Mendelian-error rate < 2%**, and **UPDhmm** per-chromosome UPD screening.
+- Sample/pedigree QC: Step 0 computes the **Mendelian-error rate < 2%** itself (on the first `qc.max_sites` = 200000 QC-passing autosomal biallelic sites — a capped scan, not genome-wide), chrX sex inference and a contamination gate. **Peddy** (IBS0 / relatedness) runs in the upstream Kids First workflow and **UPDhmm** UPD screening is a roadmap item — neither is invoked by this pipeline.
 - **Known failure mode:** the gnomAD prior in `CalculateGenotypePosteriors` can push a genuine ultra-rare pathogenic call toward hom-ref — cross-check pre-refinement PL/GT for top candidates.
 
 ---
@@ -70,7 +72,7 @@ The tool applies a de novo prior of **1e-6** per site. It is a **genotype-config
 
 ### 1.4 Site filtering upstream of genotypes
 
-A per-trio callset cannot support VQSR (which needs cohort scale). Verify the FILTER column and build only on **PASS** sites; if hard-filtered, the GATK reference thresholds are:
+A per-trio callset cannot support VQSR (which needs cohort scale). Verify the FILTER column and build only on **PASS** (or `.`, unfiltered) sites — Step 1 keeps `PASS,.` and `require_pass` treats both as pass; if hard-filtered, the GATK reference thresholds are:
 
 | Class | Hard-filter reference thresholds |
 |-------|----------------------------------|
@@ -96,7 +98,7 @@ These gates apply to every inheritance mode. AB (allele balance) is computed fro
 
 | Gate | Default | Notes |
 |------|---------|-------|
-| FILTER | `PASS` only | site-level |
+| FILTER | `PASS` or `.` (`require_pass: true`) | site-level; Step 1 keeps `PASS,.` |
 | Genotype quality | **GQ ≥ 20** (from PP) | flag `lowGQ` at GQ < 20 |
 | Depth | **DP ≥ 10** per sample | **DP ≥ 20** preferred for de novo |
 | Het allele balance | **0.25 ≤ AB ≤ 0.75** | common practical band 0.2–0.8 |
@@ -114,10 +116,16 @@ These gates apply to every inheritance mode. AB (allele balance) is computed fro
 > (Step 0's QC pass does not set it: for Mendelian-error counting, treating `0/.` as hom-ref is the
 > conservative direction.)
 
+> **Step 9 re-checks the proband's GQ/DP/AB from `candidates.calls.tsv`** (a flag and a penalty,
+> never a drop). The `child_gt`/`mother_gt`/`father_gt` columns there are cyvcf2 `gt_bases` —
+> allele strings such as `A/T` or `T/T`, never `0/1` — so Step 9 derives zygosity from the
+> base-form genotype (both alleles equal and non-ref) or from the mode, and judges a hom-alt call
+> on the hom-alt band rather than the het band.
+
 **Sample / pedigree QC:**
 
-- **Peddy** confirms reported vs. genotype-inferred sex (chrX heterozygosity) and pedigree relatedness via IBS0 / Rel; parent–child pairs should show **IBS0 ≈ 0** and **relatedness ≈ 0.5**. Elevated IBS0 signals a sample swap or mislabeled trio → block downstream inheritance logic. Kids First runs Peddy explicitly.
-- **Genome-wide Mendelian-error rate < 2%** is the concordance backstop: higher signals a bad trio/swap; localized MIE clusters flag CNV/UPD.
+- **Peddy** confirms reported vs. genotype-inferred sex (chrX heterozygosity) and pedigree relatedness via IBS0 / Rel; parent–child pairs should show **IBS0 ≈ 0** and **relatedness ≈ 0.5**. Elevated IBS0 signals a sample swap or mislabeled trio → block downstream inheritance logic. Kids First runs Peddy explicitly, **upstream** — this pipeline does not invoke it; Step 0 re-derives sex from chrX heterozygosity and computes the MIE rate itself.
+- **Mendelian-error rate < 2%** (`qc.mie_max`) is the concordance backstop: Step 0 measures it on the first `qc.max_sites` (default **200000**) QC-passing autosomal biallelic sites — a capped scan, so quote `mie_rate` over `n_sites`, not as genome-wide — and the chrX sex scan is capped the same way. Higher signals a bad trio/swap; localized MIE clusters flag CNV/UPD.
 - **Contamination gate.** kid/dad/mom roles are already peddy-verified upstream, so Step 0's job is to catch the *less-curated* trios. It flags a trio if any member is contaminated: **verifyBamID2 `FREEMIX` > 0.05** when a directory of `*.selfSM` files is supplied (`resources.selfsm_dir`; this mirrors the group's DNM freemix QC), otherwise a **VCF-only raw reference-read fraction** — Σref_AD / Σ(ref+alt) at high-quality homozygous-ALT SNV sites, thresholded at **> 0.02**. An uncontaminated sample sits near 0 (sequencing error + reference bias); cross-sample contamination injects reference reads at hom-alt sites and raises it. **This fallback is a CHARR-*like* proxy, NOT the calibrated Lu-2023 CHARR estimator:** it has no `/mean(1−AF)` normalization and no baseline subtraction (Step 0 runs pre-annotation, so per-site gnomAD AF is unavailable), and because hom-alt sites are HWE-weighted toward high-AF variants (`mean(1−AF) ≈ 0.2–0.35`) it reads only ~1/3 of the true contamination fraction. So it flags **gross (≳5–8%)** contamination only — it does **not** reliably catch the 1–3% band that manufactures false inherited hets / comp-het second hits; for that, supply verifyBamID FREEMIX. Re-calibrating a corrected CHARR post-annotation is a roadmap TODO. (CHARR: Lu et al., *Am J Hum Genet* 2023, [PMC10716339](https://pmc.ncbi.nlm.nih.gov/articles/PMC10716339/).)
 
 > **Known failure mode (gnomAD-prior suppression).** Because `CalculateGenotypePosteriors` folds a population prior into every genotype, a genuinely rare/private pathogenic variant can be *pushed toward hom-ref* by a low-AF prior, suppressing a real finding. For candidate high-priority variants, **cross-check the pre-refinement PL/GT** to ensure refinement did not down-weight a true rare call.
@@ -126,7 +134,7 @@ These gates apply to every inheritance mode. AB (allele balance) is computed fro
 
 ## 3. Inheritance models
 
-Genotype-level rules assume a mother–father–child trio VCF on GRCh38 with GT, GQ, DP, AD, and PL/PP available. Rarity gates below are stated as grpmax `faf95` because that is the **target** field the literature cites; the pipeline's **actual** filter field is the grpmax **proxy** (a point estimate — see the banner at the top and [allele_frequency.md](allele_frequency.md)). The cutoff values are identical either way. See also [inheritance engine tooling](#5-inheritance-engines--tooling).
+Genotype-level rules assume a mother–father–child trio VCF on GRCh38 with GT, GQ, DP, AD, and PL/PP available. Rarity gates below are applied to `rarity_af` — grpmax `faf95` under the default oracle, the grpmax point-estimate proxy only under `oracle: grpmax_proxy` (see the banner at the top and [allele_frequency.md](allele_frequency.md)). The cutoff values are identical on either arm. See also [inheritance engine tooling](#5-inheritance-engines--tooling).
 
 The four first-class inheritance modes are **dominant (inherited het)**, **autosomal recessive homozygous**, **compound het (in trans)**, and **X-linked recessive**. **De novo** is retained only as a lightweight *secondary* cross-reference ([§3.5](#35-de-novo-secondary-cross-reference)); **mtDNA heteroplasmy** is out of scope ([§3.6](#36-mitochondrial-chrm--out-of-scope)).
 
@@ -141,7 +149,7 @@ The four first-class inheritance modes are **dominant (inherited het)**, **autos
 - **Requirement:** the variant must be **functional** and **not** part of a *phase-confirmed* compound-het pair in the same gene ([§3.3](#33-compound-heterozygous-two-hets-in-trans)) — a single inherited het, not one half of a biallelic hit. A pair that is only *inferred* (a de-novo partner) does **not** suppress the dominant call.
 - **QC:** child confident het (GQ ≥ 20, DP ≥ 10, AB 0.25–0.75) *and* each carrying parent confident **on its own zygosity band** — the het band for `0/1`, the hom-alt band (AB ≥ 0.90) for `1/1`.
 - **`origin_unverified` flag:** when only one parent carries and the *other* parent is not an affirmative, QC-passing `0/0` (a no-call, or a `0/0` failing GQ/DP/AB), the call is still emitted but flagged — that parent might silently carry the allele too, so the recorded origin is inferred rather than established.
-- **Rarity:** external gnomAD grpmax **proxy AF < 1e-4** (dominant rarity gate; same as de novo). Target field is `faf95`; see the banner.
+- **Rarity:** external gnomAD `rarity_af` **< 1e-4** (dominant rarity gate; same as de novo) — faf95 by default; see the banner.
 - **Why it matters:** heterozygous inherited variants are individually low-specificity, but become compelling when they **recur across multiple distinct individuals in the same gene**. Gene consolidation ([§5](#5-inheritance-engines--tooling), [gene_burden.md](gene_burden.md)) tallies dominant-het carriers per gene and ranks recurrent genes first, **weighted by gene constraint** (a recurrent het in a haploinsufficient gene is the most compelling). Do **not** reject solely because an unaffected parent carries it — reduced/age-dependent penetrance is expected ([§6](#6-co-segregation--penetrance-modifiers-never-hard-filters)).
 
 ### 3.2 Autosomal recessive — homozygous
@@ -149,7 +157,7 @@ The four first-class inheritance modes are **dominant (inherited het)**, **autos
 - **Genotypes:** child `1/1`; **both** parents carrying — each `0/1` **or `1/1`** (a hom-alt parent is accepted for consanguinity, a common-ish recessive allele, or an affected parent). A parent no-call means inheritance is unestablished and the call is not made.
 - **QC:** child confident hom-alt (AB ≥ 0.90, DP ≥ 10); each carrying parent confident **on its own zygosity band** — het band for `0/1`, hom-alt band for `1/1` (GQ ≥ 20, DP ≥ 10).
 - A `1/1` child with a `0/0` parent is a Mendelian error → suspect a hemizygous "false hom" (deletion on the other allele) or **UPD** (see [§4](#4-upd-imprinting--mosaicism-flags-not-primary-calls)).
-- **Rarity:** per-allele grpmax **proxy AF < 1e-2** (permissive discovery default; target field is `faf95`), with a stricter **1e-3** high-confidence tier. Applied per variant, not per gene. **Do not** down-weight biallelic candidates using pLoF constraint ([gene_constraint.md](gene_constraint.md)).
+- **Rarity:** per-allele `rarity_af` **< 1e-2** (permissive discovery default; faf95 by default), with a stricter **1e-3** high-confidence tier. Applied per variant, not per gene. **Do not** down-weight biallelic candidates using pLoF constraint ([gene_constraint.md](gene_constraint.md)).
 
 ### 3.3 Compound heterozygous (two hets in trans)
 
@@ -160,7 +168,7 @@ The four first-class inheritance modes are **dominant (inherited het)**, **autos
 - **De novo second hit:** a legitimate partner biologically, but **unphaseable** from trio genotypes (it may sit cis or trans with the inherited hit at ~50/50), so that pair is emitted with a `unphased_denovo_partner` flag — a candidate to confirm, not a confirmed biallelic hit. Because it is unconfirmed it does **not** suppress the dominant call on the inherited leg.
 - **Read-backed phasing (WhatsHap) — TARGET, not implemented.** `whatshap` is pinned in the image but **no step invokes it**; there is no read-backed phasing today. When wired it would resolve phase directly where both variants lie within one read/fragment (and uniquely combine read-based *and* pedigree phasing), which is exactly what would settle the de-novo-partner case above. Caveat for that future work: WhatsHap drops variants with missing or Mendelian-inconsistent parental genotypes, lowering the phasing rate when parental data is incomplete.
 - **QC:** both variants must independently pass het QC (GQ ≥ 20, DP ≥ 10, AB 0.25–0.75) in the child *and* the transmitting parent.
-- **Rarity:** per-allele grpmax **proxy AF < 1e-2** (1e-3 high-confidence; target field is `faf95`).
+- **Rarity:** per-allele `rarity_af` **< 1e-2** (1e-3 high-confidence; faf95 by default).
 
 ### 3.4 X-linked / hemizygous
 
@@ -177,7 +185,7 @@ De novo is **not** the driver of this pipeline: dedicated bespoke machinery hand
 - **Genotypes:** child `0/1`, mother `0/0`, father `0/0` (autosomal); hemizygous de novo on male **chrX** is `0 → 1`, requiring only the transmitting **mother** to be hom-ref (see [X-linked](#34-x-linked--hemizygous)). **chrY is excluded from this path** — the mother-keyed rule is inverted there, so a father-transmitted Y allele would otherwise be reported as de novo. Both parents must be *confidently* hom-ref: a no-call does not qualify, and `strict_gt=True` is what makes a half-called `0/.` register as a no-call rather than as hom-ref ([§2](#2-cross-cutting-genotype--sample-qc-apply-before-mode-logic)).
 - **Detection:** GATK `hiConfDeNovo` present (all three trio-member GQ ≥ 20), with **child membership** verified via `annotations.is_hiconf_denovo_for` (confirming the tag applies to *this* child). Use `loConfDeNovo` (child GQ ≥ 10) only as a lower-sensitivity tier.
 - **Re-verify (the tool does not):** child **DP ≥ 20**, het **AB 0.25–0.75**, all three GQ ≥ 20, and **parental cleanliness** — each parent alt AD ≤ 1 with DP ≥ 10 (a parental alt fraction of a few percent suggests inherited or parental mosaicism, not de novo).
-- **Rarity:** external gnomAD grpmax **proxy AF < 1e-4** (target: `faf95`). The `nhomalt` condition is **RETIRED, not enforced** — no `nhomalt` field exists in the VEP cache, and the retired `filters.denovo.require_gnomad_absent_or_singleton` key only ever implemented `nhomalt > 1`, a homozygote-count test rather than the allele-count test its name promised ([limitations.md](limitations.md) §3). *(An AC-based **absent-or-singleton** test remains a target refinement — de novo is secondary here.)*
+- **Rarity:** external gnomAD `rarity_af` **< 1e-4** (faf95 by default). The `nhomalt` condition is **RETIRED by choice, not enforced** — `nhomalt` is transferred with the gnomAD slim and reported (Step 9's `nhomalt_recessive_conflict`), and the retired `filters.denovo.require_gnomad_absent_or_singleton` key only ever implemented `nhomalt > 1`, a homozygote-count test rather than the allele-count test its name promised ([limitations.md](limitations.md) §3). *(An AC-based **absent-or-singleton** test remains a target refinement — de novo is secondary here.)*
 - **ACMG evidence:** PS2 (confirmed de novo) / PM6 (assumed de novo) are scored by the **ClinGen SVI point system**. See [clinical_classification.md](clinical_classification.md).
 - **Enrichment (optional secondary):** de novo Poisson enrichment vs the Samocha mutation model (denovolyzeR-style; exome-wide P < 2.5e-6, BH q < 0.05) is reported only when a mutation-rate table is supplied ([gene_burden.md](gene_burden.md)).
 
@@ -189,7 +197,7 @@ De novo is **not** the driver of this pipeline: dedicated bespoke machinery hand
 
 ## 4. UPD, imprinting & mosaicism (flags, not primary calls)
 
-- **Uniparental disomy (UPD):** suspect when a chromosome shows excess Mendelian errors from one parent or long isodisomic ROH; it can unmask a "homozygous recessive" from a single carrier parent or cause imprinting disorders. Screen per-chromosome with **UPDhmm** (HMM on the trio VCF; avoids ROH confounding by consanguinity) or UPDio.
+- **Uniparental disomy (UPD):** suspect when a chromosome shows excess Mendelian errors from one parent or long isodisomic ROH; it can unmask a "homozygous recessive" from a single carrier parent or cause imprinting disorders. A per-chromosome screen with **UPDhmm** (HMM on the trio VCF; avoids ROH confounding by consanguinity) or UPDio is the **TARGET** — not invoked by this pipeline ([ROADMAP.md](ROADMAP.md) #6).
 - **Parental mosaicism:** a "de novo" with low-level parental alt reads (AB ~1–10%, below the het cutoff) is transmitted from a mosaic parent → alters recurrence risk. Detect by inspecting parental AB on de novo candidates rather than hard `0/0` gating.
 - **Proband (post-zygotic) mosaicism** — *known scope limitation.* Low-VAF somatic/post-zygotic calls in the proband (relevant for NF1, overgrowth, and some cancer-predisposition phenotypes) fall **outside** the het AB 0.25–0.75 band and will be filtered. A dedicated mosaic tier is future work.
 
@@ -202,9 +210,9 @@ De novo is **not** the driver of this pipeline: dedicated bespoke machinery hand
 | **GATK** CalculateGenotypePosteriors / VariantFiltration / PossibleDeNovo | Source of PP/GQ and `hiConfDeNovo`/`loConfDeNovo` | Already upstream; reuse these annotations — provenance-clean. GATK 4.6.2.0 (2025-04-13). |
 | **slivar** (v0.3.4) | Reference segregation engine — **pinned but NOT invoked** | The actual Step-5 engine is custom cyvcf2 (`05_inheritance_screen.py`); slivar ships in the image for ad-hoc work but no step calls it. Its PED-driven JS-expression helpers (dominant/inherited-het, recessive/hom-alt, `comphet`, `x_denovo`, `denovo`) are the reference design. Single static binary. |
 | **WhatsHap** | Read-based + pedigree phasing | **TARGET — pinned in the image but not invoked.** Trans is resolved by trio parent-of-origin only; a de-novo-partner pair is flagged `unphased_denovo_partner` rather than phased. |
-| **Peddy** | Sex + relatedness + Mendelian-error QC | IBS0/Rel checks; run before inheritance logic. Upstream source of the kid/dad/mom role assignments. |
+| **Peddy** | Sex + relatedness + Mendelian-error QC | **Upstream (Kids First) — NOT invoked here.** Source of the kid/dad/mom role assignments; Step 0 re-derives sex (chrX het ratio) and the MIE rate itself. |
 | **verifyBamID2 / CHARR** | Per-sample contamination | Step 0 gate: ingest verifyBamID `FREEMIX` (`*.selfSM`) if available, else a VCF-only CHARR estimate from AD at hom-alt sites. |
-| **UPDhmm** | Per-chromosome UPD detection | HMM on the trio VCF. |
+| **UPDhmm** | Per-chromosome UPD detection | **TARGET — not invoked** ([ROADMAP.md](ROADMAP.md) #6). HMM on the trio VCF. |
 | **cyvcf2 / pysam / bcftools** | Custom QC gates & edge cases | Hemizygous handling, parental-mosaicism thresholds, de novo QC (AB/DP), gene-list joins — trivial to tune where slivar's canned expressions don't expose the knob. |
 | **TrioDeNovo** (v0.06) | Optional orthogonal DNM caller | Stale (C++, ~2015); use only for a second-caller consensus on high-stakes DNMs. |
 | **GEMINI** | — | **Deprecated** (Python 2.7 + SQLite); the author points users to slivar. Do not adopt. |
@@ -225,9 +233,10 @@ bcftools index -t normalized.vcf.gz
 ### 5.2 Genotype-QC gating (illustrative, parameterized)
 
 ```bash
-# Keep PASS sites, then flag low-confidence genotypes on refined GQ.
+# Keep PASS/unfiltered sites (what Step 1 does with --filter 'PASS,.'), then flag
+# low-confidence genotypes on refined GQ.
 # (GQ here is the PP-derived, refined GQ after CalculateGenotypePosteriors.)
-bcftools view -f PASS normalized.vcf.gz \
+bcftools view -f PASS,. normalized.vcf.gz \
   | bcftools +setGT -- -t q -n . -i 'FMT/GQ<20 | FMT/DP<10' \
   > gt_filtered.vcf
 ```
@@ -261,16 +270,16 @@ Do **not** reject an inherited candidate solely because an unaffected parent car
 | Het allele balance | **AB 0.25–0.75** | from AD |
 | Hom-alt allele balance | **AB ≥ 0.90** | from AD |
 | Hom-ref allele balance | **AB ≤ 0.10** | from AD |
-| Site filter | **FILTER = PASS** | hard-filter thresholds in [§1.4](#14-site-filtering-upstream-of-genotypes) |
-| Dominant (inherited het) | rare functional **het** transmitted from ≥ 1 parent; parent-of-origin recorded (mat / pat / both); **not** a comp-het partner | grpmax **proxy AF < 1e-4** (not `faf95`); recurrence-consolidated |
-| Recessive / comp-het rarity | grpmax **proxy AF < 1e-2** per allele (not `faf95`) | **1e-3** high-confidence tier |
+| Site filter | **FILTER = `PASS` or `.`** (`require_pass: true`) | hard-filter thresholds in [§1.4](#14-site-filtering-upstream-of-genotypes) |
+| Dominant (inherited het) | rare functional **het** transmitted from ≥ 1 parent; parent-of-origin recorded (mat / pat / both); **not** a comp-het partner | `rarity_af` **< 1e-4** (faf95 by default); recurrence-consolidated |
+| Recessive / comp-het rarity | `rarity_af` **< 1e-2** per allele (faf95 by default) | **1e-3** high-confidence tier |
 | Recessive hom | child `1/1` + both parents `0/1`, all GQ ≥ 20, DP ≥ 10 | 1/1 vs 0/0 parent → suspect deletion/UPD |
 | Compound het | two rare hets, same gene, **trans** (parent-of-origin from trio GTs; WhatsHap is a TARGET, not wired); the non-transmitting parent must be an affirmative QC-passing `0/0`; a `1/1` transmitting parent is deterministic and **does** pair | de novo second hit is valid but **unphaseable** → `unphased_denovo_partner` (and does not suppress the dominant call); unobserved other-parent → `origin_unverified` |
 | X-linked recessive | affected male = hemizygous + carrier mother (**father's chrX not required**, flagged if he carries); affected female = `1/1` + carrier mother + `1/1` father; sex-aware ploidy; **drop** male non-PAR chrX/chrY het calls; separate PAR/non-PAR | X-dominant is not a separate mode (female X het → `dominant`, male hemizygote → `x_linked_recessive`); **chrY yields no inherited call** |
-| De novo (secondary) | GATK **`hiConfDeNovo`** (child-membership via `is_hiconf_denovo_for`); re-verify child DP ≥ 20, AB 0.25–0.75, each parent alt AD ≤ 1 / DP ≥ 10; grpmax **proxy AF < 1e-4** (not `faf95`; the gnomAD absent/singleton + `nhomalt` condition is **retired** — no `nhomalt` field) | cross-reference only; filtering/review in separate machinery. Optional: Poisson enrichment vs Samocha (P < 2.5e-6, BH q < 0.05) when a mutation-rate table is supplied |
+| De novo (secondary) | GATK **`hiConfDeNovo`** (child-membership via `is_hiconf_denovo_for`); re-verify child DP ≥ 20, AB 0.25–0.75, each parent alt AD ≤ 1 / DP ≥ 10; `rarity_af` **< 1e-4** (faf95 by default; the gnomAD absent/singleton + `nhomalt` condition is **retired by choice** — `nhomalt` is reported, not gated) | cross-reference only; filtering/review in separate machinery. Optional: Poisson enrichment vs Samocha (P < 2.5e-6, BH q < 0.05) when a mutation-rate table is supplied |
 | Gene consolidation | recurrent at ≥ **min_carriers** (default **2**) distinct individuals; rank recurrent-first, weighted by constraint (LOEUF / pLI / s_het) | dominant / biallelic / X-linked; de novo counted separately |
 | mtDNA heteroplasmy | out of scope — handled by a separate dedicated pipeline | chrM not an active mode here |
-| Sample/pedigree QC | **Peddy** (parent–child IBS0 ≈ 0, rel ≈ 0.5); genome-wide MIE **< 2%**; **UPDhmm** per chromosome | |
+| Sample/pedigree QC | Step 0: MIE **< 2%** on the first `qc.max_sites` (**200000**) QC-passing autosomal biallelic sites; chrX sex inference; contamination gate | **Peddy** (upstream, Kids First) and **UPDhmm** (TARGET) are not invoked by this pipeline |
 | `--num-reference-samples-if-no-call` | set to the shipped supporting-resource's documented N | resource-dependent; version-pin |
 | Rare-variant safeguard | cross-check pre-refinement PL/GT for top candidates | gnomAD-prior suppression |
 

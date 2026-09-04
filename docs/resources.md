@@ -10,35 +10,40 @@ your system and **bind-mounted** at runtime. This doc explains why, what you nee
 > gap between "image pulled" and "pipeline runs" is preparing this data and pointing the env vars at
 > it — which `prepare_resources.sh --dir DIR emit-env` does for you.
 
-> **STATUS — the VEP-only contract (read this before you download anything).**
-> The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD and
-> SpliceAI, plus REVEL and AlphaMissense** (see [SpliceAI](#spliceai) and
+> **STATUS — the VEP-centric contract (read this before you download anything).**
+> The pipeline's annotation source is **VEP 115 GRCh38 — its cache + its plugins: CADD,
+> SpliceAI, REVEL and AlphaMissense** (see [SpliceAI](#spliceai) and
 > [ClinVar, REVEL and AlphaMissense](#clinvar-revel-and-alphamissense)). Step 2 performs exactly
-> **ONE** external `bcftools annotate` transfer: the **ClinVar sites VCF**, supplying `CLNREVSTAT`
-> ⇒ gold stars, which the cache carries at no price. **gnomAD, dbNSFP and LOFTEE data are still
-> not fetched, bind-mounted or read.** The **required** acquisition therefore
-> collapses to: **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB)**
-> — SpliceAI is **required by default** (`resources.vep.spliceai_required: true`), so any run that
-> invokes VEP **halts at preflight** without it (not enforced with `resources.vep.annotated_vcf`
-> set); a bare `fetch` does **not** pull it — use `scripts/download_spliceai.sh`. Missing CADD, by
-> contrast, only warns. ClinVar (~0.18 GB), REVEL (~0.7 GB) and AlphaMissense (~0.65 GB) ARE
-> fetched by a bare `fetch` and each degrades with a warning. Plus two small optional tables for
-> Step-6 ranking.
+> **TWO** external `bcftools annotate` transfers: the **ClinVar sites VCF** (`CLNREVSTAT` ⇒ gold
+> stars, which the cache cannot supply at any price; optional, warns) and the **gnomAD v4.1 joint
+> slim** (real `faf95` + `nhomalt`; **REQUIRED by the default `resources.gnomad.oracle: faf95`**,
+> see [the gnomAD joint slim](#the-gnomad-joint-slim-faf95)). **dbNSFP and LOFTEE data are not
+> fetched, bind-mounted or read.** The **required** acquisition for a default run is therefore:
+> **VEP cache (~24 GB) + CADD SNV+indel (~82 GB) + SpliceAI raw SNV+indel (~28 GB) + REVEL +
+> AlphaMissense (~1.3 GB) + the gnomAD joint slim (~10 GB)**. Three of those HALT at preflight when
+> missing — SpliceAI (`resources.vep.spliceai_required: true`), REVEL/AlphaMissense
+> (`resources.vep.missense_predictors_required: true`) and the gnomAD slim (the default oracle) —
+> each with a documented opt-down. A bare `fetch` does **not** pull SpliceAI (use
+> `scripts/download_spliceai.sh`) or the gnomAD slim (`--only gnomad_sites fetch`). Missing CADD,
+> by contrast, only warns; ClinVar (~0.18 GB) is fetched by a bare `fetch` and degrades with a
+> warning. Plus two small optional tables for Step-6/9 ranking.
 > Everything else on this page is retained as the **shopping list for building on top** and is
-> clearly marked *not currently used*. What the reduced set costs the screen — and what each
+> clearly marked *not currently used*. What the contract costs the screen — and what each
 > re-addition buys — is the ledger in **[limitations.md](limitations.md)**; the declared source of
 > truth for every threshold is **[README.md#canonical-defaults](README.md#canonical-defaults)**.
 
 ## ClinVar, REVEL and AlphaMissense
 
-All three are **fetched by default** (`prepare_resources.sh --dir DIR fetch`) because steps now
-read them. All three are **optional and graceful**: each missing one produces a loud warning and a
-documented degradation, never a failed run.
+All three are **fetched by default** (`prepare_resources.sh --dir DIR fetch`) because steps read
+them. ClinVar is **optional and graceful** (a loud warning and a documented degradation, never a
+failed run); REVEL and AlphaMissense are **required by default**
+(`resources.vep.missense_predictors_required: true` halts at preflight; set it `false` to run on
+the off-label CADD missense tier).
 
 ### ClinVar
 
-The **one** `bcftools annotate` transfer in the pipeline — everything else is a CSQ field lifted
-from VEP. It has to be a transfer: the cache carries `CLIN_SIG` but no `CLNREVSTAT`, so gold stars
+One of the **two** `bcftools annotate` transfers in the pipeline (the other is the gnomAD joint
+slim) — everything else is a CSQ field lifted from VEP. It has to be a transfer: the cache carries `CLIN_SIG` but no `CLNREVSTAT`, so gold stars
 are unreachable from it at any price. Transferred under a `clinvar_` prefix (a third namespace
 beside `vep_`, so a reader can tell which oracle a field came from) into `clinvar_stars` (0-4).
 
@@ -86,13 +91,14 @@ URL is dead upstream (S3 `NoSuchBucket`, now registration-gated).
   entry copied from the dbNSFP naming produces a plugin that runs and a column that is never
   populated, silently. The prep re-bgzips if upstream ships plain gzip (tabix needs BGZF).
 
-> `prepare_resources.sh` follows the contract: bare `fetch` prepares the set the pipeline actually
-> consumes (reference, VEP cache, CADD, constraint, **ClinVar, REVEL, AlphaMissense**) — it will
-> **not** start the ~877 GB gnomAD download —
-> `verify` requires only that set and reports the rest as *not required*, and `emit-env` exports
-> only the `${ENV}` vars the config still has keys for. The retired resources stay reachable
-> behind an explicit `--only gnomad_sites,clinvar,…` so the [roadmap
-> restorations](ROADMAP.md) are one flag away. One upstream fact to know regardless: the
+> `prepare_resources.sh` follows the contract: bare `fetch` prepares the default set (reference,
+> VEP cache, CADD, constraint, mutational_target, **ClinVar, REVEL, AlphaMissense**) — it will
+> **not** start the ~877 GB gnomAD stream; run `--only gnomad_sites fetch` for the slim the default
+> oracle requires. `verify` mirrors the default config: `gnomad_sites`, `revel` and `alphamissense`
+> are reported as REQUIRED (missing ⇒ non-zero exit) unless the config opts down, and `emit-env`
+> exports every `${ENV}` var the config has a key for — `GNOMAD_SITES` uncommented once the slim is
+> present. LOFTEE and dbNSFP stay reachable behind an explicit `--only loftee,dbnsfp` so the
+> [roadmap restorations](ROADMAP.md) are one flag away. One upstream fact to know regardless: the
 > **pinned dbNSFP URL is dead** (see below).
 
 ## Why a prepare script, not a bundled image
@@ -120,14 +126,16 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 | GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~1 GB (gz) |
 | VEP indexed cache (r115) | **everything**: consequence/IMPACT, gnomAD v4.1 AFs, ClinVar `CLIN_SIG` | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~24 GB |
 | CADD SNV + indel | CADD plugin — the general-purpose functional predictor (SpliceAI covers splice), genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
-| VEP plugin **code** (`.pm`) | CADD (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
+| VEP plugin **code** (`.pm`) | CADD, SpliceAI, REVEL, AlphaMissense (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
 | **ClinVar** GRCh38 sites VCF | Step-2 **transfer** -> `CLNREVSTAT` ⇒ `clinvar_stars` (0-4), a Step-9 ranking input. Also un-stales ClinVar vs the cache's pinned release. **Optional**, degrades with a warning | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free (NCBI) | ~0.18 GB |
-| **REVEL** (dedicated file) | REVEL plugin — Step-9 missense tier. **No effect on selection** | `resources.vep.revel` (`REVEL_SCORES`) | free, academic use | ~0.7 GB |
-| **AlphaMissense** | AlphaMissense plugin — Step-9 missense tier. **No effect on selection** | `resources.vep.alphamissense` (`ALPHAMISSENSE_SCORES`) | **CC BY-NC-SA 4.0** (`--accept-license`) | ~0.65 GB |
+| **REVEL** (dedicated file) | REVEL plugin — Step-9 missense tier. **Required by default**; no effect on selection | `resources.vep.revel` (`REVEL_SCORES`) | free, academic use | ~0.7 GB |
+| **AlphaMissense** | AlphaMissense plugin — Step-9 missense tier. **Required by default**; no effect on selection | `resources.vep.alphamissense` (`ALPHAMISSENSE_SCORES`) | **CC BY-NC-SA 4.0** (`--accept-license`) | ~0.65 GB |
+| **gnomAD v4.1 joint slim** | Step-2 **transfer** -> `gnomad_faf95` (the DEFAULT rarity oracle) + `gnomad_nhomalt` + the `gnomad_AF_joint` witness. **Required** under `resources.gnomad.oracle: faf95`; opt down with `grpmax_proxy` | `resources.gnomad.sites_slim` (`GNOMAD_SITES`) | free (GCS egress; `--only gnomad_sites`) | ~10 GB (streams ~877 GB) |
 | Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) — **optional**, skipped if unset | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
 | Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) — **optional**, skipped if unset | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
+| Mutational-target table (unjoined gnomAD v2.1.1, bgzipped) | Step-9 excess statistic + Step-6 carrier expectation — **optional**, loud WARN if unset | `prioritization.resources.mutational_target` (`MUTATIONAL_TARGET`) | free | ~3 MB |
 
-That is the whole required set. The constraint/mutation-rate tables are genuinely optional:
+That is the whole set. The constraint/mutation-rate/mutational-target tables are genuinely optional:
 `run_pipeline.sh` passes them to Step 6 only when the path is set *and* exists, so Step 6 degrades
 rather than fails without them.
 
@@ -142,15 +150,16 @@ the entire annotation acquisition story. Two properties of that source are load-
 **not** fixable by downloading something else:
 
 - **Point AFs only.** The cache has **no `faf95`/`fafmax` field and no AC/AN**, so faf95's CI
-  correction cannot be recomputed downstream at any price. `frequency()` is a *grpmax proxy* —
-  the max AF over the grpmax-eligible groups (AFR/AMR/EAS/NFE/SAS) — the FALLBACK arm; real
-  faf95 comes from the optional gnomAD joint slim. See
+  correction cannot be recomputed downstream at any price. The cache is therefore only the
+  `grpmax_proxy` arm of `frequency()` — the max AF over the grpmax-eligible groups
+  (AFR/AMR/EAS/NFE/SAS), used for every variant when a run opts down; real faf95 comes from the
+  gnomAD joint slim, the default oracle, and the two arms never mix within a run. See
   [limitations.md §2](limitations.md).
 - **Cache frequencies exist only for alleles accessioned into dbSNP.** An un-accessioned gnomAD
   variant silently returns *no* frequency and reads as "absent ⇒ rarest". Ensembl itself
   recommends `--custom` with the gnomAD VCF over `--af_gnomad*` for exactly this reason. The bias
-  is toward **retention** (extra review), not toward missed calls — which is why the first pass
-  accepts it.
+  is toward **retention** (extra review), not toward missed calls — which is why the proxy arm
+  accepts it. (Proxy arm only: the joint slim carries every gnomAD allele.)
 
 **Do not "improve" the rarity field with `MAX_AF` or global `AF`.** Both are present in the CSQ,
 both look better, and both are regressions in *opposite* directions. See
@@ -187,7 +196,7 @@ Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../
   the plain Ensembl build, **not** refseq/merged). The cache version **must equal** the VEP binary (115).
   Reference FASTA = Ensembl **primary_assembly** (not toplevel). Open license. Note the cache
   precomputes **only SIFT and PolyPhen-2** as predictors — no REVEL/AlphaMissense/CADD/SpliceAI/MPC —
-  which is why CADD is a separate download and why the others are absent from the screen.
+  which is why CADD, SpliceAI, REVEL and AlphaMissense are separate downloads (MPC is not wired).
 - **CADD v1.7 — the complete CADD source.** `whole_genome_SNVs.tsv.gz` scores every possible SNV
   genome-wide (coding **and** non-coding) plus the precomputed indel set. Step 2 sources CADD only
   from the plugin (`vep_CADD_PHRED`). Fetched with `--accept-license`; point `CADD_SNV`/`CADD_INDEL`
@@ -201,8 +210,10 @@ Exact URLs, versions, and checksums are pinned in [`resources/manifest.env`](../
   (Zenodo) + Collins-2022 pHaplo (Zenodo), left-joined by `scripts/join_constraint.py` into one
   per-gene TSV. All free (CC-BY/CC0). gnomAD v4 has no equivalent by-gene LOEUF flatfile — v2.1.1 is canonical.
 
-> **Disk budget.** The required set is roughly: VEP cache ~24 GB (+ ~24 GB transient for the
-> tarball) + FASTA ~1 GB + CADD ~82 GB + constraint <10 MB ≈ **110 GB**. Point
+> **Disk budget.** The default-run set is roughly: VEP cache ~24 GB (+ ~24 GB transient for the
+> tarball) + FASTA ~1 GB + CADD ~82 GB + SpliceAI ~28 GB + gnomAD joint slim ~10 GB +
+> REVEL/AlphaMissense ~1.3 GB + ClinVar ~0.2 GB + constraint/mutational-target tables <10 MB ≈
+> **150 GB**. Point
 > `TMPDIR`/`APPTAINER_TMPDIR` at real disk with headroom. If you bring your own VEP VCF (above),
 > the budget is **zero**.
 
@@ -239,17 +250,18 @@ skips, leaving the NHF columns blank (`outputs.igv.nonhuman_screen.enabled` defa
   of once per invocation. On a slow/network mount that win evaporates. At cohort scale, scatter like
   Step 2 (one kraken2 DB-load per array task).
 
-## Can the VEP cache replace these? (Deliberately, yes — with a documented price)
+## Can the VEP cache replace these? (For most of them, yes — with a documented price)
 
-An earlier version of this page argued "no, never skip the downloads." **The pipeline now does
-exactly that, on purpose.** The trade was ~1.4 TB of acquisition — each piece with its own version
+An earlier version of this page argued "no, never skip the downloads." **The first pass skipped
+them on purpose** — and the two that turned out to matter, the gnomAD joint slim and the ClinVar
+VCF, came back as the only two transfers. The trade was ~1.4 TB of acquisition — each piece with its own version
 pin, license gate, index and contig-naming hazard — against a simple, sound, reproducible spine:
 one annotation source, one frequency chokepoint, one functional ladder. The first pass
 takes the spine. The price, per resource, is honest and bounded:
 
 | Dropped | What the cache gives instead | The real price |
 |---|---|---|
-| gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | **RESOLVED by the opt-in joint slim** ([above](#the-gnomad-joint-slim-faf95)): real **faf95** + **nhomalt**. Without it the cache alone gives a point estimate, erring toward *dropping* |
+| gnomAD sites VCF | point AFs per population, v4.1, exomes + genomes | **RESOLVED by the joint slim, required by default** ([below](#the-gnomad-joint-slim-faf95)): real **faf95** + **nhomalt**. Only a run that opts down to `grpmax_proxy` runs on the cache's point estimate, erring toward *dropping* |
 | ClinVar VCF | cache-frozen `CLIN_SIG` (2025-02) | **RESOLVED** — the VCF is transferred in Step 2, supplying `CLNREVSTAT` ⇒ `clinvar_stars`, and un-staling ClinVar. Stars RANK in Step 9; the screen stays star-blind by design |
 | LOFTEE | VEP `IMPACT` | near-zero for *selection*; costs PVS1 tiering |
 
@@ -273,10 +285,11 @@ Run the helper **inside the image** so bcftools/tabix/vep are on PATH (no host i
 The script ships in the image at `/opt/hprv/scripts/` and is on `PATH`, so call it by name — you do
 not need a checkout of this repo on the host:
 
-> **A bare `fetch` prepares everything the pipeline consumes** — `reference`, `vep_cache`, `cadd`,
-> `constraint`, **`clinvar`, `revel`, `alphamissense`** — and will **not** start the ~877 GB gnomAD
-> download. Only the genuinely unused resources (`gnomad_sites`, `loftee`, `dbnsfp`, and
-> `spliceai`, whose useful files are login-gated) sit behind an explicit `--only`.
+> **A bare `fetch` prepares the default set** — `reference`, `vep_cache`, `cadd`, `constraint`,
+> `mutational_target`, **`clinvar`, `revel`, `alphamissense`** — and will **not** start the ~877 GB
+> gnomAD stream. Behind an explicit `--only` sit `gnomad_sites` (REQUIRED by the default oracle —
+> run it), `spliceai` (required by default too, but its useful files are login-gated: use
+> `scripts/download_spliceai.sh`), and the genuinely unused `loftee` / `dbnsfp`.
 >
 > **Do not narrow this with `--only reference,vep_cache,cadd,constraint`** — that skips ClinVar,
 > REVEL and AlphaMissense. The run still works (each degrades with a loud warning), but you lose
@@ -289,6 +302,10 @@ not need a checkout of this repo on the host:
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources fetch --accept-license
 
+# 1b. the gnomAD joint slim the default oracle requires (~10 GB lands; streams ~877 GB)
+apptainer exec --bind /data hprv.sif \
+    prepare_resources.sh --dir /data/hprv_resources --only gnomad_sites fetch
+
 # 2. emit the export lines your config's ${ENV} placeholders expect
 apptainer exec --bind /data hprv.sif \
     prepare_resources.sh --dir /data/hprv_resources emit-env --out /data/hprv_resources/resources.env
@@ -297,7 +314,8 @@ source /data/hprv_resources/resources.env      # then run_pipeline.sh --config .
 
 Valid `--only` ids: `reference`, `vep_cache`, `cadd`, `constraint`, `mutational_target`,
 `clinvar`, `revel`, `alphamissense`, `spliceai`, `gnomad_sites`, `loftee`, `dbnsfp`.
-The first seven are fetched by a bare `fetch`; the rest are opt-in.
+The first eight are fetched by a bare `fetch`; `gnomad_sites` and `spliceai` are required by the
+default config but need their own command (see above); `loftee` and `dbnsfp` are opt-in and unused.
 
 The pinned manifest ships alongside the script at `/opt/hprv/resources/manifest.env`. To re-pin a
 version without rebuilding the image, bind-mount an edited copy and point `HPRV_RESOURCE_MANIFEST`
@@ -308,19 +326,21 @@ at it.
 
 ### What each mode covers
 
-- **`fetch`** (default) prepares `reference`, `vep_cache`, `cadd`, `constraint` — the required set,
-  nothing more. Pass `--only gnomad_sites,clinvar,loftee,dbnsfp` (any subset) to also
-  prepare a retired resource for a [roadmap restoration](ROADMAP.md); they are never fetched by
-  default, because an ~877 GB gnomAD download for data no step reads is not a sane default.
-  **`spliceai` is not retired** — it IS read (Step 2 plugin + `selection.py`) and required by
-  default, but `--only spliceai` fetches only the MANE-only SNV mirror and leaves the indel file
-  gated; use `scripts/download_spliceai.sh` for the full raw set.
-- **`verify`** requires exactly the set `fetch` prepares, and reports the retired resources as
-  *not required* rather than failing on them. **SpliceAI is an exception**: `verify` reports it as
-  not-required, but `run_pipeline.sh` HALTS on it by default. `run_pipeline.sh` additionally preflights what it
-  actually needs before doing work.
-- **`emit-env`** exports only the `${ENV}` placeholders `config/config.example.yaml` still has
-  keys for. It also prints a commented `VEP_ANNOTATED_VCF` line — uncomment it to skip the VEP
+- **`fetch`** (default) prepares `reference`, `vep_cache`, `cadd`, `constraint`,
+  `mutational_target`, `clinvar`, `revel`, `alphamissense`. Pass `--only gnomad_sites` to prepare
+  the joint slim the default `faf95` oracle requires (not in the bare set only because preparing it
+  streams ~877 GB), and `--only loftee,dbnsfp` for the retired resources of a
+  [roadmap restoration](ROADMAP.md). **`spliceai` is required by default** (Step 2 plugin +
+  `selection.py`), but `--only spliceai` fetches only the MANE-only SNV mirror and leaves the
+  indel file gated; use `scripts/download_spliceai.sh` for the full raw set.
+- **`verify`** mirrors the DEFAULT config: `gnomad_sites`, `revel` and `alphamissense` are
+  reported as REQUIRED (missing ⇒ non-zero exit) unless the config opts down
+  (`oracle: grpmax_proxy`, `missense_predictors_required: false`); `loftee`/`dbnsfp` are reported
+  as *not required*. SpliceAI is checked by `run_pipeline.sh`'s preflight, which HALTS on it by
+  default. `run_pipeline.sh` additionally preflights what it actually needs before doing work.
+- **`emit-env`** exports the `${ENV}` placeholders `config/config.example.yaml` has keys for;
+  `GNOMAD_SITES` is emitted uncommented once the slim is present (commented, with the fetch hint,
+  otherwise). It also prints a commented `VEP_ANNOTATED_VCF` line — uncomment it to skip the VEP
   call entirely (see above).
 
 ## License-gated resources — what you must provide
@@ -338,8 +358,8 @@ ever do want those scores, the replacement is the **dedicated files, not dbNSFP*
 ## Optional resources — NOT currently fetched or used
 
 **None of the following is downloaded, bind-mounted or read by the pipeline today.** (ClinVar,
-REVEL and AlphaMissense used to be on this list and are now WIRED — see the required-set table
-above and the section below.) This is the
+REVEL, AlphaMissense and the gnomAD joint slim used to be on this list and are now WIRED — see the
+table above and the sections below.) This is the
 shopping list for building on top: each is re-enabled by **one `bcftools annotate` transfer in
 `02_annotate_sites.sh` plus its INFO field in `annotations.F`** — the contract is a single seam, and
 the plugin code is already in the image. Ordered by value-per-GB. Sizes and rationale come from
@@ -347,7 +367,6 @@ the plugin code is already in the image. Ordered by value-per-GB. Sizes and rati
 
 | Resource | ~Size | Why you'd add it | Acquisition trap |
 |---|---|---|---|
-| ~~**gnomAD v4.1 joint** slim~~ | ~10 GB | **WIRED** — see [the gnomAD joint slim](#the-gnomad-joint-slim-faf95) below. Opt-in via `--only gnomad_sites`. |
 | **LOFTEE** GRCh38 data | ~13 GB | HC/LC pLoF confidence ⇒ PVS1 strength grading | mostly the GERP bigwig. Use the plugin's **`grch38` branch** (already baked in; master is GRCh37-only) |
 
 ## The gnomAD joint slim (faf95)
@@ -388,8 +407,11 @@ Three things to know before you enable it:
 - **Your candidate list will get BIGGER.** faf95 ≤ the point estimate, so the same cutoffs stop
   discarding low-count alleles whose confidence interval never justified the call. A *smaller*
   list means a broken join — read Step 2's `gnomAD joint matched N / M sites` line.
-- **Absent faf95 is not AF 0** (74% of a chr22 sample had none). `frequency()` falls back to the
-  proxy per variant, which is the more stringent of the two; `rarity_oracle` says which fired.
+- **Absent faf95 splits in two** (roughly 80% of a chr22 sample had none — gnomAD emits `fafmax`
+  as missing wherever no group's CI lower bound clears zero). An allele gnomAD HAS but published no
+  faf95 for resolves to **0** (`rarity_basis=zero_ci`, rarest); an allele with NO gnomAD record
+  resolves to absent (rarest). The proxy is never consulted under `faf95`; `gnomad_AF_joint` is the
+  witness that separates the halves and `rarity_basis` records it per variant.
 - **Contig naming** must match your cohort, exactly as for ClinVar. The Step-2 transfer dies on a
   0-match join rather than silently leaving every faf95 absent.
 
@@ -425,8 +447,9 @@ MANE-only SNV mirror and leaves the indel file gated.
   the `export SPLICEAI_SNV/INDEL` lines. This is a **host/HPC** helper (uses your authenticated `bs`),
   separate from the in-image `prepare_resources.sh`.
 - **Live backfill (Step 2b) needs NO extra download.** The `resources.vep.spliceai_backfill` path
-  (**ON by default**, `enabled: true`; an absent isolated `spliceai` env halts the run at preflight
-  — set `enabled: false` to opt out) scores the small set of variants lacking a precomputed value (novel indels) with the stock
+  (**OFF by default**, `enabled: false` — the screen runs on the precomputed scores alone; set it
+  `true` to score the unscored gap, after which an absent isolated `spliceai` env halts the run at
+  preflight) scores the small set of variants lacking a precomputed value (novel indels) with the stock
   Illumina model. That model + its GENCODE annotation are **bundled in the image's isolated
   `spliceai` conda env** — the only data it needs is the reference FASTA you already provide. So the
   precomputed files above are the only SpliceAI *download*; the backfill is compute, not data.

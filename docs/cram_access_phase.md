@@ -34,15 +34,17 @@ the common case.
 Adjacent but **out of this phase** (different data, not just aligned germline reads): the somatic
 second-hit / LOH overlay needs matched **tumor** CRAMs (PBTA/OpenPedCan), a separate access request.
 
-Not CRAM-gated (stays VCF-native, do independently): ROH (`bcftools roh`), UPD screen (UPDhmm),
-PP1/BS4 co-segregation, UTRannotator, calibrated recurrence null (already done).
+Not CRAM-gated (stays VCF-native, do independently): ROH (`bcftools roh`), UPD screen (UPDhmm, not
+yet invoked), PP1/BS4 co-segregation, UTRannotator, the case-only recurrence null + mutational-target
+carrier expectation (already done).
 
 ## Downstream unlock: CoCoRV
 
 Ancestry PCs from somalier are the prerequisite for **CoCoRV** — ancestry-stratified external-control
 (gnomAD) burden with an empirical-null λ and discrete-aware FDR. That is the natural phase-2 after the
-calibrated recurrence null (#1, done): it moves the headline "recurrent + constrained" signal from an
-internal binomial tail to a case-vs-control burden test. CoCoRV is *gated on this phase* and does not
+case-only recurrence null and its size-normalised companion (#1, done): it moves the headline
+"recurrent + constrained" signal off an internal binomial tail — which saturates on private variants
+and is a RANK, not a calibrated test — and onto a case-vs-control burden test. CoCoRV is *gated on this phase* and does not
 itself need CRAMs — only the ancestry labels this phase produces.
 
 ## Sketch (ordering within the phase)
