@@ -63,11 +63,11 @@ GENE_KEYS = ("gene", "gene_symbol", "symbol")
 
 # Gene-level columns emitted for every gene in the candidate list.
 GENE_COLUMNS = [
-    "gene", "gene_id", "n_observed", "n_sites", "n_trios_obs", "recurrence_shape",
+    "gene", "gene_id", "n_observed", "n_rows", "n_sites", "n_trios_obs", "recurrence_shape",
     "max_site_share", "per_trio",
     "mu_mis", "mu_syn", "mu_lof", "mu_tot", "mu_lof_src", "E_expected", "E_source",
     "excess_ratio", "p_nb", "q_nb", "p_pois", "q_pois", "used_in_null_fit",
-    "oe_syn", "oe_lof_upper", "pLI", "constraint_source", "s_het", "classic_caf",
+    "oe_syn", "oe_lof_upper", "pLI", "constraint_source", "s_het", "phaplo", "classic_caf",
     "constraint_flag",
     "cds_length", "segdup98_frac",
     "sig_constraint_flag", "sig_oe_syn", "sig_caf_low", "sig_segdup", "sig_family",
@@ -105,7 +105,7 @@ VARIANT_COLUMNS = [
     "sig_constraint_flag", "sig_oe_syn", "sig_caf_low", "sig_segdup", "sig_family",
     "sig_saturation", "downweight_reason", "established_gene_control",
     "control_ceiling_applied", "review_flag",
-    "pLI", "oe_lof_upper", "oe_syn", "segdup98_frac",
+    "pLI", "oe_lof_upper", "oe_syn", "phaplo", "segdup98_frac",
     "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "same_variant_recurrence",
     "p_recurrence", "q_recurrence", "gene_list_prior_member",
     # Overlay provenance, so a reviewer can see WHICH prior applied and why. `..._weight` is
@@ -512,19 +512,31 @@ def main(argv=None) -> int:
         (get(cfg, f"{pfx}.composite.gene_list_prior.path", "") or "") if prior_enabled else "")
 
     # --- observed counts per gene from the candidate rows ---
-    counts, sites, trios_obs, site_trios = {}, {}, {}, {}
+    # n_observed is the number of DISTINCT (trio, variant) observations, NOT the number of rows.
+    # candidates.calls.tsv — and therefore variants.tsv — carries one row per (variant, mode,
+    # pair): Step 5 emits each compound-het leg once PER PAIR (k maternal x m paternal hets in
+    # one proband = 2km rows for k+m variants), and one variant can additionally be a dominant
+    # row and a de novo row. Counting rows made the excess numerator quadratic in hets-per-
+    # proband, which lands precisely on long genes — the class the artifact panel is calibrated
+    # against. `n_rows` keeps the raw row count visible beside it.
+    counts, n_rows, sites, trios_obs, site_trios = {}, {}, {}, {}, {}
+    obs_seen = set()
     for r in variants:
         g = (r.get(gene_c) or "").strip()
         if not g:
             continue
-        counts[g] = counts.get(g, 0) + 1
+        n_rows[g] = n_rows.get(g, 0) + 1
         key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
-        sites.setdefault(g, set()).add(key)
         t = (r.get("trio_id") or "").strip()
+        if (g, t, key) not in obs_seen:
+            obs_seen.add((g, t, key))
+            counts[g] = counts.get(g, 0) + 1
+        sites.setdefault(g, set()).add(key)
         if t:
             trios_obs.setdefault(g, set()).add(t)
             site_trios.setdefault(g, {}).setdefault(key, set()).add(t)
     n_genes_in = len(counts)
+    n_obs_total = sum(counts.values())
 
     n_trios = args.n_trios or 0
     if not n_trios:
@@ -584,6 +596,7 @@ def main(argv=None) -> int:
     c_oesyn_c = _find(ccols, "oe_syn", "oe_syn_upper")
     c_oesyn_m = _find(mcols, "oe_syn", "oe_syn_upper")
     c_shet = _find(ccols, "s_het", "shet")
+    c_phaplo = _find(ccols, "phaplo", "phaplo_score")
     c_moi = _find(moicols, "moi", "mode_of_inheritance", "inheritance") if moi else None
     if mut and not (c_mis or c_syn or c_lof):
         sys.stderr.write(
@@ -634,7 +647,7 @@ def main(argv=None) -> int:
     # whichever null is being fit: evaluating the Poisson at the NB's scaling constant measures a
     # hybrid nobody would deploy, and it changes the headline number materially (2.4-2.5x
     # anti-conservative when the Poisson arm is trimmed, 1.82x when it is not). Independent
-    # validation showed the published 2.51x is only reproducible with the Poisson arm trimmed, so
+    # validation showed the canonical 2.41x is only reproducible with the Poisson arm trimmed, so
     # both arms are now fit the way they would actually be used.
     calib = P.calibrate_null(universe_counts, universe_mus, C, alpha, trim_p=trim_p) if fit else {}
 
@@ -766,7 +779,8 @@ def main(argv=None) -> int:
 
         row = {
             "gene": g, "gene_id": r.get(c_gid) if c_gid else "",
-            "n_observed": n_obs, "n_sites": n_site or None, "n_trios_obs": n_trio_obs or None,
+            "n_observed": n_obs, "n_rows": n_rows.get(g, 0),
+            "n_sites": n_site or None, "n_trios_obs": n_trio_obs or None,
             "recurrence_shape": shape, "max_site_share": max_share, "per_trio": per_trio,
             "mu_mis": P._num(r.get(c_mis)) if c_mis else None,
             "mu_syn": P._num(r.get(c_syn)) if c_syn else None,
@@ -784,6 +798,10 @@ def main(argv=None) -> int:
                     ("loeuf", _pick(cr, r, c_loeuf_c, c_loeuf_m)[1]),
                     ("oe_syn", _pick(cr, r, c_oesyn_c, c_oesyn_m)[1])) if src),
             "s_het": P._num(cr.get(c_shet)) if c_shet else None,
+            "phaplo": P._num(cr.get(c_phaplo)) if c_phaplo else None,
+            # False when the gene has NO mutational-target row: artifact_signals must not read
+            # "gnomAD reported no pLoF CAF" into a symbol gnomAD never keyed at all.
+            "in_mutrate_table": bool(r),
             "classic_caf": P._num(r.get(c_caf)) if c_caf else None,
             "constraint_flag": (r.get(c_cflag) or "") if c_cflag else "",
             "cds_length": cds_len,
@@ -851,11 +869,14 @@ def main(argv=None) -> int:
         if info["review_flag"]:
             review_tally[info["review_flag"]] = review_tally.get(info["review_flag"], 0) + 1
 
+    # Measured over DISTINCT observations (the same unit as n_observed), not rows: a comp-het-
+    # heavy gene would otherwise count its pairs several times in both numerator and denominator.
     n_dw_variants = tier_variants["T2_downweight"] + tier_variants["T3_strong_downweight"]
-    dw_frac = n_dw_variants / float(n_in) if n_in else 0.0
+    dw_frac = n_dw_variants / float(n_obs_total) if n_obs_total else 0.0
     if dw_frac > max_dw_frac:
         sys.stderr.write(
-            f"ERROR: the down-weight tiers (T2+T3) cover {n_dw_variants}/{n_in} variants "
+            f"ERROR: the down-weight tiers (T2+T3) cover {n_dw_variants}/{n_obs_total} distinct "
+            f"observations "
             f"({dw_frac:.1%}), above max_downweight_fraction={max_dw_frac:.0%}. On the "
             "validation cohort this was 10.4%. A figure this high means the null is "
             "mis-specified for this cohort — most likely the mutational-target table and the "
@@ -897,7 +918,7 @@ def main(argv=None) -> int:
                   "n_observed", "q_nb", "per_trio", "corroboration_count", "downweight_reason",
                   "established_gene_control", "control_ceiling_applied", "review_flag",
                   "sig_constraint_flag", "sig_oe_syn", "sig_caf_low", "sig_segdup", "sig_family",
-                  "sig_saturation", "pLI", "oe_lof_upper", "oe_syn", "segdup98_frac",
+                  "sig_saturation", "pLI", "oe_lof_upper", "oe_syn", "phaplo", "segdup98_frac",
                   "n_carriers", "n_dominant", "n_biallelic", "n_xlinked",
                   "p_recurrence", "q_recurrence", "gene_list_prior_member"):
             row[c] = grow.get(c, "")
@@ -982,6 +1003,7 @@ def main(argv=None) -> int:
     A = lambda m, v: audit.record("09_prioritize", m, v)          # noqa: E731
     A("variants_in", n_in)
     A("variants_out", len(out_rows))
+    A("observations_distinct", n_obs_total)   # the unit n_observed / per_trio / dw_frac use
     A("genes_in", n_genes_in)
     A("genes_out", len(gene_rows))
     A("n_trios", n_trios)
