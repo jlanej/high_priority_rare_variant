@@ -30,6 +30,9 @@ chmod +x "$shimdir/vep"
 
 # Step 2 requires an existing VEP cache dir (path check only; the shim ignores it).
 mkdir -p "$WORK/cache/homo_sapiens"
+# No gnomAD slim here, so the run must opt down to the proxy oracle EXPLICITLY (HPRV_GNOMAD_ORACLE
+# below): under the default faf95 oracle Step 2 now halts rather than silently running with no
+# oracle value at all.
 
 run_step2() {  # $1 = shard flag (0|1), $2 = output path
     PATH="$shimdir:$PATH" \
@@ -38,6 +41,7 @@ run_step2() {  # $1 = shard flag (0|1), $2 = output path
     HPRV_VEP_CACHE="$WORK/cache" \
     HPRV_TMPDIR="$WORK/tmp.$1" \
     HPRV_VEP_SHARD_BY_CONTIG="$1" \
+    HPRV_GNOMAD_ORACLE=grpmax_proxy \
         bash "$REPO/pipeline/02_annotate_sites.sh" --sites "$SITES" --ref "$REF" --out "$2" >/dev/null 2>&1
 }
 
