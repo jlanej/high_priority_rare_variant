@@ -213,6 +213,11 @@ mark_done() { touch "${1}.done"; }
 # Resolve the absolute directory of a path (dir must exist).
 abspath_dir() { cd "$(dirname "$1")" && pwd; }
 
+# "size-mtime" of a file for content keys (GNU coreutils and BSD/macOS stat); "0" if absent.
+# Cheap enough to run on every input every time, which is the point: a per-trio cache keyed on
+# the trio_id alone never notices a re-delivered VCF at the same path.
+hprv_stat_key() { stat -c '%s-%Y' "$1" 2>/dev/null || stat -f '%z-%m' "$1" 2>/dev/null || echo 0; }
+
 # --------------------------------------------------------------------------- #
 # Auditing: append (step, scope, metric, value) to $HPRV_AUDIT_DIR/counts.tsv so
 # every count is recoverable. scope = "global" or a trio_id. No-op if unset.

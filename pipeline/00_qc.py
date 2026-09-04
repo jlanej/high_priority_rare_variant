@@ -16,6 +16,11 @@ flags trios that fail any of them:
 Trio kid/dad/mom roles come from upstream peddy; this step is the guard against the
 less-well-curated trios. See docs/inheritance_and_genotype_qc.md.
 
+The Mendelian-error / CHARR scan and the chrX sex scan are each CAPPED at ``qc.max_sites``
+QC-passing sites (default 200,000; ``--max-sites`` overrides): on WGS the MIE rate is therefore
+measured on a prefix of the genome, not genome-wide — adequate as a swap/contamination detector,
+but a localised MIE cluster (UPD/CNV) outside that prefix is invisible to it.
+
 Usage:
   00_qc.py --manifest trios.tsv --config config.yaml --out qc_report.tsv [--max-sites N]
 """
@@ -162,7 +167,9 @@ def main(argv=None) -> int:
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--max-sites", type=int, default=200000)
+    ap.add_argument("--max-sites", type=int, default=None,
+                    help="cap on QC-passing sites scanned per trio (MIE/CHARR and the chrX sex "
+                         "scan); default qc.max_sites from the config (200000)")
     ap.add_argument("--mie-threshold", type=float, default=None,
                     help="override qc.mie_max from config")
     args = ap.parse_args(argv)
@@ -176,6 +183,7 @@ def main(argv=None) -> int:
     mie_thr = args.mie_threshold if args.mie_threshold is not None else float(get(cfg, "qc.mie_max", 0.02))
     sex_cutoff = float(get(cfg, "qc.x_het_male_max", 0.10))
     sex_min = int(get(cfg, "qc.sex_min_sites", 20))
+    max_sites = args.max_sites if args.max_sites is not None else int(get(cfg, "qc.max_sites", 200000))
 
     with open(args.manifest) as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
@@ -202,7 +210,7 @@ def main(argv=None) -> int:
             if not ped:
                 sys.stderr.write(f"WARN: no PED for {tid}; skipping QC\n")
                 continue
-            res = qc_trio(vcf_path, ped, thr, args.max_sites, sex_cutoff, sex_min)
+            res = qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff, sex_min)
             if res is None:
                 sys.stderr.write(f"WARN: {tid}: PED samples not in VCF; skipping\n")
                 continue

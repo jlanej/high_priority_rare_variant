@@ -45,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$CFG" && -f "$CFG" ]] || die "need --config <config.yaml>"
+[[ "$FROM" =~ ^[0-9]+$ && "$TO" =~ ^[0-9]+$ && "$FROM" -le "$TO" && "$TO" -le 9 ]] \
+    || die "--from/--to must be integers with 0 <= from <= to <= 9 (got '$FROM'..'$TO')"
 
 is_set() { [[ -n "${1:-}" && "$1" != *'${'* ]]; }
 cfg_get() { python3 -m hprv.config get --config "$CFG" --key "$1" --default "${2:-}"; }
@@ -92,8 +94,9 @@ is_set "${HPRV_VCF_DIR:-}" || is_set "${HPRV_VCF_LIST:-}" || die "set inputs.vcf
 # frequencies, ClinVar CLIN_SIG) + the CADD, SpliceAI, REVEL and AlphaMissense plugin files,
 # plus the two bcftools transfers: the ClinVar sites VCF (review status/GOLD STARS) and the
 # optional gnomAD joint slim (faf95 + nhomalt).
-# No gnomAD / dbNSFP / LOFTEE download exists to check. SpliceAI is checked below (required by
-# default) along with the Step-2b backfill env; the rest warn and degrade.
+# The gnomAD joint slim (required under the default faf95 oracle), SpliceAI and the two missense
+# predictors (required by default) are checked below along with the Step-2b backfill env; the
+# rest warn and degrade.
 # Only enforced when Step 2 actually runs — a `--from 3` re-run reads annotations that are
 # already in the VCF and needs none of this. If resources.vep.annotated_vcf is set, VEP is
 # not invoked at all, so only that file has to exist.
@@ -102,6 +105,17 @@ if run_step 2; then
     r_missing=()
     _need() { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then r_missing+=("$2 -> \$$v='${!v:-}'"); fi; }
     _opt()  { local v="$1"; if ! is_set "${!v:-}" || [[ ! -e "${!v:-}" ]]; then warn "resource DEGRADED: $2 missing (\$$v) — that evidence will be unavailable"; fi; }
+    # The two bcftools TRANSFERS (gnomAD slim, ClinVar) run on BOTH paths — Step 2 transfers onto
+    # an ingested VEP VCF exactly as onto its own — so their gates sit OUTSIDE the branch below.
+    # ONE oracle per run: selecting faf95 without the slim would silently run on NO quantity at
+    # all (every variant absent = rarest, no gate fires), so it HALTS. Under grpmax_proxy the slim
+    # is genuinely optional (only nhomalt is lost).
+    if [[ "$(cfg_get resources.gnomad.oracle faf95)" != "grpmax_proxy" ]]; then
+        _need HPRV_GNOMAD_SITES "gnomAD joint slim (resources.gnomad.sites_slim) — REQUIRED because resources.gnomad.oracle is 'faf95'. Prepare it with 'prepare_resources.sh --only gnomad_sites fetch', or set oracle: grpmax_proxy to run on the VEP-cache point estimate"
+    else
+        _opt HPRV_GNOMAD_SITES "gnomAD joint slim (resources.gnomad.sites_slim) — oracle is grpmax_proxy by config, so only nhomalt is lost without it"
+    fi
+    _opt HPRV_CLINVAR_VCF "ClinVar sites VCF (resources.clinvar.vcf) — no review status/GOLD STARS; a 1-star and a 3-star assertion will be indistinguishable"
     if is_set "${HPRV_VEP_ANNOTATED_VCF:-}"; then
         _need HPRV_VEP_ANNOTATED_VCF "pre-annotated VEP VCF (resources.vep.annotated_vcf)"
     else
@@ -112,20 +126,7 @@ if run_step 2; then
         # an impact-only screen is still a coherent (if narrower) run.
         _opt HPRV_CADD_SNV   "CADD SNV (primary non-coding functional evidence)"
         _opt HPRV_CADD_INDEL "CADD indel (indel-capable functional score)"
-        # ClinVar / REVEL / AlphaMissense: optional, and their absence costs the SCREEN nothing —
-        # ClinVar's CLIN_SIG still comes from the cache, and the two missense predictors are inert
-        # at selection by construction. So they warn rather than halt. Reported here anyway so an
-        # operator sees which evidence will be live BEFORE a multi-hour VEP pass, not after.
-        # The gnomAD joint slim is the single most consequential optional resource: with it the
-        # rarity oracle is real faf95, without it a grpmax point-estimate proxy. Warn, never halt
-        # — the proxy is the documented, currently-shipping behaviour, not a broken state.
-        # ONE oracle per run. Selecting faf95 without the slim would silently run on the OTHER
-        # quantity — the exact ambiguity the single-oracle design exists to remove — so it HALTS.
-        if [[ "$(cfg_get resources.gnomad.oracle faf95)" != "grpmax_proxy" ]]; then
-            _need HPRV_GNOMAD_SITES "gnomAD joint slim (resources.gnomad.sites_slim) — REQUIRED because resources.gnomad.oracle is 'faf95'. Prepare it with 'prepare_resources.sh --only gnomad_sites fetch', or set oracle: grpmax_proxy to run on the VEP-cache point estimate"
-        fi
-        _opt HPRV_GNOMAD_SITES    "gnomAD joint slim (resources.gnomad.sites_slim) — rarity falls back to the grpmax POINT-ESTIMATE proxy, which sits ~one CI-width stringent on low-count alleles (errs toward DROPPING); no faf95, no nhomalt"
-        _opt HPRV_CLINVAR_VCF     "ClinVar sites VCF (resources.clinvar.vcf) — no review status/GOLD STARS; a 1-star and a 3-star assertion will be indistinguishable"
+        # REVEL / AlphaMissense / SpliceAI are PLUGINS, so they matter only when VEP runs here.
         # REVEL + AlphaMissense: REQUIRED by default. Without them Step 9's missense tier is an
         # off-label CADD rank labelled `cadd_offlabel` — usable for discovery, but not a
         # calibrated call, and a run that lost them silently would put an uncalibrated tier into a
@@ -206,12 +207,15 @@ if run_step 0; then
     # repeated the whole scan even though qc_report.tsv was already complete.
     # Re-run it by removing the sentinel: rm "$W/qc_report.tsv.done"  (do that after changing the
     # trio set or any filters.genotype_qc / qc.* threshold, which this cache cannot detect).
-    if is_done "$W/qc_report.tsv"; then
+    # Keyed on the resolved manifest (like Step 1's union): adding a trio must re-run QC, or the
+    # new proband has no inferred sex and Step 5 silently skips its X/Y modes.
+    _qkey="$(cksum < "$RESOLVED" | awk '{print $1"-"$2}')"
+    if is_done "$W/qc_report.tsv" && [[ "$(cat "$W/qc_report.tsv.done" 2>/dev/null)" == "$_qkey" ]]; then
         log "== Step 0: per-trio QC — cached, skipping (rm $W/qc_report.tsv.done to force) =="
     else
         log "== Step 0: per-trio QC =="
         python3 "$HERE/00_qc.py" --manifest "$RESOLVED" --config "$CFG" --out "$W/qc_report.tsv"
-        mark_done "$W/qc_report.tsv"
+        printf '%s\n' "$_qkey" > "$W/qc_report.tsv.done"
     fi
 fi
 
@@ -289,9 +293,16 @@ if run_step 6; then
     log "== Step 6: cross-pedigree gene burden =="
     mut="$(cfg_get resources.mutation_rate_table)"
     con="$(cfg_get resources.constraint.gnomad_v2_constraint)"
+    mtg="$(cfg_get prioritization.resources.mutational_target)"
     extra=()
     is_set "$mut" && [[ -e "$mut" ]] && extra+=(--mutrate "$mut")
     is_set "$con" && [[ -e "$con" ]] && extra+=(--constraint "$con")
+    # The gnomAD v2.1.1 mu_mis/mu_syn/mu_lof table: the size-normalised recurrence rank's offset
+    # (the same file Step 9 reads). Without it recurrent genes are ordered by the case-only p,
+    # which is a gene-size ranking (Step 6 warns).
+    is_set "$mtg" && [[ -e "$mtg" ]] && extra+=(--mutational-target "$mtg")
+    # Step 0's inferred sex gives the MALE proband count for the X-linked (hemizygous) null.
+    [[ -s "$W/qc_report.tsv" ]] && extra+=(--qc-report "$W/qc_report.tsv")
     python3 "$HERE/06_gene_burden.py" --calls "$W/candidates.calls.tsv" \
         --out "$W/genes.ranked.tsv" --config "$CFG" --n-trios "$n_trios" "${extra[@]}"
 fi
@@ -315,7 +326,10 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
     # FUSE/SBFS mount stays healthy; this only sets per-slice compression threads.
     jobs="$(cfg_get outputs.igv.extract_jobs "$(cfg_get runtime.threads 4)")"
     ig=(--work "$W" --ref "$cref" --padding "$pad" --genome "$gen" --jobs "$jobs"
-        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 0)")
+        --exclude-flags "$(cfg_get outputs.igv.exclude_flags 0)"
+        # ONE threshold for Step 8's nhf_flag and Step 9's nhf_status
+        --nhf-flag-fraction "$(cfg_get outputs.igv.nonhuman_screen.flag_fraction 0.5)"
+        --nhf-min-reads "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)")
     cm="$(cfg_get resources.cram_map)"
     is_set "$cm" && [[ -f "$cm" ]] && ig+=(--cram-map "$cm")
     # Step 8b (non-human-fraction). Default ON, but activates only when a kraken2 DB is provided;
@@ -327,7 +341,6 @@ if run_step 8 && [[ "$(cfg_get outputs.igv.enabled true)" != "false" ]]; then
             ig+=(--kraken2-db "$kdb"
                  --nhf-members    "$(cfg_get outputs.igv.nonhuman_screen.members carriers)"
                  --nhf-confidence "$(cfg_get outputs.igv.nonhuman_screen.confidence 0.05)"
-                 --nhf-min-reads  "$(cfg_get outputs.igv.nonhuman_screen.min_reads 5)"
                  --nhf-exclude-flags "$(cfg_get outputs.igv.nonhuman_screen.exclude_flags 1796)")
             # threads: 0 => fall back to extract_jobs (08 does that), so only pass a real value.
             _nthr="$(cfg_get outputs.igv.nonhuman_screen.threads 0)"

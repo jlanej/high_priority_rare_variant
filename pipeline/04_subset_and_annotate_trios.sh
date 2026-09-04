@@ -146,7 +146,12 @@ for row in "${rows[@]}"; do
     # is_done would report "cached" after Step 3 legitimately re-selected (changed thresholds, or
     # Step 2b backfilling SpliceAI scores into the union) — so the new calls would never reach
     # candidates.calls.tsv / genes.ranked.tsv / the xlsx / igv, silently, with no warning.
-    if is_done "$out" && [[ "$(cat "$out.done" 2>/dev/null)" == "$_plaus_key" ]]; then
+    # Content key: the plausible set (what we intersect with) PLUS the source VCF (size-mtime) and
+    # the sample subset. Keyed on the plausible set alone, a re-delivered trio VCF at the same
+    # path served the old candidate genotypes to Step 5 forever.
+    _tkey="$(printf '%s|%s|%s|%s' "$_plaus_key" "$vcf" "$(hprv_stat_key "$vcf")" "$samples" \
+             | cksum | awk '{print $1"-"$2}')"
+    if is_done "$out" && [[ "$(cat "$out.done" 2>/dev/null)" == "$_tkey" ]]; then
         log "  [$trio] cached"
         printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
         audit 04_subset candidate_genotypes "$(count_variants "$out")" "$trio"
@@ -260,7 +265,7 @@ for row in "${rows[@]}"; do
     index_vcf "$out"
     # Stamp the marker with the plausible-set key (not an empty mark_done), so the cache check above
     # can tell "already built from THIS selection" from "built from a previous one".
-    require_intact_bgzip "$out"; printf '%s\n' "$_plaus_key" > "$out.done"
+    require_intact_bgzip "$out"; printf '%s\n' "$_tkey" > "$out.done"
     rm -f "$norm" "$norm".{tbi,csi} "$cand" "$cand".{tbi,csi} 2>/dev/null || true
 
     printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"

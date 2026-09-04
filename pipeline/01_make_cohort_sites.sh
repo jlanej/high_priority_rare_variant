@@ -44,19 +44,6 @@ done
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
 [[ -f "$REF" ]] || die "reference FASTA not found: $REF"
 
-# Key the resume marker to the TRIO SET this union was built from. A bare is_done only checks that
-# the file exists and is an intact bgzip, and run_pipeline re-resolves trios on every default run —
-# so adding a trio would leave the stale union in place (Step 2 skips too), Step 3 would select from
-# it, and Step 4 would still loop over the full manifest while Step 6's --n-trios denominator counted
-# the new trio. The new trio's private variants would be silently invisible, with nothing warning.
-_mkey="$(cksum < "$MANIFEST" | awk '{print $1"-"$2}')"
-if is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_mkey" ]]; then
-    log "Step 1 already complete: $OUT (skipping)"; exit 0
-fi
-
-workdir="$(abspath_dir "$OUT")/sites_work"
-mkdir -p "$workdir"
-
 # --- resolve trio_id / vcf / samples columns from the manifest header ---
 read -r header < "$MANIFEST"
 idcol=0; vcfcol=0; scol=0; i=0
@@ -67,21 +54,56 @@ for c in "${cols[@]}"; do
 done
 [[ $idcol -gt 0 && $vcfcol -gt 0 ]] || die "manifest must have tab-separated 'trio_id' and 'vcf' header columns"
 
-# --- collect inputs and build the bind set (dirs every tool call must see) ---
-# HPRV_TMPDIR must be bound too: the union's `bcftools sort -T` scratch lives under it.
-declare -a site_files=()
-binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF") ${HPRV_TMPDIR:-}"
 rows=()
 while IFS= read -r _line || [[ -n "$_line" ]]; do rows+=("$_line"); done < <(tail -n +2 "$MANIFEST")
 [[ ${#rows[@]} -gt 0 ]] || die "manifest has no data rows"
 
+# chrM is OUT OF SCOPE (the full rationale sits above the per-trio loop below). Defined here
+# because it is part of every cache key: a changed exclusion list must rebuild the site files.
+EXCLUDE_CONTIGS="${HPRV_EXCLUDE_CONTIGS:-chrM,chrMT,M,MT}"
+
+# --- per-trio CONTENT keys, and the union key built from them ------------------------------------
+# A per-trio site file is keyed on the source VCF (path + size-mtime), the FILTER expression, the
+# excluded contigs and the sample subset — NOT on the trio_id alone. A re-delivered/re-called VCF at
+# the same path, or a changed filter, must rebuild the site file; a bare `is_done` never noticed.
+# The UNION key is then the manifest plus every per-trio key, so (a) adding a trio, (b) changing a
+# path and (c) replacing a file in place all rebuild the union. Under (a) a bare marker left the
+# stale union in place (Step 2 skipped too), Step 3 selected from it, Step 4 still looped over the
+# full manifest and Step 6's --n-trios counted the new trio: its private variants were silently
+# invisible with nothing warning.
+# (No associative arrays — bash 3.2 portability, like the rest of the pipeline; the per-trio key is
+# a pure function of the row and is recomputed with `trio_content_key` where it is compared.)
+trio_content_key() {  # $1 = vcf path, $2 = samples
+    printf '%s|%s|%s|%s|%s' "$1" "$(hprv_stat_key "$1")" "$FILTER" "$EXCLUDE_CONTIGS" "$2" \
+        | cksum | awk '{print $1"-"$2}'
+}
+_allkeys=""
 for row in "${rows[@]}"; do
     [[ -z "$row" || "$row" == \#* ]] && continue
     IFS=$'\t' read -ra f <<< "$row"
     trio="${f[$((idcol-1))]}"; vcf="${f[$((vcfcol-1))]}"
+    samples=""; [[ $scol -gt 0 ]] && samples="${f[$((scol-1))]}"
     [[ -n "$trio" && -n "$vcf" ]] || { warn "skipping malformed row: $row"; continue; }
     [[ -f "$vcf" ]] || die "trio VCF not found for $trio: $vcf"
-    binds+=" $(abspath_dir "$vcf")"
+    _allkeys+="$trio=$(trio_content_key "$vcf" "$samples");"
+done
+_mkey="$(printf '%s\n%s' "$(cat "$MANIFEST")" "$_allkeys" | cksum | awk '{print $1"-"$2}')"
+if is_done "$OUT" && [[ "$(cat "$OUT.done" 2>/dev/null)" == "$_mkey" ]]; then
+    log "Step 1 already complete: $OUT (skipping)"; exit 0
+fi
+
+workdir="$(abspath_dir "$OUT")/sites_work"
+mkdir -p "$workdir"
+
+# --- collect inputs and build the bind set (dirs every tool call must see) ---
+# HPRV_TMPDIR must be bound too: the union's `bcftools sort -T` scratch lives under it.
+declare -a site_files=()
+binds="$(abspath_dir "$OUT") $workdir $(abspath_dir "$REF") ${HPRV_TMPDIR:-}"
+for row in "${rows[@]}"; do
+    [[ -z "$row" || "$row" == \#* ]] && continue
+    IFS=$'\t' read -ra f <<< "$row"
+    vcf="${f[$((vcfcol-1))]}"
+    [[ -n "$vcf" && -f "$vcf" ]] && binds+=" $(abspath_dir "$vcf")"
 done
 # Deduplicate bind dirs and export for common.sh so all tool calls can see them.
 HPRV_BIND="$(printf '%s\n' $binds | sort -u | tr '\n' ' ')"
@@ -100,8 +122,8 @@ export HPRV_BIND
 # unconditionally, and Step 6 floors q to absent_af_floor -> p ~ 1e-12 -> those MT genes land in
 # the recurrent, exome-wide-significant tier, ranked ABOVE every genuine non-recurrent nuclear
 # candidate. Both chr-prefixed and Ensembl-style names are listed; naming an absent contig is a
-# no-op in bcftools (verified), so this is safe on either convention.
-EXCLUDE_CONTIGS="${HPRV_EXCLUDE_CONTIGS:-chrM,chrMT,M,MT}"
+# no-op in bcftools (verified), so this is safe on either convention. (EXCLUDE_CONTIGS itself is
+# set above, where the cache keys are built, because it is part of every key.)
 
 log "Step 1: building cohort site-only union from ${#rows[@]} trios"
 log "  reference: $REF"
@@ -117,7 +139,9 @@ for row in "${rows[@]}"; do
     [[ -n "$trio" && -n "$vcf" ]] || continue
     site="$workdir/${trio}.sites.norm.vcf.gz"
 
-    if is_done "$site"; then
+    # cached ONLY if the content key (source VCF size-mtime + filter + contigs + samples) matches
+    _tkey="$(trio_content_key "$vcf" "$samples")"
+    if is_done "$site" && [[ "$(cat "$site.done" 2>/dev/null)" == "$_tkey" ]]; then
         log "  [$trio] cached"
         [[ -f "$site.tbi" || -f "$site.csi" ]] || index_vcf "$site"  # concat -a needs the index
         site_files+=("$site")
@@ -146,9 +170,10 @@ for row in "${rows[@]}"; do
             | bcftools view -G -Ou - \
             | bcftools annotate -x INFO --threads "$THREADS" -Oz -o "$site" -
     fi
+    rm -f "$site".tbi "$site".csi        # a stale index from a previous build must not survive
     index_vcf "$site"
     require_intact_bgzip "$site"
-    mark_done "$site"
+    printf '%s\n' "$_tkey" > "$site.done"   # keyed marker (see the cache keys above)
     site_files+=("$site")
     audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
 done
