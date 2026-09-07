@@ -621,6 +621,60 @@ def main(argv=None) -> int:
     check(any(r["step"] == "resolve" and r["metric"] == "trios_resolved" and r["value"] == "2"
               for r in counts), "audit records 2 resolved trios")
 
+    # --- The INPUT side of the funnel reconciles. Steps 5 and 6 used to record only what they
+    # emitted, and comp-het row inflation made CH_A read "31 candidate genotypes in, 35 calls out"
+    # while 4 of the 31 had produced no row at all. Every drop now has a name. ---
+    ac = {(r["step"], r["scope"], r["metric"]): r["value"] for r in counts}
+
+    def am(step, metric, scope="global"):
+        return ac.get((step, scope, metric))
+
+    for t in ("CH_A", "CH_B"):
+        check(am("04_subset", "candidate_genotypes", t) == am("05_inheritance", "variants_examined", t),
+              f"{t}: Step 5 examined exactly Step 4's candidate genotypes "
+              f"({am('04_subset', 'candidate_genotypes', t)} == {am('05_inheritance', 'variants_examined', t)})")
+        check(am("04_subset", "annotated_genotypes", t) == am("04_subset", "candidate_genotypes", t),
+              f"{t}: Step 4's annotation transfer landed on every candidate record")
+        ex = int(am("05_inheritance", "variants_examined", t) or -1)
+        wc = int(am("05_inheritance", "variants_with_call", t) or 0)
+        nr = int(am("05_inheritance", "variants_no_row", t) or 0)
+        sk = sum(int(v) for (st_, sc, mm), v in ac.items()
+                 if st_ == "05_inheritance" and sc == t and mm.startswith("skipped."))
+        check(ex == wc + nr + sk, f"{t}: examined == with a call + no row + skipped ({ex} vs {wc}+{nr}+{sk})")
+    # CH_A's four formerly silent losses, by name: GENE5 (child GQ 12 under a de novo), GENEDN3
+    # (half-called father, no origin), and GENE7 + GENEMID (inherited hets at 1.6e-4 and 1.6e-3 —
+    # the [dominant_max, recessive_max) band, paired with nothing, emitted under no mode)
+    check(am("05_inheritance", "variants_no_row", "CH_A") == "4", "CH_A: 4 examined variants produced no row")
+    check(am("05_inheritance", "no_row.qc_child", "CH_A") == "1", "CH_A: GENE5 lost to child QC is counted")
+    check(am("05_inheritance", "no_row.parent_nocall", "CH_A") == "1", "CH_A: GENEDN3 lost to a parental no-call is counted")
+    check(am("05_inheritance", "no_row.inert_band_het", "CH_A") == "2", "CH_A: the two inert-band hets are counted")
+    check(am("05_inheritance", "variants_no_row", "CH_B") == "0", "CH_B: every examined variant produced a call")
+    # GENE7 is ClinVar P/LP at 1.6e-4: the old counter (>= recessive_max) reads 0 for it and the
+    # complete one reads 1 — both are recorded so the band it sits in is unambiguous
+    check(am("05_inheritance", "clinvar_plp_dropped_ge_recessive_max") == "0",
+          "no P/LP allele above recessive_max was carried")
+    check(am("05_inheritance", "clinvar_plp_no_row", "CH_A") == "1",
+          "CH_A: the ClinVar P/LP het lost in the dominant-inert band is counted (it used to read 0)")
+    # Step 3 says which not_functional drops were scored-and-rejected vs never scored
+    nf = am("03_select", "reason.not_functional")
+    if check(nf is not None, "Step 3 recorded reason.not_functional"):
+        parts = (am("03_select", "reason.not_functional.scored"), am("03_select", "reason.not_functional.unscored"))
+        check(None not in parts and int(parts[0]) + int(parts[1]) == int(nf),
+              f"not_functional splits into scored + unscored halves that sum ({parts} -> {nf})")
+    # Step 1 records the source record count so the FILTER / excluded-contig drop is measurable
+    src = am("01_cohort_sites", "source_records", "CH_A")
+    check(src is not None and int(src) > int(am("01_cohort_sites", "input_sites", "CH_A") or 0) - 1,
+          f"Step 1 recorded CH_A's source record count ({src}) beside its post-filter count")
+    # Steps 6 and 9 count the gene-less calls they cannot aggregate (none in the mock)
+    check(am("06_burden", "calls_in") == str(len(calls)) and am("06_burden", "calls_no_gene") == "0",
+          "Step 6 counts its input calls and the gene-less ones it skips")
+    check(am("09_prioritize", "variants_no_gene") == "0", "Step 9 counts the gene-less rows it cannot join")
+    # ...and the summary renders the input side
+    with open(os.path.join(W, "audit", "summary.md")) as fh:
+        smd = fh.read()
+    check("| with a call |" in smd and "produced no row" in smd,
+          "audit/summary.md shows examined / with a call / no row per trio and the no-row reasons")
+
     # --- Step 7: xlsx summary ---
     xlsx = os.path.join(W, "hprv_summary.xlsx")
     if check(os.path.exists(xlsx), "xlsx summary written"):

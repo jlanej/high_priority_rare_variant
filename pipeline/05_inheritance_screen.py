@@ -143,27 +143,152 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     # gene -> list of (origin, variant, key); origin in {mat, pat, both, denovo}.
     # Feeds both compound-het pairing (recessive) and dominant (inherited het) calls.
     hets = {}
-    # P4 observability: a ClinVar P/LP variant the child carries whose grpmax AF is >= recessive_max
-    # is kept by Step 3's clinvar_plp rescue but fails EVERY Step-5 mode (all gate at rec_max/dom_max),
-    # so it silently yields no call. Count it so that inert-band drop is auditable, not silent.
+    # ACCOUNTING. This step used to record only what it EMITTED, so a candidate that reached it and
+    # matched no mode left no trace anywhere — and because a compound-het leg is emitted once per
+    # pair, the per-trio funnel could read "31 candidate genotypes in, 35 calls out" while 4 of the
+    # 31 had produced nothing (the shipped integration fixture did exactly that). Every record is
+    # now counted on the way in, every early `continue` is counted by reason, and every examined
+    # variant that produced no row is classified by the FIRST condition that removed it
+    # (why_no_row below), so a reviewer can reconcile, per trio,
+    #     variants_examined == skipped.* + variants_with_call + variants_no_row
+    # and read a negative result as "examined and rejected for <reason>" rather than "nothing was
+    # there". Steps 1-4 already report a reason for every drop; this brings Step 5 to that standard.
+    stats = {"examined": 0, "annotated": 0, "with_call": 0, "skipped": Counter(),
+             "no_row": Counter(), "clinvar_plp_ge_recessive_max": 0, "clinvar_plp_no_row": 0}
+    pending = {}     # key -> (no-row reason, is_plp): produced no row in the loop, not pooled
+    collected = {}   # key -> (variant, is_plp, origin): pooled into `hets`; resolved after pairing
+    # A ClinVar P/LP variant the child carries can be kept by Step 3's clinvar_plp rescue and then
+    # fail every Step-5 mode. Two counters, because the band matters: `ge_recessive_max` is the
+    # original metric (frequency() >= recessive_max, so no mode could ever have fired) and
+    # `clinvar_plp_no_row` is the complete one — every carried P/LP allele that yielded no row for
+    # ANY reason, which includes the [dominant_max, recessive_max) band the first counter missed
+    # (an unpaired inherited het there fails the dominant gate and is emitted under no mode).
     n_plp_inert = 0
 
+    def _carrier_qc(v, idx, gtype):
+        if gtype == G.HET:
+            return G.sample_qc(v, idx, thr, "het")
+        if gtype == G.HOM_ALT:
+            return G.sample_qc(v, idx, thr, "hom_alt")
+        return False
+
+    def _hiconf_blocks(v):
+        return require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name)
+
+    def why_no_row(v, gc, gd, gmm, male_x, male_x_chrx):
+        """The FIRST condition, in the order the mode logic applies them, that left this examined
+        variant with no row and not pooled for pairing. Mirrors the branches above it exactly —
+        keep the two in step when a mode's conditions change."""
+        c, d, m = gt.c, gt.d, gt.m
+        if gc not in (G.HET, G.HOM_ALT):
+            return "child_not_carrier"        # Step 4 keeps a locus any member carries
+        if G.is_y_nonpar(v):
+            return "chry"                     # no Y-linked model; documented
+        if male_x and gc == G.HET:
+            return "male_x_het"               # hemizygous het = QC red flag, never a call
+        if gc == G.HET:
+            if not G.sample_qc(v, c, thr, "het"):
+                return "qc_child"
+            if gd == G.HOM_REF and gmm == G.HOM_REF:          # de novo shape
+                clean = G.sample_qc(v, m, thr, "clean_parent") and G.sample_qc(v, d, thr, "clean_parent")
+                if not clean:
+                    return "qc_parent"        # not a clean de novo; no inherited origin either
+                if not rare(v, rec_max):
+                    return "rarity"
+                if not (A._str(v, "gene") or A.symbol(v)):
+                    # not poolable (no gene) and the de novo row itself did not fire: why?
+                    if not emit_denovo:
+                        return "mode_disabled"
+                    if not G.sample_qc(v, c, thr, "denovo_child"):
+                        return "qc_child"
+                    if not rare(v, dom_max):
+                        return "rarity"
+                    if _hiconf_blocks(v):
+                        return "hiconf_tag"
+                return "other"
+            if not rare(v, rec_max):
+                return "rarity"
+            if not (A._str(v, "gene") or A.symbol(v)):
+                return "no_gene"
+            if gd == G.HOM_ALT and gmm == G.HOM_ALT:
+                return "mendelian_inconsistent"           # 1/1 x 1/1 cannot make a het
+            if gd not in (G.HET, G.HOM_ALT) and gmm not in (G.HET, G.HOM_ALT):
+                return "parent_nocall"                    # no carrier, and not both hom-ref
+            return "qc_parent"                            # a carrier exists but failed its QC
+        # HOM_ALT child
+        if male_x_chrx:
+            if gmm == G.UNKNOWN:
+                return "parent_nocall"
+            if gmm == G.HOM_REF:                          # male-X de novo shape
+                if not emit_denovo:
+                    return "mode_disabled"
+                if not G.sample_qc(v, c, thr, "hom_alt"):
+                    return "qc_child"
+                if not G.sample_qc(v, m, thr, "clean_parent"):
+                    return "qc_parent"
+                if not rare(v, dom_max):
+                    return "rarity"
+                if (G.dp(v, c) or 0) < thr.denovo_min_dp:
+                    return "qc_child"
+                if _hiconf_blocks(v):
+                    return "hiconf_tag"
+                return "other"
+            if not G.sample_qc(v, c, thr, "hom_alt"):
+                return "qc_child"
+            if not _carrier_qc(v, m, gmm):
+                return "qc_parent"
+            if not rare(v, rec_max):
+                return "rarity"
+            return "other"
+        if G.is_x_nonpar(v):                              # hom-alt daughter
+            if G.UNKNOWN in (gd, gmm):
+                return "parent_nocall"
+            if gd != G.HOM_ALT or gmm not in (G.HET, G.HOM_ALT):
+                return "mendelian_inconsistent"           # her father must be hemizygous
+            if not G.sample_qc(v, c, thr, "hom_alt"):
+                return "qc_child"
+            if not (_carrier_qc(v, m, gmm) and G.sample_qc(v, d, thr, "hom_alt")):
+                return "qc_parent"
+            if not rare(v, rec_max):
+                return "rarity"
+            return "other"
+        if G.UNKNOWN in (gd, gmm):                        # autosomal hom-alt
+            return "parent_nocall"
+        if G.HOM_REF in (gd, gmm):
+            return "mendelian_inconsistent"               # deletion-in-trans / UPD shape
+        if not G.sample_qc(v, c, thr, "hom_alt"):
+            return "qc_child"
+        if not (_carrier_qc(v, d, gd) and _carrier_qc(v, m, gmm)):
+            return "qc_parent"
+        if not rare(v, rec_max):
+            return "rarity"
+        return "other"
+
     for v in vcf:
+        stats["examined"] += 1
+        if A.consequence(v) is not None or A.impact(v) is not None:
+            stats["annotated"] += 1       # the Step-4 transfer landed on this record
         if require_pass and v.FILTER:  # cyvcf2 FILTER is None for PASS/'.'
+            stats["skipped"]["filter"] += 1
             continue
         # sex unresolved -> ploidy-aware X/Y logic cannot be applied; skip sex chromosomes
         # rather than silently assume female (fail-soft; autosomal modes still run)
         if not gt.sex_known and G.is_sex_nonpar(v):
+            stats["skipped"]["sex_unresolved"] += 1
             continue
         # non-PAR chrY only exists in males; a female chrY non-PAR call is an artifact
         if G.is_y_nonpar(v) and not gt.child_male:
+            stats["skipped"]["chry_female"] += 1
             continue
+        key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
+        n_rows_before = len(rows)
         c, d, m = gt.c, gt.d, gt.m
         gc, gd, gmm = v.gt_types[c], v.gt_types[d], v.gt_types[m]
-        if gc in (G.HET, G.HOM_ALT) and A.clnsig_is_plp(v):
+        is_plp = gc in (G.HET, G.HOM_ALT) and A.clnsig_is_plp(v)
+        if is_plp:
             _fr = A.frequency(v, cfg)
             if _fr is not None and _fr >= rec_max:
-                n_plp_inert += 1   # P/LP the child carries, dropped by every mode's rarity gate
+                n_plp_inert += 1   # P/LP the child carries, above every mode's rarity gate
 
         # male non-PAR chrX/chrY = hemizygous; a het call there is a QC red flag
         male_x = G.is_sex_nonpar(v) and gt.child_male
@@ -312,8 +437,12 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 else:
                     origin = None                # a parent no-call — inheritance unestablished
                 if origin:
-                    key = f"{v.CHROM}:{v.POS}:{v.REF}:{v.ALT[0]}"
                     hets.setdefault(gene, []).append((origin, v, key, unverified, vacuous))
+                    collected[key] = (v, is_plp, origin)
+        # No row from any mode block and not pooled for pairing: this variant is finished, and
+        # the only remaining question is why. (A pooled het is resolved after pairing below.)
+        if len(rows) == n_rows_before and key not in collected:
+            pending[key] = (why_no_row(v, gc, gd, gmm, male_x, male_x_chrx), is_plp)
 
     # ---- compound het (recessive): trans pairs with determinable parent-of-origin ----
     # A mat×pat pair is trans BY DESCENT (confirmed). A pair with a DE NOVO leg is NOT phase-
@@ -373,7 +502,32 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     if vac:
                         r["flags"] += ";parent_ad_unmeasured"
                     rows.append(r)
-    return rows, n_plp_inert
+
+    # ---- accounting: every examined variant is now either skipped, called, or classified ----
+    emitted = {f"{r['chrom']}:{r['pos']}:{r['ref']}:{r['alt']}" for r in rows}
+    stats["with_call"] = len(emitted)
+    for key, (why, plp) in pending.items():
+        stats["no_row"][why] += 1
+        if plp:
+            stats["clinvar_plp_no_row"] += 1
+    for key, (v, plp, origin) in collected.items():
+        if key in emitted:
+            continue
+        if origin == "denovo":
+            # pooled as a possible trans partner, but the de novo row itself did not fire
+            why = ("rarity" if not rare(v, dom_max) else "hiconf_tag" if _hiconf_blocks(v)
+                   else "mode_disabled" if not emit_denovo else "other")
+        else:
+            # an inherited het pooled at recessive_max that paired with nothing and sits above
+            # dominant_max: the [dominant_max, recessive_max) band, emitted under no mode. On real
+            # WGS this is the default fate of most surviving hets — count it, do not hide it.
+            why = ("inert_band_het" if not rare(v, dom_max)
+                   else "mode_disabled" if not emit_dominant else "other")
+        stats["no_row"][why] += 1
+        if plp:
+            stats["clinvar_plp_no_row"] += 1
+    stats["clinvar_plp_ge_recessive_max"] = n_plp_inert
+    return rows, stats
 
 
 def main(argv=None) -> int:
@@ -403,6 +557,8 @@ def main(argv=None) -> int:
     n_trios = 0
     all_rows = []
     n_plp_inert_total = 0
+    tot = {"examined": 0, "with_call": 0, "annotated": 0, "clinvar_plp_no_row": 0,
+           "skipped": Counter(), "no_row": Counter()}
     for r in rows:
         trio_id, vcf_path, ped_path = r.get("trio_id"), r.get("candidates_vcf"), r.get("ped")
         ped = parse_ped(ped_path)
@@ -425,25 +581,73 @@ def main(argv=None) -> int:
         # de novo requirement that both parents be CONFIDENTLY hom-ref, and makes a half-called
         # parent look like an affirmative non-carrier when establishing compound-het trans.
         vcf = VCF(vcf_path, strict_gt=True)
+        # WITNESS on the file this step actually READS. Step 3 asserts the faf95 witness on the
+        # annotated union; Step 4 then re-derives per-trio genotypes from the RAW trio VCF and
+        # re-attaches every annotation with one blanket `bcftools annotate -c INFO`. Nothing checked
+        # that the transfer landed here — and a transfer that lifts nothing is not loud: every
+        # record reads rarity_basis=absent (= rarest), the candidate list gets BIGGER, the run exits
+        # 0, and every row asserts "gnomAD has no record for this allele" for alleles nobody looked
+        # up. The header test catches a transfer that never ran; the value-level test after
+        # screening catches one that ran and matched nothing (a stale plausible-set index).
+        if A.rarity_oracle(cfg) == "faf95":
+            witness = A.F["gnomad_af_joint"]
+            if f"##INFO=<ID={witness}," not in vcf.raw_header:
+                sys.stderr.write(
+                    f"ERROR: {trio_id}: resources.gnomad.oracle is 'faf95' but {vcf_path} declares "
+                    f"no INFO/{witness} — Step 4's annotation transfer never landed on this per-trio "
+                    "VCF, so every variant would read as absent from gnomAD (= rarest) and no "
+                    "rarity gate would fire. Re-run Step 4 (rm its .done markers) and check its "
+                    "'annotated_genotypes' audit line.\n")
+                vcf.close()
+                return 1
         try:
             gt = Trio(vcf, ped, thr)
         except KeyError as e:
             sys.stderr.write(f"WARN: {trio_id}: {e}; skipping\n")
             vcf.close()
             continue
-        trio_rows, n_plp_inert = screen_trio(trio_id, vcf, gt, cfg)
+        trio_rows, st = screen_trio(trio_id, vcf, gt, cfg)
         vcf.close()
+        if st["examined"] and not st["annotated"]:
+            sys.stderr.write(
+                f"ERROR: {trio_id}: none of the {st['examined']} candidate records in {vcf_path} "
+                "carries a VEP consequence or impact — Step 4's annotation transfer matched nothing "
+                "(a stale plausible-set index, or a contig-naming mismatch between the trio VCF and "
+                "the plausible set). Every mode would gate on blank annotations. Re-run Step 4.\n")
+            return 1
         n_trios += 1
+        n_plp_inert = st["clinvar_plp_ge_recessive_max"]
         n_plp_inert_total += n_plp_inert
-        # per-trio audit: total calls + counts by mode
+        for k in ("examined", "with_call", "annotated", "clinvar_plp_no_row"):
+            tot[k] += st[k]
+        tot["skipped"].update(st["skipped"])
+        tot["no_row"].update(st["no_row"])
+        # per-trio audit: the INPUT side first (what was examined and what became of it), then
+        # the output side (calls by mode). The two reconcile:
+        #     variants_examined == sum(skipped.*) + variants_with_call + variants_no_row
+        n_no_row = sum(st["no_row"].values())
+        audit.record("05_inheritance", "variants_examined", st["examined"], scope=trio_id)
+        audit.record("05_inheritance", "variants_with_call", st["with_call"], scope=trio_id)
+        audit.record("05_inheritance", "variants_no_row", n_no_row, scope=trio_id)
+        for k, n in sorted(st["skipped"].items()):
+            audit.record("05_inheritance", f"skipped.{k}", n, scope=trio_id)
+        for k, n in sorted(st["no_row"].items()):
+            audit.record("05_inheritance", f"no_row.{k}", n, scope=trio_id)
         tmodes = {}
         for row in trio_rows:
             tmodes[row["mode"]] = tmodes.get(row["mode"], 0) + 1
         audit.record("05_inheritance", "candidate_calls", len(trio_rows), scope=trio_id)
         if n_plp_inert:
             audit.record("05_inheritance", "clinvar_plp_dropped_ge_recessive_max", n_plp_inert, scope=trio_id)
+        # recorded even when 0: a reviewer must be able to tell "none lost" from "never counted"
+        audit.record("05_inheritance", "clinvar_plp_no_row", st["clinvar_plp_no_row"], scope=trio_id)
         for mode, c in sorted(tmodes.items()):
             audit.record("05_inheritance", f"mode.{mode}", c, scope=trio_id)
+        why = ", ".join(f"{k}={n}" for k, n in sorted(st["no_row"].items()))
+        sys.stderr.write(
+            f"  [{trio_id}] {st['examined']} examined -> {st['with_call']} with a call, "
+            f"{n_no_row} no row" + (f" ({why})" if why else "")
+            + (f"; skipped {dict(st['skipped'])}" if st["skipped"] else "") + "\n")
         all_rows.extend(trio_rows)
 
     with open(args.out, "w") as out:
@@ -480,13 +684,24 @@ def main(argv=None) -> int:
         if _b:
             audit.record("05_inheritance", f"rarity_basis.{_b}", _n)
     audit.record("05_inheritance", "trios_screened", n_trios)
+    audit.record("05_inheritance", "variants_examined", tot["examined"])
+    audit.record("05_inheritance", "variants_with_call", tot["with_call"])
+    audit.record("05_inheritance", "variants_no_row", sum(tot["no_row"].values()))
+    for k, n in sorted(tot["skipped"].items()):
+        audit.record("05_inheritance", f"skipped.{k}", n)
+    for k, n in sorted(tot["no_row"].items()):
+        audit.record("05_inheritance", f"no_row.{k}", n)
     audit.record("05_inheritance", "candidate_calls_total", len(all_rows))
     audit.record("05_inheritance", "clinvar_plp_dropped_ge_recessive_max", n_plp_inert_total)
+    audit.record("05_inheritance", "clinvar_plp_no_row", tot["clinvar_plp_no_row"])
     for mode, c in sorted(by_mode.items()):
         audit.record("05_inheritance", f"mode.{mode}", c)
     sys.stderr.write(
         f"Step 5 complete: {len(all_rows)} candidate calls across {n_trios} trios "
         f"-> {args.out}\n  by mode: {by_mode}\n"
+        f"  examined {tot['examined']} variants: {tot['with_call']} with a call, "
+        f"{sum(tot['no_row'].values())} no row {dict(sorted(tot['no_row'].items()))}, "
+        f"skipped {dict(sorted(tot['skipped'].items()))}\n"
     )
     return 0
 

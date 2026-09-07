@@ -521,9 +521,11 @@ def main(argv=None) -> int:
     # against. `n_rows` keeps the raw row count visible beside it.
     counts, n_rows, sites, trios_obs, site_trios = {}, {}, {}, {}, {}
     obs_seen = set()
+    n_no_gene = 0     # rows with no gene: never-drop keeps the ROW, but it joins no gene layer
     for r in variants:
         g = (r.get(gene_c) or "").strip()
         if not g:
+            n_no_gene += 1
             continue
         n_rows[g] = n_rows.get(g, 0) + 1
         key = f"{r.get('chrom')}:{r.get('pos')}:{r.get('ref')}:{r.get('alt')}"
@@ -537,6 +539,11 @@ def main(argv=None) -> int:
             site_trios.setdefault(g, {}).setdefault(key, set()).add(t)
     n_genes_in = len(counts)
     n_obs_total = sum(counts.values())
+    audit.record("09_prioritize", "variants_no_gene", n_no_gene)
+    if n_no_gene:
+        sys.stderr.write(f"WARN: {n_no_gene} variant rows carry no gene and take part in no gene-"
+                         "layer statistic (they are still ranked and still written; every gene "
+                         "column on them is blank).\n")
 
     n_trios = args.n_trios or 0
     if not n_trios:

@@ -191,10 +191,17 @@ def main(argv=None) -> int:
 
     # --- aggregate distinct individuals per gene, by model ---
     genes, trios = {}, set()
+    # Count what came in and what this loop discards. A call with no gene attribution (an
+    # intergenic variant Step 3's CADD rung kept) has nowhere to aggregate, so skipping it is
+    # correct — but it used to be the only drop in the pipeline with no counter, and this step's
+    # audit surface was otherwise outputs only (genes_nominated, ...).
+    n_calls_in = n_no_gene = 0
     with open(args.calls) as fh:
         for r in csv.DictReader(fh, delimiter="\t"):
+            n_calls_in += 1
             gene = r.get("symbol") or r.get("gene")
             if not gene:
+                n_no_gene += 1
                 continue
             trio, mode = r.get("trio_id"), r.get("mode")
             trios.add(trio)
@@ -521,6 +528,12 @@ def main(argv=None) -> int:
     n_rec_sig = sum(1 for r in rows if any(r.get(c) == "1" for c in _sig_cols))
     n_rec_fdr = sum(1 for r in rows
                     if any(r.get(c) is not None and r[c] < fdr_q for c in _q_cols))
+    audit.record("06_burden", "calls_in", n_calls_in)
+    audit.record("06_burden", "calls_no_gene", n_no_gene)
+    if n_no_gene:
+        sys.stderr.write(f"WARN: {n_no_gene} of {n_calls_in} calls carry no gene symbol or ID and "
+                         "cannot be aggregated per gene; they survive in candidates.calls.tsv and "
+                         "the variant layer but contribute to no gene row.\n")
     audit.record("06_burden", "n_trios", n_trios)
     audit.record("06_burden", "n_male_trios", n_male)
     audit.record("06_burden", "genes_rank_mu_normalised",
