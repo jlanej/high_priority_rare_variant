@@ -77,18 +77,41 @@ def summarize(adir, out_md=None):
         for m, v in reasons:
             lines.append(f"- {m[len('reason.'):]}: {v}")
         lines.append("")
-    # per-trio table
+    # per-trio table. "call rows" can EXCEED "examined" (a compound-het leg is emitted once per
+    # pair, and one variant can appear under up to three modes), which is why the input side is
+    # shown beside it: examined == skipped + with a call + no row, per trio, and "no row" is the
+    # count a reader of a negative result actually needs.
     trios = sorted({sc for (s, sc, m) in d if s in ("04_subset", "05_inheritance") and sc != "global"})
     if trios:
         lines += ["## Per-trio funnel", "",
-                  "| trio | candidate genotypes | candidate calls | modes |",
-                  "|------|--------------------:|----------------:|-------|"]
+                  "| trio | candidate genotypes | examined | with a call | no row | skipped | call rows | modes |",
+                  "|------|--------------------:|---------:|------------:|-------:|--------:|----------:|-------|"]
         for t in trios:
             cg = g("04_subset", "candidate_genotypes", t)
+            ex = g("05_inheritance", "variants_examined", t)
+            wc = g("05_inheritance", "variants_with_call", t)
+            nr = g("05_inheritance", "variants_no_row", t)
+            sk = sum(int(v) for (s, sc, m), v in d.items()
+                     if s == "05_inheritance" and sc == t and m.startswith("skipped."))
             cc = g("05_inheritance", "candidate_calls", t)
             modes = ", ".join(f"{m[len('mode.'):]}={v}" for (s, sc, m), v in sorted(d.items())
                               if s == "05_inheritance" and sc == t and m.startswith("mode."))
-            lines.append(f"| {t} | {cg} | {cc} | {modes} |")
+            lines.append(f"| {t} | {cg} | {ex} | {wc} | {nr} | {sk} | {cc} | {modes} |")
+        lines.append("")
+    # why examined variants produced no row (all trios) — the drop side of Step 5, by reason
+    no_row = sorted((m, v) for (s, sc, m), v in d.items()
+                    if s == "05_inheritance" and sc == "global" and m.startswith("no_row."))
+    skipped = sorted((m, v) for (s, sc, m), v in d.items()
+                     if s == "05_inheritance" and sc == "global" and m.startswith("skipped."))
+    if no_row or skipped:
+        lines.append("### Step 5: examined variants that produced no row (all trios)")
+        for m, v in no_row:
+            lines.append(f"- {m[len('no_row.'):]}: {v}")
+        for m, v in skipped:
+            lines.append(f"- skipped ({m[len('skipped.'):]}): {v}")
+        plp = g("05_inheritance", "clinvar_plp_no_row")
+        if plp != "":
+            lines.append(f"- ClinVar P/LP alleles the child carried that yielded no row: {plp}")
         lines.append("")
     lines += ["## Cross-pedigree gene burden",
               f"- genes nominated: {g('06_burden','genes_nominated')}; "

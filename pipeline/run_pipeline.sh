@@ -368,6 +368,15 @@ if run_step 9 && [[ "$(cfg_get prioritization.enabled true)" != "false" ]]; then
     p_in="$W/igv/variants.tsv"
     [[ -s "$p_in" ]] || p_in="$W/candidates.calls.tsv"
     [[ -s "$p_in" ]] || die "Step 9 needs igv/variants.tsv (Step 8) or candidates.calls.tsv (Step 5) in $W — run the earlier steps first, or use --from/--to to skip Step 9."
+    # FRESHNESS. Never-drop conserves the file Step 9 is HANDED, not the run's call set: this
+    # selection is by existence, and Step 8 does not rebuild variants.tsv when the IGV export is
+    # disabled, on a --from 9 re-run, or in SLURM array mode. A stale 10-row table beside a fresh
+    # 41-row candidates.calls.tsv passed both never-drop assertions and exited 0. Step 8 is
+    # strictly 1:1 with Step 5's calls, so any row-count difference means a stale table.
+    if [[ "$p_in" == "$W/igv/variants.tsv" && -s "$W/candidates.calls.tsv" ]]; then
+        _n8=$(( $(wc -l < "$p_in") - 1 )); _n5=$(( $(wc -l < "$W/candidates.calls.tsv") - 1 ))
+        [[ "$_n8" -eq "$_n5" ]] || die "igv/variants.tsv has $_n8 rows but candidates.calls.tsv has $_n5 — the IGV table is STALE (Step 8 is 1:1 with Step 5), so Step 9 would rank a different call set than the one the workbook reports. Re-run Step 8 (rm $W/igv/variants.tsv and its .done marker), or remove the stale table to let Step 9 read candidates.calls.tsv."
+    fi
     pargs=(--variants "$p_in" --config "$CFG" --n-trios "$n_trios"
            --out-variants "$W/variants.prioritized.tsv"
            --out-genes "$W/genes.prioritized.tsv")

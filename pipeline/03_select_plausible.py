@@ -63,10 +63,18 @@ def main(argv=None) -> int:
     w = Writer(args.out, vcf, mode=mode)
     n_in = n_out = 0
     reasons = {}
+    # `not_functional` is one bucket for two different facts — "the scores said no" and "no score
+    # existed" — and the pipeline treats that distinction as load-bearing everywhere else (absence
+    # is never zero). A novel non-coding indel that neither CADD's table nor the precomputed SpliceAI
+    # set covers has NO keep-path by construction, and the audit used to file it beside a variant
+    # both predictors scored and rejected. Sub-count it so a negative result can say which.
+    n_unscored = 0
     for v in vcf:
         n_in += 1
         keep, reason = classify(v)
         reasons[reason] = reasons.get(reason, 0) + 1
+        if reason == "not_functional" and A.cadd(v) is None and A.spliceai_ds(v) is None:
+            n_unscored += 1
         if keep:
             v.INFO["hprv_keep_reason"] = reason
             w.write_record(v)
@@ -82,6 +90,11 @@ def main(argv=None) -> int:
     audit.record("03_select", "sites_plausible", n_out)
     for r, c in sorted(reasons.items()):
         audit.record("03_select", f"reason.{r}", c)
+    if reasons.get("not_functional"):
+        # both halves recorded, so a zero reads as "measured 0", never as "never emitted"
+        audit.record("03_select", "reason.not_functional.unscored", n_unscored)
+        audit.record("03_select", "reason.not_functional.scored",
+                     reasons["not_functional"] - n_unscored)
 
     frac = (100.0 * n_out / n_in) if n_in else 0.0
     sys.stderr.write(

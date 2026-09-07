@@ -133,6 +133,22 @@ _plaus_key="$(cksum < "$PLAUSIBLE" | awk '{print $1"-"$2}')"
 printf 'trio_id\tcandidates_vcf\tped\n' > "$out_manifest"
 log "Step 4: extracting candidate genotypes for ${#rows[@]} trios"
 
+# PROVE the annotation transfer landed. Every candidate record came through `isec` against the
+# plausible set, and every plausible record carries Step 3's `hprv_keep_reason` — so after the
+# blanket `annotate -c INFO` every candidate must carry it too. A shortfall means the transfer
+# matched only part of the file (the classic cause: a stale index on the plausible-set copy), and
+# the un-matched records reach Step 5 with NO annotations: no impact, no gene, and under the
+# default oracle rarity_basis=absent (= rarest). That failure used to exit 0 and stamp .done.
+# `bcftools query` prints "." for a missing value; count the lines that are not that.
+audit_transfer() {
+    local trio="$1" f="$2" nc n_tx
+    nc="$(count_variants "$f")"
+    n_tx="$(bcftools query -f '%INFO/hprv_keep_reason\n' "$f" | grep -cv '^\.$' || true)"
+    audit 04_subset candidate_genotypes "$nc" "$trio"
+    audit 04_subset annotated_genotypes "${n_tx:-0}" "$trio"
+    [[ "${n_tx:-0}" -eq "$nc" ]] || die "[$trio] the annotation transfer landed on only ${n_tx:-0} of $nc candidate records in $f — the remainder would reach Step 5 with no impact, no gene and (under faf95) rarity_basis=absent. The usual cause is a stale index on the plausible-set copy; rm $f $f.done and re-run Step 4."
+}
+
 for row in "${rows[@]}"; do
     [[ -z "$row" || "$row" == \#* ]] && continue
     IFS=$'\t' read -ra f <<< "$row"
@@ -154,7 +170,7 @@ for row in "${rows[@]}"; do
     if is_done "$out" && [[ "$(cat "$out.done" 2>/dev/null)" == "$_tkey" ]]; then
         log "  [$trio] cached"
         printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
-        audit 04_subset candidate_genotypes "$(count_variants "$out")" "$trio"
+        audit_transfer "$trio" "$out"
         continue
     fi
     # Regenerating: drop the previous output AND its index. index_vcf() is a no-op when any index
@@ -255,6 +271,10 @@ for row in "${rows[@]}"; do
         fi
     fi
     index_vcf "$norm"
+    # The pre-intersection count: trio records (post-split, alleles the trio carries) inside the
+    # plausible windows. `isec -c none` below keeps only allele-EXACT matches, and the difference
+    # between this and candidate_genotypes is the only trace a representation mismatch leaves.
+    audit 04_subset region_genotypes "$(count_variants "$norm")" "$trio"
     # allele-aware intersection: trio records that match a plausible site exactly
     bcftools isec -c none -n=2 -w1 --threads "$THREADS" -Oz -o "$cand" "$norm" "$PLAUSIBLE"
     index_vcf "$cand"
@@ -269,9 +289,8 @@ for row in "${rows[@]}"; do
     rm -f "$norm" "$norm".{tbi,csi} "$cand" "$cand".{tbi,csi} 2>/dev/null || true
 
     printf '%s\t%s\t%s\n' "$trio" "$out" "$ped" >> "$out_manifest"
-    nc="$(count_variants "$out")"
-    audit 04_subset candidate_genotypes "$nc" "$trio"
-    log "  [$trio] -> $out ($nc candidate genotypes)"
+    audit_transfer "$trio" "$out"
+    log "  [$trio] -> $out ($(count_variants "$out") candidate genotypes)"
 done
 
 log "Step 4 complete. Per-trio candidate manifest: $out_manifest"

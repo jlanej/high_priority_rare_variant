@@ -2904,12 +2904,73 @@ def test_step5_sex_chromosomes_and_gates():
                       header=hdr)
     assert _calls(rows) == [("denovo", 100, "")] and rows[0]["hiConfDeNovo"] == "1"
     # the ClinVar P/LP inert band is COUNTED: a carried P/LP allele at >= recessive_max
-    _, n_inert = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02,
-                              info={"vep_CLIN_SIG": "pathogenic"})])
-    assert n_inert == 1
+    _, st = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02,
+                         info={"vep_CLIN_SIG": "pathogenic"})])
+    assert st["clinvar_plp_ge_recessive_max"] == 1 and st["clinvar_plp_no_row"] == 1
     # child_gt is the BASE form (what Step 9 must parse), never an index
     rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HET, _HET), af=5e-3)])
     assert rows[0]["child_gt"] == "T/T" and rows[0]["mother_gt"] == "A/T"
+
+
+def test_step5_accounts_for_every_examined_variant():
+    """Step 5 used to record only what it emitted. Now every examined variant is skipped, called,
+    or classified by the FIRST condition that left it with no row — and the identity
+    examined == skipped + with_call + no_row holds, so a negative result is legible."""
+    def st_of(variants, **kw):
+        rows, st = _screen(variants, **kw)
+        assert st["examined"] == sum(st["skipped"].values()) + st["with_call"] + sum(st["no_row"].values())
+        return rows, st
+
+    def why(variants, **kw):
+        rows, st = st_of(variants, **kw)
+        assert not rows and st["with_call"] == 0, _calls(rows)
+        assert sum(st["no_row"].values()) == 1, dict(st["no_row"])
+        return next(iter(st["no_row"]))
+
+    PLP = {"vep_CLIN_SIG": "pathogenic"}
+    # the four silent losses the shipped integration fixture had, by name
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), gq=(12, 99, 99))]) == "qc_child"
+    assert why([_v5("chr1", 100, "G1", (_HET, _UNK, _HR), af=5e-5)]) == "parent_nocall"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-4)]) == "inert_band_het"
+    _, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=1.6e-4, info=PLP)])
+    assert st["no_row"]["inert_band_het"] == 1, dict(st["no_row"])
+    # ...and the P/LP counter that used to read 0 for exactly this band now counts it
+    assert st["clinvar_plp_no_row"] == 1 and st["clinvar_plp_ge_recessive_max"] == 0
+    # the rest of the taxonomy
+    assert why([_v5("chr1", 100, "G1", (_HR, _HET, _HET), af=5e-5)]) == "child_not_carrier"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02)]) == "rarity"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 99, 5))]) == "qc_parent"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (38, 2)})]) == "qc_parent"
+    assert why([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)]) == "mendelian_inconsistent"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HA, _HA), af=5e-5)]) == "mendelian_inconsistent"
+    assert why([_v5("chr1", 100, "G1", (_HA, _UNK, _HET), af=5e-4)]) == "parent_nocall"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
+                    info={"vep_Gene": "", "vep_SYMBOL": ""})]) == "no_gene"
+    assert why([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR))], sex="1") == "chry"
+    assert why([_v5("chrX", 10_000_000, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1") == "male_x_het"
+    hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag"
+    off = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}, "inheritance": {"emit_dominant": False}}
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5)], cfg=off) == "mode_disabled"
+    # the early skips are counted by reason and are NOT no-row classifications
+    _, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, filt="LowQual")])
+    assert st["skipped"]["filter"] == 1 and not st["no_row"]
+    _, st = st_of([_v5("chrX", 10_000_000, "GX", (_HA, _HR, _HET), af=5e-4)], sex="0")
+    assert st["skipped"]["sex_unresolved"] == 1 and not st["no_row"]
+    # with_call counts DISTINCT variants, not rows: a trans pair is 2 variants / 2 rows, and an
+    # inherited x de novo pair is 2 variants across 4 rows (pair legs + de novo + dominant)
+    rows, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-3),
+                      _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-3),
+                      _v5("chr1", 300, "G1", (_HR, _HET, _HET), af=5e-5)])
+    assert st["with_call"] == 2 and st["no_row"]["child_not_carrier"] == 1 and len(rows) == 2
+    rows, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5),
+                      _v5("chr1", 200, "G1", (_HET, _HR, _HR), af=None)])
+    assert len(rows) == 4 and st["with_call"] == 2 and not st["no_row"]
+    # the transfer witness: an examined record with a consequence or impact counts as annotated
+    assert st["annotated"] == 2
+    _, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
+                       info={"vep_Consequence": "", "vep_IMPACT": ""})])
+    assert st["annotated"] == 0
 
 
 def test_genotype_dp_falls_back_to_format_dp_when_ad_is_absent():

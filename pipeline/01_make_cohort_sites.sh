@@ -130,6 +130,16 @@ log "  reference: $REF"
 log "  output:    $OUT"
 log "  excluding contigs (out of scope): $EXCLUDE_CONTIGS"
 
+# The source VCF's own record count, from its index (instant; `bcftools index -n` reads the
+# metadata, no pass over the data). `input_sites` below counts the POST-filter per-trio file, so
+# without this the FILTER drop and the excluded-contig drop left no trace at all. Unindexed inputs
+# are supported and simply record nothing here — an absent metric, never a fabricated 0.
+source_records() {
+    local n
+    n="$(bcftools index -n "$1" 2>/dev/null || true)"
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s\n' "$n"
+}
+
 # --- per-trio: PASS -> norm -> site-only -> strip INFO -> index ---
 for row in "${rows[@]}"; do
     [[ -z "$row" || "$row" == \#* ]] && continue
@@ -145,6 +155,7 @@ for row in "${rows[@]}"; do
         log "  [$trio] cached"
         [[ -f "$site.tbi" || -f "$site.csi" ]] || index_vcf "$site"  # concat -a needs the index
         site_files+=("$site")
+        _src="$(source_records "$vcf")"; [[ -n "$_src" ]] && audit 01_cohort_sites source_records "$_src" "$trio"
         audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
         continue
     fi
@@ -175,6 +186,7 @@ for row in "${rows[@]}"; do
     require_intact_bgzip "$site"
     printf '%s\n' "$_tkey" > "$site.done"   # keyed marker (see the cache keys above)
     site_files+=("$site")
+    _src="$(source_records "$vcf")"; [[ -n "$_src" ]] && audit 01_cohort_sites source_records "$_src" "$trio"
     audit 01_cohort_sites input_sites "$(count_variants "$site")" "$trio"
 done
 [[ ${#site_files[@]} -gt 0 ]] || die "no per-trio site files were produced"
