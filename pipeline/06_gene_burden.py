@@ -45,7 +45,7 @@ import sys
 
 from hprv import annotations as A
 from hprv import audit
-from hprv.config import get, load_config
+from hprv.config import get, get_bool, load_config
 
 try:
     from scipy.stats import binom, poisson
@@ -185,7 +185,7 @@ def main(argv=None) -> int:
     # For the recurrence null, an allele absent from gnomAD is floored at the detection
     # limit (~1 / 2*N_gnomAD alleles) so its expected carriers are tiny but non-zero.
     absent_floor = float(get(cfg, "burden.absent_af_floor", 1e-6))
-    rank_by_mu = bool(get(cfg, "burden.rank_by_mutational_target", True))
+    rank_by_mu = get_bool(cfg, "burden.rank_by_mutational_target", True)
     # Same imputation Step 9 uses for a null mu_lof (median mu_lof / (mu_mis + mu_syn)).
     impute = float(get(cfg, "prioritization.excess.offset.mu_lof_impute_factor", 0.0516))
 

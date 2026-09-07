@@ -613,6 +613,15 @@ two things that look identical in the output are not the same fact:
   never pipe into `grep -q` when the pipeline's status is the answer — it fails *silently wrong*
   rather than aborting (a chr-prefixed reference was reported as `nochr`). Use `grep -cx` +
   a count test, which reads to EOF and cannot SIGPIPE the producer.
+- **The screen's knobs are validated at Step 3 and Step 5 start-up, and a boolean is read
+  strictly.** `hprv.config.validate_filters` halts on the settings that used to switch a rung
+  OFF with exit 0: a scalar `keep_impacts: HIGH` (`set()` of a string is `{'H','I','G'}` — every
+  stop_gained then filed under `not_functional`), a lower-cased or unknown IMPACT, an inverted
+  rarity ladder (`dominant_max` above `recessive_max` is silently inert), a percent-scale or
+  inverted allele-balance band (`het_ab_min: 25` reduced Step 5 to zero calls), and a quoted or
+  `${ENV}`-templated `"false"`, which `bool()` read as True. Read booleans through
+  `config.get_bool` / `as_bool`, never `bool(get(...))`; read `keep_impacts` through
+  `config.keep_impacts`.
 - **`child_gt`/`mother_gt`/`father_gt` are cyvcf2 `gt_bases`, never `0/1`.** Step 5 writes allele
   STRINGS (`A/T`, `T/T`, `./.`). Any consumer that tests `gt in ("1/1", "1|1")` never matches, so
   Step 9's `genotype_qc` used to judge every hom-alt call on the het AB band and fail it; zygosity

@@ -296,7 +296,9 @@ filters:
     # SpliceAI delta score over its cutoff, or CADD over its cutoff — see src/hprv/selection.py.
     # (REVEL/AlphaMissense/MPC/LOFTEE remain out: missense-only scores are unreachable — a scored
     # missense is already MODERATE and kept at the impact rung.)
-    keep_impacts: [HIGH, MODERATE]
+    keep_impacts: [HIGH, MODERATE]  # a YAML list; a scalar or comma string is normalised, an
+                                    # unknown value halts Step 3 (a screen with no impact rung
+                                    # exits 0 and looks like a clean negative)
     # SpliceAI max delta score (max over acceptor/donor gain/loss) keep-path. The ONLY signal that
     # reaches a deep-intronic cryptic splice site or an exonic-synonymous splice disruption. 0.2 is
     # the ClinGen SVI PP3-supporting minimum (best practice, publishable). Lower it toward 0.1 or
