@@ -363,6 +363,16 @@ qc:
   mie_max: 0.02                   # flag a trio if its genome-wide Mendelian-error rate exceeds this
   x_het_male_max: 0.10            # chrX non-PAR het-ratio below this -> inferred male
   sex_min_sites: 20               # need >= this many informative chrX calls to infer sex (else unknown)
+                                  # (inferred for all THREE members: a father reading female or a
+                                  #  mother reading male sets parent_sex_flag — the one direct
+                                  #  detector of transposed parents, which the MIE rate cannot see)
+  # Per-member genotype no-call rate on the scanned sites above which the trio is flagged. A trio
+  # jointly genotyped by GATK carries an affirmative 0/0 for a non-carrier parent (~1-2% no-calls
+  # from low coverage); a merge of single-sample callsets carries ./. at every singleton site
+  # (tens of %), and Step 5 then loses every de novo and marks every inherited call
+  # origin_unverified while the MIE gate — whose denominator skips no-call sites — reports a
+  # CLEANER trio. Advisory, like every Step-0 flag.
+  max_nocall_rate: 0.10
   # CAP on the QC-passing sites scanned per trio — for the Mendelian-error/CHARR pass AND for the
   # chrX sex scan. On WGS the MIE rate is therefore measured on a PREFIX of the genome (the first
   # 200k QC-passing biallelic autosomal sites), not genome-wide: adequate as a swap/contamination

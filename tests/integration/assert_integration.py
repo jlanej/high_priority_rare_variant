@@ -53,6 +53,18 @@ def main(argv=None) -> int:
     # Mendelian-error gate (sample-swap proxy): the de novo in CH_A is a Mendelian violation
     check(int(qc.get("CH_A", {}).get("mie_errors") or 0) >= 1, "CH_A Mendelian error detected (de novo)")
     check(qc.get("CH_A", {}).get("mie_flag") == "1", "CH_A MIE flag raised")
+    # the PARENTS' sex is inferred from their own chrX (the only reachable sex check, and the one
+    # direct detector of transposed parents), and each member's no-call rate is reported
+    for t in ("CH_A", "CH_B"):
+        for col in ("dad_inferred_sex", "mom_inferred_sex", "parent_sex_flag", "n_records",
+                    "kid_nocall_rate", "dad_nocall_rate", "mom_nocall_rate", "nocall_flag"):
+            check(col in qc.get(t, {}), f"{t}: qc_report has '{col}'")
+        check(qc.get(t, {}).get("parent_sex_flag") == "0", f"{t}: parents' chrX sex agrees with their roles")
+        check(qc.get(t, {}).get("nocall_flag") == "0", f"{t}: no member exceeds qc.max_nocall_rate (jointly genotyped)")
+    check(qc.get("CH_B", {}).get("dad_inferred_sex") == "1" and qc.get("CH_B", {}).get("mom_inferred_sex") == "2",
+          "CH_B: father inferred male and mother female from their own chrX genotypes")
+    check(qc.get("CH_A", {}).get("dad_inferred_sex") == "" and qc.get("CH_A", {}).get("parent_sex_flag") == "0",
+          "CH_A: no chrX sites -> no parental sex inference and NO flag (absence is not a mismatch)")
 
     # --- Step 3: plausible sites keep/drop ---
     plaus = {}
@@ -669,6 +681,8 @@ def main(argv=None) -> int:
     check(am("06_burden", "calls_in") == str(len(calls)) and am("06_burden", "calls_no_gene") == "0",
           "Step 6 counts its input calls and the gene-less ones it skips")
     check(am("09_prioritize", "variants_no_gene") == "0", "Step 9 counts the gene-less rows it cannot join")
+    check(am("00_qc", "trios_qc") == "2" and am("00_qc", "parent_sex_flag", "CH_B") == "0",
+          "Step 0 records its flags in the audit (it recorded nothing before)")
     # ...and the summary renders the input side
     with open(os.path.join(W, "audit", "summary.md")) as fh:
         smd = fh.read()
