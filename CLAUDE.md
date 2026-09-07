@@ -126,15 +126,21 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 
 ## Data contract between steps
 
-- **User input** (git-ignored): a `trios_file` (TSV, header names kid/dad/mom in any order;
-  IDs match VCF samples) + a `vcf_dir`/`vcf_list`. `pipeline/resolve_trios.py` maps each trio to
+- **User input** (git-ignored): a `trios_file` (TSV, header names kid/dad/mom in any order —
+  matched by NAME, an `_id` suffix tolerated, and STRICTLY: a header naming some roles but not
+  all is an error, never a positional guess, because a transposed mother/father inverts every
+  parent-of-origin call and the MIE gate is blind to it; IDs match VCF samples) + a `vcf_dir`/`vcf_list`. `pipeline/resolve_trios.py` maps each trio to
   the VCF containing all three members (exact match; picks the fewest-sample VCF on a tie; extras
   OK), generates PEDs, and writes the **internal manifest** `trios.resolved.tsv`
   (`trio_id  vcf  ped  samples`) that Steps 0/1/4 consume. Unresolved/ambiguous trios are reported
   in `trio_resolution.tsv`, never guessed. Steps 1 and 4 subset each VCF to its 3 members
   (`bcftools view -s`), so extra members and inconsistent sample order don't matter.
 - **PED sex**: the generated PED leaves kid sex unknown (`0`); Step 5 reads Step 0's inferred sex
-  (`qc_report.tsv`) so X-linked/hemizygous logic fires correctly.
+  (`qc_report.tsv`) so X-linked/hemizygous logic fires correctly. Step 0 also infers BOTH
+  PARENTS' sex from their own chrX (`parent_sex_flag` — the only reachable sex check, and the
+  only direct detector of transposed parents) and each member's no-call rate (`nocall_flag`,
+  `qc.max_nocall_rate` 0.10 — a merge-shaped trio VCF reads `./.` for every non-carrier parent
+  and Step 5 would silently lose every de novo).
 - **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
   (timestamp, step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
   `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.

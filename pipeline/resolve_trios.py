@@ -83,7 +83,11 @@ def main(argv=None) -> int:
         sys.stderr.write("ERROR: provide --vcf-dir and/or --vcf-list\n")
         return 2
 
-    trios = read_trios_file(args.trios)
+    try:
+        trios = read_trios_file(args.trios)
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: {e}\n")
+        return 2
     if not trios:
         sys.stderr.write(f"ERROR: no trios parsed from {args.trios}\n")
         return 2

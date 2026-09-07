@@ -217,7 +217,12 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   `qc.max_sites` (**200000**) QC-passing autosomal biallelic sites — a capped scan, not genome-wide —
   chrX-inferred sex vs. PED (het-ratio **< 0.10 → male**, `qc.x_het_male_max`; needs **≥ 20**
   informative chrX calls, `qc.sex_min_sites`, else sex is left unknown — a dedicated indexed chrX
-  pass, capped by the same `max_sites`, so the autosomal MIE cap can't starve it), and a
+  pass, capped by the same `max_sites`, so the autosomal MIE cap can't starve it) **for all three
+  members** — a father reading female or a mother reading male sets `parent_sex_flag`, the one
+  direct detector of transposed parents (the MIE rule is symmetric under a parent swap and cannot
+  see one) — a per-member **genotype no-call rate > 0.10** (`qc.max_nocall_rate`) flag, which
+  separates a jointly genotyped trio (affirmative parental `0/0`, ~1–2% no-calls) from a merge of
+  single-sample callsets (`./.` at every singleton site), and a
   **contamination** gate — verifyBamID **FREEMIX > 0.05**
   (`qc.freemix_threshold`) if a `*.selfSM` directory is supplied (`resources.selfsm_dir`), else a
   VCF-only **raw (uncorrected) reference-read fraction** at high-quality hom-alt SNV sites **> 0.02**

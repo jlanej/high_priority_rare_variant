@@ -367,12 +367,35 @@ def test_par_x():
 
 def test_read_trios_file(tmp=None):
     tmp = tmp or _tmp_path(".tsv")
+
+    def read(text):
+        with open(tmp, "w") as fh:
+            fh.write(text)
+        try:
+            return read_trios_file(tmp)
+        finally:
+            os.remove(tmp)
+
     # header order must NOT matter: dad/mom located by name, not position
-    with open(tmp, "w") as fh:
-        fh.write("#kid\tmom\tdad\nCH1\tMO1\tFA1\n")   # note: mom before dad
-    trios = read_trios_file(tmp)
-    os.remove(tmp)
-    assert trios == [("CH1", "FA1", "MO1")]            # returned as (kid, dad, mom)
+    assert read("#kid\tmom\tdad\nCH1\tMO1\tFA1\n") == [("CH1", "FA1", "MO1")]
+    # the `_id` spellings — the header that used to fall through to POSITIONAL columns and
+    # transpose the parents for every trio in the file — resolve by name, in any order
+    assert read("#kid\tmother_id\tfather_id\nCH1\tMO1\tFA1\n") == [("CH1", "FA1", "MO1")]
+    assert read("sample_id\tFather\tMother\nCH1\tFA1\tMO1\n") == [("CH1", "FA1", "MO1")]
+    assert read("proband_sample_id\tpaternal_id\tmaternal_id\nCH1\tFA1\tMO1\n") == [("CH1", "FA1", "MO1")]
+    # a leading comment line that names no role is skipped; the header follows it
+    assert read("# exported 2026-09\n#kid\tdad\tmom\nCH1\tFA1\tMO1\n") == [("CH1", "FA1", "MO1")]
+    # HEADERLESS: positional, and the first line is a TRIO — it used to be eaten as a header
+    assert read("CH1\tFA1\tMO1\nCH2\tFA2\tMO2\n") == [("CH1", "FA1", "MO1"), ("CH2", "FA2", "MO2")]
+    # a header that names only SOME roles is an error, never a positional guess
+    for bad in ("#kid\tparent1\tparent2\nCH1\tFA1\tMO1\n",
+                "#kid\tdad\tmum\nCH1\tFA1\tMO1\n",
+                "#kid\tdad\tmom\tfather\nCH1\tFA1\tMO1\tFA1\n"):   # two columns name the dad
+        try:
+            read(bad)
+            raise AssertionError(f"accepted an ambiguous header: {bad!r}")
+        except ValueError as e:
+            assert "trios file" in str(e)
 
 
 def test_write_ped_roundtrip(tmp=None):
@@ -3015,6 +3038,36 @@ def test_step5_transmitting_parent_qc_is_flagged_not_fatal():
     rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, ad={1: (None, None)}),
                        _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
     assert sorted(r["mode"] for r in rows) == ["compound_het", "compound_het"], _calls(rows)
+
+
+def _load_step0():
+    """Load pipeline/00_qc.py with cyvcf2 stubbed when absent (it is only used inside the scans)."""
+    import types
+    try:
+        import cyvcf2  # noqa: F401
+    except ImportError:
+        sys.modules.setdefault("cyvcf2", types.SimpleNamespace(VCF=object))
+    spec = importlib.util.spec_from_file_location(
+        "s0", os.path.join(os.path.dirname(__file__), "..", "pipeline", "00_qc.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_step0_sex_inference_and_the_parent_swap_blind_spot():
+    """The chrX sex call, and the reason it now runs on the PARENTS: the Mendelian-error rule
+    is symmetric under a father/mother swap, so a transposed pair is invisible to it — the
+    documented 'mislabeled parents' backstop had zero power against exactly that swap."""
+    s0 = _load_step0()
+    assert s0.infer_sex(2, 98, 0.10, 20) == "1"          # 2% het on X: male
+    assert s0.infer_sex(60, 40, 0.10, 20) == "2"         # 60% het: female
+    assert s0.infer_sex(1, 10, 0.10, 20) is None         # too few informative sites: no call
+    assert s0.infer_sex(0, 0, 0.10, 0) is None
+    HR, HET, HA = G.HOM_REF, G.HET, G.HOM_ALT
+    for gc in (HR, HET, HA):
+        for gd in (HR, HET, HA):
+            for gm in (HR, HET, HA):
+                assert s0.mendelian_violation(gc, gd, gm) == s0.mendelian_violation(gc, gm, gd)
 
 
 def test_genotype_dp_falls_back_to_format_dp_when_ad_is_absent():
