@@ -691,12 +691,12 @@ two things that look identical in the output are not the same fact:
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **77 tests, no network and no VCF.**
+  **81 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
   without it — and `_run_all` then refuses to print "All N passed", instead reporting
-  `64 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
+  `68 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
   cache-invalidation guards. **CI installs pyyaml + openpyxl AND fails the job on that
   "NOT full coverage" line**, so a skipped test can never read as a green run. Before calling this
   suite green, run it the way CI does — with those two installed, not an env that happens to carry
@@ -756,8 +756,12 @@ See also **[docs/robustness_audit_2026-09.md](docs/robustness_audit_2026-09.md)*
 robustness audit of the plausibility filter (Step 3) and the genotype-to-meaning assignment
 (Step 5): a drop ledger showing where the pipeline loses a variant without a trace, 106 verified
 findings with the finder's and the verifiers' severities side by side, and a tiered work order.
-Nothing in it is implemented yet. Tier 1 (input counters for Steps 5 and 6, and a witness assert on
-the file Step 5 actually reads) changes no call and is the place to start.
+Its resolution table at the top records what landed: Tiers 1–2 (the input-side counters, the
+Step-4/5 transfer witness, the ClinVar counter, strict parent columns + parental sex check, the
+transmitting-parent flag and the comp-het veto rule, config validation, Step-9 freshness) are done;
+Tier 3 (unassigned-call rows, PGT/PID phasing, all-gene pairing, multiallelic AB, hom-rec with one
+non-carrier parent) is open and each item changes which variants are recovered — decide them from
+the `no_row.*` counts a real run now produces.
 
 Lower-level items:
 
