@@ -43,7 +43,21 @@ class GtThresholds:
             homref_ab_max=float(get(cfg, g + "homref_ab_max", 0.10)),
             parent_max_alt_ad=int(get(cfg, d + "parent_max_alt_ad", 1)),
             parent_min_dp=int(get(cfg, d + "parent_min_dp", 10)),
-        )
+        ).validated()
+
+    def validated(self) -> "GtThresholds":
+        """Refuse a band no genotype could pass. An inverted het band (`het_ab_min` above
+        `het_ab_max`) or a percent-scale value (`het_ab_min: 25`) reduced Step 5 to zero calls in
+        every inherited mode, with exit 0 and nothing in the audit to say why."""
+        for k in ("het_ab_min", "het_ab_max", "homalt_ab_min", "homref_ab_max"):
+            v = getattr(self, k)
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(f"filters.genotype_qc.{k} = {v}: allele balance is a fraction in [0, 1], not a percentage")
+        if self.het_ab_min >= self.het_ab_max:
+            raise ValueError(f"filters.genotype_qc.het_ab_min ({self.het_ab_min}) must be below het_ab_max ({self.het_ab_max}); no het could pass this band")
+        if self.min_dp < 1 or self.denovo_min_dp < 1 or self.parent_min_dp < 1 or self.min_gq < 0:
+            raise ValueError("filters.genotype_qc: min_dp / denovo_min_dp / parent_min_dp must be >= 1 and min_gq >= 0")
+        return self
 
 
 def _int(x):

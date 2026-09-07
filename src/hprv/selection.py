@@ -18,7 +18,7 @@ does not have. Each rung is keep-ONLY (a None/absent score never drops a variant
 from __future__ import annotations
 
 from hprv import annotations as A
-from hprv.config import get
+from hprv.config import get, keep_impacts as _keep_impacts
 
 
 def _f(cfg, key, default):
@@ -36,10 +36,12 @@ def build_classifier(cfg):
     rec_max = _f(cfg, "filters.rarity.recessive_max", 1.0e-2)  # permissive-union cutoff
     cadd_sup = _f(cfg, "filters.functional.cadd_phred_supporting", 25.3)
     sai_min = _f(cfg, "filters.functional.spliceai_ds_min", 0.2)
-    keep_impacts = set(get(cfg, "filters.functional.keep_impacts", ["HIGH", "MODERATE"]))
+    # Normalised and validated (a YAML scalar `keep_impacts: HIGH` used to become {'H','I','G'}
+    # and silently disable the whole impact rung); an unknown or empty value raises here.
+    keep_impacts = _keep_impacts(cfg)
 
     def functional_reason(v):
-        if (A.impact(v) or "") in keep_impacts:
+        if (A.impact(v) or "").upper() in keep_impacts:
             return "impact_" + (A.impact(v) or "").lower()
         # SpliceAI: the specific splice-disruption signal. It is the ONLY predictor that reaches a
         # cryptic splice site deep in an intron, or an exonic-synonymous variant that breaks

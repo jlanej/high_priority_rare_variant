@@ -23,7 +23,7 @@ from cyvcf2 import VCF, Writer
 
 from hprv import annotations as A
 from hprv import audit
-from hprv.config import load_config
+from hprv.config import load_config, validate_filters
 from hprv.selection import build_classifier
 
 
@@ -35,6 +35,14 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
+    # The knobs that can switch a rung OFF without an error (a scalar keep_impacts, an inverted
+    # rarity ladder or allele-balance band, a quoted boolean) are refused here, before any
+    # variant is classified — a screen with a dead rung exits 0 and looks like a clean negative.
+    problems = validate_filters(cfg)
+    if problems:
+        sys.stderr.write("ERROR: the screen's filter settings are incoherent:\n"
+                         + "".join(f"  - {m}\n" for m in problems))
+        return 1
     classify = build_classifier(cfg)
 
     vcf = VCF(args.inp)

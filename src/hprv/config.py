@@ -53,6 +53,135 @@ def get(cfg: dict, dotted: str, default=None):
     return cur
 
 
+_TRUE, _FALSE = {"true", "yes", "on", "1"}, {"false", "no", "off", "0"}
+
+
+def as_bool(value, key="") -> bool:
+    """A boolean knob, strictly. `bool(value)` read a quoted or `${ENV}`-templated "false" as
+    True — the gates a user had just switched OFF stayed on, silently."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"{key or 'config'}: expected true/false, got {value!r}")
+
+
+def get_bool(cfg: dict, dotted: str, default: bool) -> bool:
+    v = get(cfg, dotted, None)
+    return default if v is None else as_bool(v, dotted)
+
+
+IMPACTS = ("HIGH", "MODERATE", "LOW", "MODIFIER")
+
+
+def keep_impacts(cfg: dict) -> set:
+    """`filters.functional.keep_impacts` as an upper-cased set of VEP IMPACT values.
+
+    `set(get(cfg, key, [...]))` on a YAML SCALAR (`keep_impacts: HIGH`) yielded {'H','I','G'}, on a
+    lower-cased list yielded nothing VEP ever emits, and on `[]` an empty set — each of which
+    silently disabled the ENTIRE impact rung and filed every stop_gained under `not_functional`.
+    A scalar or a comma/space-separated string is accepted and normalised; an unknown value or
+    an empty set is an error, because a screen with no impact rung is not a screen.
+    """
+    raw = get(cfg, "filters.functional.keep_impacts", ["HIGH", "MODERATE"])
+    if isinstance(raw, str):
+        items = [x for x in raw.replace(",", " ").split() if x]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(x) for x in raw]
+    else:
+        raise ValueError(f"filters.functional.keep_impacts: expected a list of {list(IMPACTS)}, got {raw!r}")
+    out = {x.strip().upper() for x in items if x.strip()}
+    bad = sorted(out - set(IMPACTS))
+    if bad:
+        raise ValueError(f"filters.functional.keep_impacts: unknown IMPACT value(s) {bad}; VEP emits only {list(IMPACTS)}")
+    if not out:
+        raise ValueError("filters.functional.keep_impacts is empty — that disables the impact rung entirely; list at least HIGH")
+    return out
+
+
+_BOOL_KNOBS = ("filters.genotype_qc.require_pass", "filters.denovo.use_hiconf_tag",
+               "filters.denovo.crosscheck_prerefinement_pl", "inheritance.emit_denovo",
+               "inheritance.emit_dominant", "burden.rank_by_mutational_target",
+               "prioritization.composite.gene_list_prior.enabled")
+
+
+def validate_filters(cfg: dict):
+    """Every problem with the screen's knobs, as a list of messages (empty = sound).
+
+    These are the settings that can turn a rung OFF without an error: a scalar keep_impacts, an
+    inverted rarity ladder (dominant_max above recessive_max is silently inert), an inverted or
+    percent-scale allele-balance band (`het_ab_min: 25` reduces Step 5 to zero calls with exit
+    0), a quoted boolean. Steps 3 and 5 call this at start-up and halt on anything returned.
+    """
+    problems = []
+    try:
+        keep_impacts(cfg)
+    except ValueError as e:
+        problems.append(str(e))
+
+    def num(key, default):
+        v = get(cfg, key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            problems.append(f"{key}: expected a number, got {v!r}")
+            return None
+
+    dom = num("filters.rarity.dominant_max", 1e-4)
+    rec = num("filters.rarity.recessive_max", 1e-2)
+    strict = num("filters.rarity.recessive_strict", 1e-3)
+    ba1 = num("filters.rarity.benign_ba1", 0.05)
+    if None not in (dom, rec, strict, ba1):
+        for k, v in (("dominant_max", dom), ("recessive_max", rec), ("recessive_strict", strict), ("benign_ba1", ba1)):
+            if not 0 < v <= 1:
+                problems.append(f"filters.rarity.{k}: {v} is not an allele frequency in (0, 1]")
+        if dom > rec:
+            problems.append(f"filters.rarity.dominant_max ({dom}) exceeds recessive_max ({rec}): hets are pooled at recessive_max, so the dominant gate could never be the binding one")
+        if rec > ba1:
+            problems.append(f"filters.rarity.recessive_max ({rec}) exceeds benign_ba1 ({ba1}): the BA1 drop would fire before the recessive band is reachable")
+        if strict > rec:
+            problems.append(f"filters.rarity.recessive_strict ({strict}) exceeds recessive_max ({rec}): high_conf_rarity would tag every recessive call")
+
+    g = "filters.genotype_qc."
+    lo, hi = num(g + "het_ab_min", 0.25), num(g + "het_ab_max", 0.75)
+    ha, hr = num(g + "homalt_ab_min", 0.90), num(g + "homref_ab_max", 0.10)
+    if None not in (lo, hi, ha, hr):
+        for k, v in (("het_ab_min", lo), ("het_ab_max", hi), ("homalt_ab_min", ha), ("homref_ab_max", hr)):
+            if not 0 <= v <= 1:
+                problems.append(f"{g}{k}: {v} is not a fraction in [0, 1] (allele balance is alt/(ref+alt), never a percentage)")
+        if lo >= hi:
+            problems.append(f"{g}het_ab_min ({lo}) >= het_ab_max ({hi}): no het could pass, and every dominant and compound-het call would vanish with exit 0")
+        if ha <= 0:
+            problems.append(f"{g}homalt_ab_min ({ha}) must be positive")
+    for k, floor in ((g + "min_gq", 0), (g + "min_dp", 1), (g + "denovo_min_dp", 1),
+                     ("filters.denovo.parent_min_dp", 1), ("filters.denovo.parent_max_alt_ad", 0)):
+        v = get(cfg, k, None)
+        if v is not None:
+            try:
+                if int(v) < floor:
+                    problems.append(f"{k}: {v} is below {floor}")
+            except (TypeError, ValueError):
+                problems.append(f"{k}: expected an integer, got {v!r}")
+    try:
+        if int(get(cfg, g + "denovo_min_dp", 20)) < int(get(cfg, g + "min_dp", 10)):
+            problems.append(f"{g}denovo_min_dp is below {g}min_dp — the de novo floor is meant to be the stricter one")
+    except (TypeError, ValueError):
+        pass
+    for k in _BOOL_KNOBS:
+        v = get(cfg, k, None)
+        if v is not None:
+            try:
+                as_bool(v, k)
+            except ValueError as e:
+                problems.append(str(e) + " — a quoted or ${ENV}-templated string is not a YAML boolean")
+    return problems
+
+
 # Curated map: shell variable -> dotted config key. Only what the bash steps need.
 SH_MAP = {
     "HPRV_OUTPUT_DIR": "project.output_dir",

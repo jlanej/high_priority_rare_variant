@@ -3070,6 +3070,72 @@ def test_step0_sex_inference_and_the_parent_swap_blind_spot():
                 assert s0.mendelian_violation(gc, gd, gm) == s0.mendelian_violation(gc, gm, gd)
 
 
+def test_config_validation_refuses_the_knobs_that_silently_kill_a_rung():
+    """Four YAML shapes of keep_impacts, an inverted rarity ladder, a percent-scale or inverted
+    allele-balance band and a quoted boolean each disabled part of the screen with exit 0."""
+    from hprv.config import as_bool, get_bool, keep_impacts, validate_filters
+    from hprv.selection import build_classifier
+
+    def with_(**over):
+        cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}},
+               "filters": {"rarity": {}, "functional": {}, "genotype_qc": {}, "denovo": {}}}
+        for dotted, v in over.items():
+            cur = cfg
+            parts = dotted.split(".")
+            for k in parts[:-1]:
+                cur = cur.setdefault(k, {})
+            cur[parts[-1]] = v
+        return cfg
+
+    # keep_impacts: scalar, comma string and lower-case list all normalise; junk is refused
+    assert keep_impacts(with_(**{"filters.functional.keep_impacts": "HIGH"})) == {"HIGH"}
+    assert keep_impacts(with_(**{"filters.functional.keep_impacts": "HIGH, MODERATE"})) == {"HIGH", "MODERATE"}
+    assert keep_impacts(with_(**{"filters.functional.keep_impacts": ["high", "moderate"]})) == {"HIGH", "MODERATE"}
+    assert keep_impacts({}) == {"HIGH", "MODERATE"}
+    for bad in ([], ["SEVERE"], "HIGH;MODERATE", 3):
+        try:
+            keep_impacts(with_(**{"filters.functional.keep_impacts": bad}))
+            raise AssertionError(f"accepted keep_impacts={bad!r}")
+        except ValueError:
+            pass
+    # ...and the classifier keeps a stop_gained under the scalar spelling (it used to file it
+    # under not_functional: set("HIGH") is {'H', 'I', 'G'})
+    classify = build_classifier(with_(**{"filters.functional.keep_impacts": "HIGH"}))
+    assert classify(FakeVar({"vep_IMPACT": "HIGH"})) == (True, "impact_high")
+    assert classify(FakeVar({"vep_IMPACT": "MODERATE"})) == (False, "not_functional")
+    # the shipped shape is sound
+    assert validate_filters(with_()) == []
+    assert validate_filters(with_(**{"filters.functional.keep_impacts": ["HIGH", "MODERATE"],
+                                    "filters.genotype_qc.require_pass": "false"})) == []
+    # each silent killer is named
+    def problems(**over):
+        return "\n".join(validate_filters(with_(**over)))
+    assert "dominant_max" in problems(**{"filters.rarity.dominant_max": 0.05})
+    assert "benign_ba1" in problems(**{"filters.rarity.benign_ba1": 1e-3})
+    assert "recessive_strict" in problems(**{"filters.rarity.recessive_strict": 0.5})
+    assert "percentage" in problems(**{"filters.genotype_qc.het_ab_min": 25})
+    assert "no het could pass" in problems(**{"filters.genotype_qc.het_ab_min": 0.8})
+    assert "denovo_min_dp" in problems(**{"filters.genotype_qc.denovo_min_dp": 5})
+    assert "keep_impacts" in problems(**{"filters.functional.keep_impacts": []})
+    assert "emit_dominant" in problems(**{"inheritance.emit_dominant": "nope"})
+    # booleans: strings that MEAN false are false; bool() would have read every one as True
+    for v in ("false", "False", "no", "off", "0", 0, False):
+        assert as_bool(v, "k") is False, v
+    for v in ("true", "yes", "on", "1", 1, True):
+        assert as_bool(v, "k") is True, v
+    assert get_bool(with_(**{"inheritance.emit_denovo": "false"}), "inheritance.emit_denovo", True) is False
+    assert get_bool({}, "inheritance.emit_denovo", True) is True
+    # GtThresholds refuses a band nothing could pass, before any VCF is opened
+    from hprv.config import get as _get
+    for over in ({"filters.genotype_qc.het_ab_min": 0.8}, {"filters.genotype_qc.het_ab_max": 75}):
+        try:
+            G.GtThresholds.from_config(with_(**over), _get)
+            raise AssertionError(f"accepted {over}")
+        except ValueError:
+            pass
+    assert G.GtThresholds.from_config(with_(), _get).het_ab_min == 0.25
+
+
 def test_genotype_dp_falls_back_to_format_dp_when_ad_is_absent():
     """cyvcf2 derives gt_depths from AD sums when the record carries AD, so an AD-less sample (a
     GATK ref-block parent) reads depth -1 even with DP present. dp() must read FORMAT/DP then —

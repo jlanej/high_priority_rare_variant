@@ -25,7 +25,7 @@ from cyvcf2 import VCF
 from hprv import annotations as A
 from hprv import audit
 from hprv import genotype as G
-from hprv.config import get, load_config
+from hprv.config import get, get_bool, load_config, validate_filters
 from hprv.ped import parse_ped
 
 COLS = [
@@ -107,20 +107,22 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     thr = gt.thr
     dom_max = float(get(cfg, "filters.rarity.dominant_max", 1e-4))
     rec_max = float(get(cfg, "filters.rarity.recessive_max", 1e-2))
-    require_hiconf = bool(get(cfg, "filters.denovo.use_hiconf_tag", True))
+    # Boolean knobs are read strictly: `bool(value)` turned a quoted or ${ENV}-templated "false"
+    # into True, so the gate a user had just switched off stayed on.
+    require_hiconf = get_bool(cfg, "filters.denovo.use_hiconf_tag", True)
     # NB: filters.denovo.require_gnomad_absent_or_singleton is retired — it was implemented as
     # nhomalt > 1 (a HOMOZYGOTE-count test, never the allele-count test its name promised), and
     # nhomalt is absent from the VEP cache; it arrives only with the OPTIONAL gnomAD joint slim
     # (resources.gnomad.sites_slim). The old de-novo `nhomalt <= 1` condition stays removed: it
     # would silently no-op whenever the slim is not configured. nhomalt is instead REPORTED per
     # variant, and Step 9 flags biallelic calls gnomAD already carries homozygotes for.
-    crosscheck = bool(get(cfg, "filters.denovo.crosscheck_prerefinement_pl", True))
+    crosscheck = get_bool(cfg, "filters.denovo.crosscheck_prerefinement_pl", True)
     # Focus is INHERITED variation. De novo detection is retained for cross-reference
     # only (dedicated de novo filtering/review lives in separate machinery); the
     # dominant model — recurrent inherited rare functional hets — is the new emphasis.
-    emit_denovo = bool(get(cfg, "inheritance.emit_denovo", True))
-    emit_dominant = bool(get(cfg, "inheritance.emit_dominant", True))
-    require_pass = bool(get(cfg, "filters.genotype_qc.require_pass", True))
+    emit_denovo = get_bool(cfg, "inheritance.emit_denovo", True)
+    emit_dominant = get_bool(cfg, "inheritance.emit_dominant", True)
+    require_pass = get_bool(cfg, "filters.genotype_qc.require_pass", True)
     rec_strict = float(get(cfg, "filters.rarity.recessive_strict", 1e-3))
 
     def rare(v, limit):
@@ -564,6 +566,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
+    problems = validate_filters(cfg)
+    if problems:
+        sys.stderr.write("ERROR: the screen's filter settings are incoherent:\n"
+                         + "".join(f"  - {m}\n" for m in problems))
+        return 1
     thr = G.GtThresholds.from_config(cfg, get)
 
     # inferred sex per trio from Step 0 QC (used when the generated PED has sex unknown)
