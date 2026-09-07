@@ -20,6 +20,32 @@ five angles no lens had covered, and six follow-up finders investigated them; ev
 put to three verifiers — one that tried to reproduce it by execution, one that tried to overturn it
 from the code, one that checked whether it was already documented or already fixed on this branch.
 
+## Resolution status — 2026-09 implementation pass
+
+The recommended order of work at the end of this document was implemented on branch
+`fix/pipeline-review-2026-09` in the commits that follow the audit's own. What changed, against
+that table's numbering:
+
+| Item | Status | What changed |
+|---|---|---|
+| **1** Step 5 `variants_examined` + per-reason no-row tally | **done** | `variants_examined`, `variants_with_call`, `variants_no_row`, `no_row.<reason>` and `skipped.<reason>` per trio and globally; `examined == skipped + with_call + no_row` asserted in the integration suite, and `variants_examined == Step 4 candidate_genotypes`. On the fixture CH_A's four silent losses now read `qc_child=1, parent_nocall=1, inert_band_het=2`. |
+| **2** Step 6 `calls_in` / `calls_no_gene` | **done** | Both recorded; Step 9 records `variants_no_gene`. |
+| **3** ClinVar counter on the wrong gate | **done** | `clinvar_plp_no_row` counts every carried P/LP allele that yielded no row (any reason); the old `>= recessive_max` metric is kept beside it. GENE7 now reads 1 where it read 0. |
+| **4** Step 4 lift coverage + Step 5 witness (INV-1) | **done** | Step 4 proves every candidate carries `hprv_keep_reason` after the transfer (`annotated_genotypes`; a shortfall halts) and records the pre-isec `region_genotypes`; Step 5 asserts the faf95 witness on the file it reads and halts when no examined record carries a consequence. |
+| **5** Step 0 call rate (INV-5) | **done** | Per-member `*_nocall_rate`, `n_records`, `nocall_flag` (`qc.max_nocall_rate` 0.10, advisory); Step 0 now records its flags in the audit. |
+| **6** Step 1 pre-filter / Step 4 pre-isec counts | **done** | `source_records` (from the index; absent, never 0, on an unindexed input) and `region_genotypes`. |
+| **7** `not_functional` split | **done** | `reason.not_functional.scored` / `.unscored`, both recorded, summing to the total. |
+| **8** Parent-role transposition | **done** | `ped.read_trios_file` resolves roles by name only, tolerates `_id`/`sample_` spellings, and refuses a partial header; Step 0 infers BOTH parents' sex (`parent_sex_flag`) — the only reachable sex check and the one direct detector of a swap. |
+| **9** Transmitting-parent QC failure | **done** | Emitted with `transmitting_parent_qc_fail`; obligate transmission decided by the 1/1 parent alone. |
+| **10** Comp-het consumption rule | **done** | Only a pair whose trans evidence was tested and passed on QC-confident genotypes consumes its legs; `origin_unverified` and `transmitting_parent_qc_fail` pairs no longer veto dominant (vacuous passes still do, as documented). |
+| **11** Validate `keep_impacts`, rarity ordering, AB bands, booleans | **done** | `config.validate_filters` halts Steps 3 and 5; `config.keep_impacts` normalises; `GtThresholds.validated`; `as_bool`/`get_bool` replace `bool(get(...))`. |
+| **12** Step 9 input freshness | **done** | `run_pipeline.sh` refuses `igv/variants.tsv` whose row count differs from `candidates.calls.tsv`. |
+| **13–18** Tier 3 (unassigned-call rows, PGT/PID phasing, all-gene pairing key, all-block impact/SpliceAI rungs, multiallelic AB, hom-rec with one non-carrier parent) | **open** | Each changes which variants are recovered and needs a design decision first. With items 1–7 in place their sizes are now measurable on a real run (`no_row.inert_band_het`, `no_row.mendelian_inconsistent`, `no_row.no_gene`, `reason.not_functional.unscored`), which is the right basis for deciding them. |
+
+Also addressed while there: `contam_source` reads `none` rather than `charr` when nothing was
+measured; a headerless trios file no longer loses its first trio to the header; the
+`clinvar_plp_dropped_ge_recessive_max` comment no longer says "grpmax AF".
+
 ## The one-paragraph answer
 
 The premise holds, with one correction that matters. Step 9 asserts row-count conservation twice

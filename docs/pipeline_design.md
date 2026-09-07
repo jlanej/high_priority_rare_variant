@@ -236,10 +236,21 @@ synthesized genotype matrix.
   FILTER/contig settings and the sample list; Step 0's `qc_report.tsv.done` keys the manifest.
 - **Auditing.** Every step appends `(step, scope, metric, value)` to `audit/counts.tsv`
   (`scope` = `global` or a trio_id). This yields a **global variant funnel** (union → annotated →
-  plausible, with Step-3 keep/drop reasons) and a **per-trio funnel** (candidate genotypes →
-  candidate calls by inheritance mode), assembled into `audit/summary.md`. Each retained variant
-  also carries an `hprv_keep_reason` INFO tag, so "what went where and why" is answerable end to
-  end without re-running anything.
+  plausible, with Step-3 keep/drop reasons — `not_functional` split into `.scored` and
+  `.unscored`) and a **per-trio funnel** that is reconcilable on BOTH sides: Step 1's
+  `source_records` beside its post-filter `input_sites`; Step 4's pre-intersection
+  `region_genotypes`, its `candidate_genotypes`, and `annotated_genotypes` (a proof that the
+  annotation transfer landed on every record — a shortfall halts); Step 5's `variants_examined`
+  (== Step 4's `candidate_genotypes`), `variants_with_call`, `variants_no_row` and a `no_row.<reason>`
+  tally for every examined variant that produced no row (`qc_child`, `qc_parent`, `parent_nocall`,
+  `mendelian_inconsistent`, `rarity`, `inert_band_het`, `no_gene`, `chry`, `male_x_het`,
+  `hiconf_tag`, `mode_disabled`, `child_not_carrier`), with
+  `variants_examined == skipped.* + variants_with_call + variants_no_row`; Step 6's `calls_in` /
+  `calls_no_gene`; Step 0's flags. Call rows can exceed examined variants (a compound-het leg is
+  emitted once per pair), which is why the input side is recorded — assembled into
+  `audit/summary.md`. Each retained variant also carries an `hprv_keep_reason` INFO tag, so "what
+  went where and why" is answerable end to end without re-running anything, and a negative result
+  reads as "examined and rejected for <reason>" rather than "nothing was there".
 
 ## Cross-cutting principles
 
