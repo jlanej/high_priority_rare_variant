@@ -308,9 +308,16 @@ limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_ge
   `compound_het` whenever the child happens to carry any other sub-1e-2 functional het in the same
   gene — near-certain in long genes (TTN, NEB, RYR1, DMD). The variant is **not** lost (Step 6 unions
   the per-model trio sets, so `n_carriers`/`recurrent` are unaffected), but it leaves `n_dominant`
-  and therefore the headline `p_recurrence`. The *unconfirmed* (de-novo-partner) half of this was
-  fixed — such pairs no longer consume. Fix for the rest: require the partner to be biallelic-credible
-  before consuming, or emit the dominant row too with an `also_comphet_partner` flag.
+  and therefore the headline `p_recurrence`. The *unconfirmed* pairs no longer consume — a pair
+  carrying `unphased_denovo_partner`, `origin_unverified` or `transmitting_parent_qc_fail` is emitted
+  beside the legs' dominant calls; only a pair whose trans evidence was tested and passed on
+  QC-confident genotypes vetoes them. Fix for the confirmed case: require the partner to be
+  biallelic-credible before consuming, or emit the dominant row too with an `also_comphet_partner` flag.
+- **Every examined variant that produces no row is now counted by reason** (`no_row.*` in
+  `audit/counts.tsv`, per trio and globally, with `variants_examined == skipped + with_call + no_row`),
+  so the residuals above are measurable on a run rather than argued from the code. The largest bucket
+  on real WGS is expected to be `inert_band_het`: an inherited het pooled at `recessive_max` that paired
+  with nothing and sits above `dominant_max` — emitted under no mode by policy, and now visible.
 - **No Y-linked inheritance model.** chrY is deliberately routed away from the mother-keyed
   hemizygous models, so male non-PAR chrY produces no rows at all. Clinically near-empty (Y-linked
   Mendelian SNV disease is essentially confined to spermatogenic failure, whose lesions are CNVs).
