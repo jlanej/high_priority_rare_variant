@@ -734,6 +734,13 @@ contamination gate (Step 0). Quick wins still open: somalier ancestry/relatednes
 UTRannotator, UPD rescue, conda-lock. Big bets: germline CNV (GATK-gCNV), phenotype ranker
 (Exomiser), read-backed/population phasing, ROH.
 
+See also **[docs/robustness_audit_2026-09.md](docs/robustness_audit_2026-09.md)** — the consolidated
+robustness audit of the plausibility filter (Step 3) and the genotype-to-meaning assignment
+(Step 5): a drop ledger showing where the pipeline loses a variant without a trace, 106 verified
+findings with the finder's and the verifiers' severities side by side, and a tiered work order.
+Nothing in it is implemented yet. Tier 1 (input counters for Steps 5 and 6, and a witness assert on
+the file Step 5 actually reads) changes no call and is the place to start.
+
 Lower-level items:
 
 - **CNV/SV module** (GATK-gCNV / Manta / ExomeDepth) — the biggest coverage gap.
