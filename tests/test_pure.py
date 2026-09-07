@@ -2939,7 +2939,6 @@ def test_step5_accounts_for_every_examined_variant():
     # the rest of the taxonomy
     assert why([_v5("chr1", 100, "G1", (_HR, _HET, _HET), af=5e-5)]) == "child_not_carrier"
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02)]) == "rarity"
-    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 99, 5))]) == "qc_parent"
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (38, 2)})]) == "qc_parent"
     assert why([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)]) == "mendelian_inconsistent"
     assert why([_v5("chr1", 100, "G1", (_HET, _HA, _HA), af=5e-5)]) == "mendelian_inconsistent"
@@ -2971,6 +2970,51 @@ def test_step5_accounts_for_every_examined_variant():
     _, st = st_of([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
                        info={"vep_Consequence": "", "vep_IMPACT": ""})])
     assert st["annotated"] == 0
+
+
+def test_step5_transmitting_parent_qc_is_flagged_not_fatal():
+    """A transmitting parent that fails its own GQ/DP/AB QC used to delete the child's call
+    silently, while the same failure in the NON-transmitting parent was emitted with a flag.
+    Now both are never-drop: `transmitting_parent_qc_fail` rides on the row, obligate
+    transmission is decided by the 1/1 parent alone, and such a leg cannot veto dominant."""
+    F = "transmitting_parent_qc_fail"
+    # mother transmits (dad affirmative 0/0) but her GQ is 5: emitted, flagged
+    rows, st = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 99, 5))])
+    assert _calls(rows) == [("dominant", 100, f"origin=mat;{F}")], _calls(rows)
+    assert st["with_call"] == 1 and not st["no_row"]
+    # her allele balance is 0.10 (a doubtful het): same treatment — the ambiguity stays visible
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, ad={2: (36, 4)})])
+    assert _calls(rows) == [("dominant", 100, f"origin=mat;{F}")], _calls(rows)
+    # the non-transmitting parent failing QC is still origin_unverified, never this flag
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 5, 99))])
+    assert _calls(rows) == [("dominant", 100, "origin=mat;origin_unverified")]
+    # OBLIGATE transmission: the 1/1 mother decides origin; the het father's QC is irrelevant...
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HA), af=5e-5, gq=(99, 5, 99))])
+    assert _calls(rows) == [("dominant", 100, "origin=mat")], _calls(rows)
+    # ...and her own hom-alt band failing (AB 0.75 < 0.90) is flagged, not fatal
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HA), af=5e-5, ad={2: (10, 30)})])
+    assert _calls(rows) == [("dominant", 100, f"origin=mat;{F}")], _calls(rows)
+    # HET x HET: either parent may have transmitted, so either one's failure flags the call
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HET, _HET), af=5e-5, gq=(99, 5, 99))])
+    assert _calls(rows) == [("dominant", 100, f"origin=both;{F}")], _calls(rows)
+    # a trans pair with a QC-failed transmitter is emitted, flagged, and does NOT consume its
+    # legs: at 5e-5 the dominant rows survive beside the pair (as with a de novo partner)
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, gq=(99, 99, 5)),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
+    modes = sorted(r["mode"] for r in rows)
+    assert modes == ["compound_het", "compound_het", "dominant", "dominant"], modes
+    assert all(F in r["flags"] for r in rows if r["mode"] == "compound_het")
+    # the same rule for a pair whose trans evidence FAILED (origin_unverified): it used to
+    # consume both legs and delete the dominant calls despite not having established trans
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _UNK, _HET), af=5e-5),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
+    modes = sorted(r["mode"] for r in rows)
+    assert modes == ["compound_het", "compound_het", "dominant", "dominant"], modes
+    assert all("origin_unverified" in r["flags"] for r in rows if r["mode"] == "compound_het")
+    # ...whereas a VACUOUS pass (ref-block parent, no AD) still consumes: the pass stands
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, ad={1: (None, None)}),
+                       _v5("chr1", 200, "G1", (_HET, _HET, _HR), af=5e-5)])
+    assert sorted(r["mode"] for r in rows) == ["compound_het", "compound_het"], _calls(rows)
 
 
 def test_genotype_dp_falls_back_to_format_dp_when_ad_is_absent():

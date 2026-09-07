@@ -186,7 +186,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   (inherited het; `flags=origin=mat|pat|both`), `hom_recessive`, `compound_het` (pairs share a
   `pair_id`; a pair whose second hit is a de novo is unphaseable from trio genotypes and carries
   `flags=unphased_denovo_partner`, and does NOT suppress the dominant call; a pair whose
-  non-transmitting parent was never affirmatively observed hom-ref carries `origin_unverified`),
+  non-transmitting parent was never affirmatively observed hom-ref carries `origin_unverified`;
+  a leg whose transmitting parent failed its own GQ/DP/AB QC carries
+  `transmitting_parent_qc_fail` — emitted, never deleted — and none of those three pairs
+  consumes its legs, only a confirmed trans pair does),
   `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). A `1/1` parent transmits obligately,
   so parent-of-origin there is deterministic (`both` is reserved for HET×HET). chrY is routed away
   from the mother-keyed hemizygous models (`male_x_chrx`) and yields no inherited call. Step 5 opens

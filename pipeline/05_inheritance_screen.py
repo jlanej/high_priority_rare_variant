@@ -214,7 +214,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 return "mendelian_inconsistent"           # 1/1 x 1/1 cannot make a het
             if gd not in (G.HET, G.HOM_ALT) and gmm not in (G.HET, G.HOM_ALT):
                 return "parent_nocall"                    # no carrier, and not both hom-ref
-            return "qc_parent"                            # a carrier exists but failed its QC
+            return "other"     # a carrier exists -> pooled with transmitting_parent_qc_fail, never here
         # HOM_ALT child
         if male_x_chrx:
             if gmm == G.UNKNOWN:
@@ -406,6 +406,18 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 dad_meas = G.sample_qc_ad_measured(v, d, "hom_ref")
                 unverified = False
                 vacuous = False
+                # The TRANSMITTING parent's own genotype QC used to DECIDE the call: a het band
+                # or hom-alt band failure set origin to None, and the child's call — GQ 99, AB
+                # 0.50 — vanished with no row, while the identical failure in the NON-transmitting
+                # parent was emitted with `origin_unverified`. A true-het parent falls outside the
+                # 0.25-0.75 band by binomial chance alone ~0.5% of the time at DP 30 and ~3.5% at
+                # DP 15 (real WGS tails are heavier), so this deleted a few inherited candidates
+                # per trio on ANY callset. Never-drop, applied symmetrically: the call stands and
+                # carries `transmitting_parent_qc_fail`, and such a leg cannot veto the dominant
+                # model (below), exactly as an unverified or unphased pair cannot. The flag keeps
+                # the real ambiguity visible — a parent "het" at AB 0.05 may be a miscall, in
+                # which case the child's variant is a de novo the cleanliness test also refused.
+                tp_fail = False
                 if gmm == G.HOM_REF and gd == G.HOM_REF:
                     # only a genuinely de novo het may pair in trans; require BOTH parents to
                     # pass cleanliness QC, else a dropped-out parental het masquerades as de novo
@@ -418,26 +430,28 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     # the other. Only HET x HET is a genuine 50/50 ("both", never paired below).
                     # Collapsing these to "both" lost phase-CONFIRMED compound hets — most often
                     # on chrX, where a diploid caller renders a hemizygous carrier father as 1/1.
+                    # Obligate transmission is decided by the 1/1 parent alone; the other, het
+                    # parent's QC has no bearing on where the child's alt came from.
                     if gmm == G.HOM_ALT and gd == G.HET:
-                        origin = "mat" if (mom_ok and dad_ok) else None
+                        origin, tp_fail = "mat", not mom_ok
                     elif gd == G.HOM_ALT and gmm == G.HET:
-                        origin = "pat" if (mom_ok and dad_ok) else None
+                        origin, tp_fail = "pat", not dad_ok
                     elif gmm == G.HOM_ALT and gd == G.HOM_ALT:
                         origin = None            # 1/1 x 1/1 -> a HET child is a Mendelian error
                     else:
-                        origin = "both" if (mom_ok and dad_ok) else None
+                        origin, tp_fail = "both", not (mom_ok and dad_ok)   # either may have transmitted
                 elif mom_carries:
-                    origin = "mat" if mom_ok else None
+                    origin, tp_fail = "mat", not mom_ok
                     unverified = not dad_clear
                     vacuous = dad_clear and not dad_meas
                 elif dad_carries:
-                    origin = "pat" if dad_ok else None
+                    origin, tp_fail = "pat", not dad_ok
                     unverified = not mom_clear
                     vacuous = mom_clear and not mom_meas
                 else:
                     origin = None                # a parent no-call — inheritance unestablished
                 if origin:
-                    hets.setdefault(gene, []).append((origin, v, key, unverified, vacuous))
+                    hets.setdefault(gene, []).append((origin, v, key, unverified, vacuous, tp_fail))
                     collected[key] = (v, is_plp, origin)
         # No row from any mode block and not pooled for pairing: this variant is finished, and
         # the only remaining question is why. (A pooled het is resolved after pairing below.)
@@ -454,20 +468,25 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     pair_n = 0
     for gene, cands in hets.items():
         by = {"mat": [], "pat": [], "denovo": [], "both": []}
-        for origin, v, key, unver, vac in cands:
-            by[origin].append((v, key, unver, vac))
-        denovo_keys = {k for _, k, _, _ in by["denovo"]}
+        for origin, v, key, unver, vac, tpf in cands:
+            by[origin].append((v, key, unver, vac, tpf))
+        denovo_keys = {k for _, k, _, _, _ in by["denovo"]}
         pairs = [(a, b) for a in by["mat"] for b in by["pat"] + by["denovo"]]
         pairs += [(a, b) for a in by["pat"] for b in by["denovo"]]
-        for (va, ka, ua, wa), (vb, kb, ub, wb) in pairs:
+        for (va, ka, ua, wa, ta), (vb, kb, ub, wb, tb) in pairs:
             pair_n += 1
             pid = f"{trio_id}:CH{pair_n}"
             unphased = ka in denovo_keys or kb in denovo_keys
-            # ONLY a phase-confirmed pair may veto the dominant model. An unphased de-novo-partner
-            # pair is explicitly "a candidate to confirm, not a confirmed biallelic hit", so
-            # letting it consume its legs silently deleted genuine dominant calls from the
-            # recurrence tally that Step 6 headlines.
-            if not unphased:
+            # ONLY a phase-confirmed pair may veto the dominant model — and "confirmed" means the
+            # trans evidence was TESTED and PASSED on QC-confident genotypes. An unphased
+            # de-novo-partner pair is "a candidate to confirm, not a confirmed biallelic hit"; a
+            # pair whose non-transmitting parent was never affirmatively observed hom-ref
+            # (origin_unverified) has not established trans either; and a leg whose transmitting
+            # parent failed its own QC has not established its origin. Letting any of them consume
+            # its legs silently deleted genuine dominant calls from the recurrence tally Step 6
+            # headlines. (A VACUOUS pass — a ref-block parent with no AD at all — still consumes:
+            # the documented pass stands, flagged trans_evidence_unmeasured.)
+            if not unphased and not (ua or ub) and not (ta or tb):
                 consumed.add(ka)
                 consumed.add(kb)
             pair_flags = []
@@ -475,6 +494,8 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 pair_flags.append("unphased_denovo_partner")
             if ua or ub:
                 pair_flags.append("origin_unverified")
+            if ta or tb:
+                pair_flags.append("transmitting_parent_qc_fail")
             # The trans evidence PASSED but rested on a parent with no allele-depth data, so the
             # phase is inferred from a genotype call alone. Distinct from origin_unverified (which
             # means the test FAILED): this one is a vacuous pass, and without the flag it is
@@ -491,7 +512,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     #      not part of a compound-het pair. This is the recurrence signal Step 6 tallies. ----
     if emit_dominant:
         for gene, cands in hets.items():
-            for origin, v, key, unver, vac in cands:
+            for origin, v, key, unver, vac, tpf in cands:
                 if origin in ("mat", "pat", "both") and key not in consumed and rare(v, dom_max):
                     r = base_row(trio_id, v, gt, "dominant", cfg=cfg)
                     r["flags"] = f"origin={origin}"
@@ -501,6 +522,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                     # data, so parent-of-origin rests on a genotype call alone
                     if vac:
                         r["flags"] += ";parent_ad_unmeasured"
+                    # the transmitting parent's own genotype failed GQ/DP/AB QC: the origin is a
+                    # genotype call the QC would not vouch for (see the collection note above)
+                    if tpf:
+                        r["flags"] += ";transmitting_parent_qc_fail"
                     rows.append(r)
 
     # ---- accounting: every examined variant is now either skipped, called, or classified ----
