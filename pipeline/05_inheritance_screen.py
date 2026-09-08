@@ -27,6 +27,7 @@ from cyvcf2 import VCF
 from hprv import annotations as A
 from hprv import audit
 from hprv import genotype as G
+from hprv import splice as _splice
 from hprv.config import get, get_bool, load_config, validate_filters
 from hprv.ped import parse_ped
 
@@ -50,7 +51,7 @@ COLS = [
     "hgvsc", "hgvsp",
     # Transcript geometry (VEP --numbers/--total_length) and the NMD verdict, resolved HERE where
     # the VCF header is (annotations.nmd_status): `not_assessed` is not `triggering`.
-    "exon", "intron", "cds_position", "mane_select", "nmd_status",
+    "exon", "intron", "strand", "cds_position", "mane_select", "nmd_status",
     "rarity_af", "rarity_oracle", "rarity_basis",
     "grpmax_af", "faf95", "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
@@ -61,6 +62,14 @@ COLS = [
     "spliceai_event", "spliceai_event_pos", "spliceai_event2", "spliceai_event2_ds",
     "spliceai_event2_pos", "spliceai_shift_nt", "spliceai_shift_frame", "spliceai_effect",
     "spliceai_symbol_mismatch",
+    # SpliceVault (300K-RNA): what the cell does when the site SpliceAI loses is lost — the ranked
+    # empirical events (verbatim), the frameshift fraction, the site type SpliceVault keyed on and its
+    # sample support, the rank-1 event and frame, and how it relates to the SpliceAI decomposition
+    # (splice.splicevault_agreement: cryptic_confirmed / cryptic_unseen / loss_outcome_supplied /
+    # site_type_mismatch / not_applicable). Blank when the plugin table was not configured.
+    "splicevault_top_events", "splicevault_out_of_frame", "splicevault_site_type",
+    "splicevault_site_samples", "splicevault_top1_event", "splicevault_top1_frame",
+    "splicevault_agreement",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
     # IMPACT=MODERATE and selection.py returns at the impact rung), carried here purely so
     # Step 9's missense tier can be calibrated rather than an off-label CADD rank.
@@ -160,13 +169,15 @@ class Trio:
 def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
     ev = A.spliceai_event(v, floor=float(get(cfg or {}, "filters.functional.spliceai_ds_min", 0.2)))
     sai_sym, vep_sym = A.spliceai_symbol(v), A.symbol(v)
+    sv = A.splicevault_events(v)
+    sv_top1, sv_frame = _splice.splicevault_top1(sv)
     row = {
         "trio_id": trio_id, "mode": mode, "pair_id": pair_id,
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
         "hgvsc": A._str(v, "hgvsc") or "", "hgvsp": A._str(v, "hgvsp") or "",
-        "exon": A.exon(v) or "", "intron": A.intron(v) or "",
+        "exon": A.exon(v) or "", "intron": A.intron(v) or "", "strand": fmt(A.strand(v)),
         "cds_position": A.cds_position(v) or "", "mane_select": A.mane_select(v) or "",
         "nmd_status": A.nmd_status(v, gt.has_nmd),
         "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(cfg),
@@ -183,6 +194,13 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         # blank when either symbol is absent; 1 when SpliceAI scored a different gene than VEP picked
         "spliceai_symbol_mismatch": ("" if not (sai_sym and vep_sym)
                                      else ("1" if sai_sym.upper() != vep_sym.upper() else "0")),
+        "splicevault_top_events": A.splicevault_top_events(v) or "",
+        "splicevault_out_of_frame": fmt(A.splicevault_out_of_frame(v)),
+        "splicevault_site_type": A.splicevault_site_type(v) or "",
+        "splicevault_site_samples": fmt(A.splicevault_site_samples(v)),
+        "splicevault_top1_event": sv_top1, "splicevault_top1_frame": sv_frame,
+        "splicevault_agreement": _splice.splicevault_agreement(
+            ev, sv, strand=A.strand(v), site_type=A.splicevault_site_type(v)),
         "revel": fmt(A.revel(v)), "alphamissense": fmt(A.alphamissense(v)),
         "alphamissense_class": A.alphamissense_class(v) or "",
         "clnsig": A.clnsig(v) or "",

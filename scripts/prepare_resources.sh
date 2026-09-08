@@ -57,6 +57,7 @@ CLINVAR_OUT="$DIR/clinvar/clinvar_${CLINVAR_DATE}.GRCh38.vcf.gz"
 DBNSFP_OUT="$DIR/dbnsfp/${DBNSFP_EXPECT}"
 REVEL_OUT="$DIR/revel/${REVEL_EXPECT}"
 ALPHAMISSENSE_OUT="$DIR/alphamissense/${ALPHAMISSENSE_EXPECT}"
+SPLICEVAULT_OUT="$DIR/splicevault/${SPLICEVAULT_EXPECT:-SpliceVault_data_GRCh38.tsv.gz}"
 CADD_SNV_OUT="$DIR/cadd/whole_genome_SNVs.tsv.gz"
 CADD_INDEL_OUT="$DIR/cadd/gnomad.genomes.r4.0.indel.tsv.gz"
 SPLICEAI_SNV_OUT="$DIR/spliceai/${SPLICEAI_SNV_EXPECT}"
@@ -381,6 +382,22 @@ prep_alphamissense() {
     fi
 }
 
+prep_splicevault() {
+    # SpliceVault (300K-RNA): for a variant SpliceAI predicts to destroy a splice site, the most
+    # frequent natural mis-splicing events at that site (exon skipping vs which cryptic donor /
+    # acceptor, with frame and sample support). A VEP plugin table (`--plugin SpliceVault,file=`),
+    # public and free, ~0.85 GB with its .tbi shipped alongside. OPTIONAL review evidence: Step 2
+    # warns and the splicevault_* columns stay blank without it. The index is DOWNLOADED, not
+    # rebuilt — the table is not a VCF, so the pipeline's VCF-preset indexer would be wrong for it.
+    selected splicevault || return 0
+    if [[ -f "$SPLICEVAULT_OUT" && -f "$SPLICEVAULT_OUT.tbi" ]]; then log "[splicevault] cached"; record skip splicevault; return 0; fi
+    get_free splicevault "${SPLICEVAULT_URL:-}" "$SPLICEVAULT_OUT" "" || return 0
+    if ! get_free splicevault_tbi "${SPLICEVAULT_TBI_URL:-}" "$SPLICEVAULT_OUT.tbi" ""; then
+        warn "[splicevault] the shipped .tbi did not download — the plugin needs it; re-run, or fetch ${SPLICEVAULT_TBI_URL:-<unpinned>} next to $SPLICEVAULT_OUT"
+        record miss splicevault
+    fi
+}
+
 prep_dbnsfp() {
     selected dbnsfp || return 0
     [[ -f "$DBNSFP_OUT" ]] && { log "[dbnsfp] cached"; record skip dbnsfp; return 0; }
@@ -498,6 +515,8 @@ do_verify() {
     # REVEL/AlphaMissense and SpliceAI are REQUIRED by default (preflight halts), opt-down keys below.
     verify_required_default "$REVEL_OUT" revel "resources.vep.missense_predictors_required: false"
     verify_required_default "$ALPHAMISSENSE_OUT" alphamissense "resources.vep.missense_predictors_required: false"
+    # SpliceVault is optional review evidence (Step 2 warns without it), so present-but-not-required.
+    verify_extra "$SPLICEVAULT_OUT" splicevault
     verify_required_default "$SPLICEAI_SNV_OUT" spliceai_snv "resources.vep.spliceai_required: false"
     verify_required_default "$SPLICEAI_INDEL_OUT" spliceai_indel "resources.vep.spliceai_required: false"
     verify_extra "$LOFTEE_OUT/human_ancestor.fa.gz" loftee
@@ -540,6 +559,10 @@ do_emit() {
         echo "# Step 9's missense TIER calibrated instead of an off-label CADD rank."
         echo "export REVEL_SCORES=$REVEL_OUT"
         echo "export ALPHAMISSENSE_SCORES=$ALPHAMISSENSE_OUT"
+        echo "# SpliceVault (300K-RNA) — the most frequent mis-splicing events at the splice site SpliceAI"
+        echo "# predicts lost (exon skipping vs cryptic site, with frame). Optional review evidence beside the"
+        echo "# SpliceAI event; Step 2 warns and the splicevault_* columns stay blank without it."
+        echo "export SPLICEVAULT=$SPLICEVAULT_OUT"
         echo "export GNOMAD_V2_CONSTRAINT=$CONSTRAINT_OUT"
         echo "export MUTRATE_TABLE=$MUTRATE_OUT"
         echo "# Step-9 prioritization: the UNJOINED gnomAD v2.1.1 constraint table (mu_mis/mu_syn/"
@@ -574,13 +597,14 @@ case "$MODE" in
         # with a warning rather than failing the run, so a default fetch that skips them is
         # survivable.
         #
+        # SpliceVault (0.85 GB, free) joins the default set: it is read by Step 2 as a plugin.
         # gnomAD/dbNSFP/LOFTEE stay OPT-IN: nothing reads them, and defaulting gnomAD on would
         # start an ~877 GB download for data no step consumes (it becomes the faf95 restoration,
         # ROADMAP R3). Reachable via explicit `--only gnomad_sites,...`. Note the pinned dbNSFP
         # URL is DEAD upstream (S3 NoSuchBucket -> registration-gated) — which is exactly why
         # REVEL/AlphaMissense above use their own dedicated files instead.
         prep_reference; prep_vep_cache; prep_cadd; prep_constraint
-        prep_clinvar; prep_revel; prep_alphamissense
+        prep_clinvar; prep_revel; prep_alphamissense; prep_splicevault
         if [[ -n "$ONLY" ]]; then
             prep_gnomad; prep_loftee; prep_dbnsfp; prep_spliceai
         fi

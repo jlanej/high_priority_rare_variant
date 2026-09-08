@@ -217,6 +217,8 @@ SH_MAP = {
     # only report an off-label CADD rank. Optional, like CADD.
     "HPRV_REVEL": "resources.vep.revel",
     "HPRV_ALPHAMISSENSE": "resources.vep.alphamissense",
+    # SpliceVault (300K-RNA) VEP plugin table: the site's most frequent mis-splicing events. Optional.
+    "HPRV_SPLICEVAULT": "resources.vep.splicevault",
     # ClinVar sites VCF. One of the two bcftools transfers: the VEP cache exposes CLIN_SIG
     # but no CLNREVSTAT, so review status / gold stars are unavailable from the cache at any price.
     "HPRV_CLINVAR_VCF": "resources.clinvar.vcf",

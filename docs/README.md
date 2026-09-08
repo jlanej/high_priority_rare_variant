@@ -46,9 +46,10 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > ### ⚠ VEP-centric contract — read this before the tables
 >
 > Every annotation the pipeline reads comes from **one** tool: VEP 115 GRCh38 — its cache plus its
-> plugins (CADD; **SpliceAI**, required by default, `resources.vep.spliceai_required: true`; and
+> plugins (CADD; **SpliceAI**, required by default, `resources.vep.spliceai_required: true`;
 > **REVEL + AlphaMissense**, required by default, `resources.vep.missense_predictors_required:
-> true`). Exactly TWO files are bcftools-transferred in — the **ClinVar sites VCF**
+> true`; the stock **NMD** plugin; and **SpliceVault**, optional review evidence,
+> `resources.vep.splicevault`). Exactly TWO files are bcftools-transferred in — the **ClinVar sites VCF**
 > (`resources.clinvar.vcf`), supplying `CLNREVSTAT` ⇒ `clinvar_stars`, and the **gnomAD v4.1 joint
 > slim** (`resources.gnomad.sites_slim`), supplying real **faf95** + **nhomalt**. Both exist because
 > the cache cannot supply those fields at any price. The slim is **required by the default
@@ -65,6 +66,7 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 > | ClinVar stars | **IMPLEMENTED — rank only.** `CLNREVSTAT` -> `clinvar_stars` (0-4) from the Step-2 transfer; a Step-9 RANKING input (positive limb damped below `min_review_stars`), never a keep/drop gate. Absent transfer = blank, which is *not* 0 stars. |
 > | REVEL / AlphaMissense | **IMPLEMENTED in Step 9's missense tier** as VEP plugins (dedicated files, not dbNSFP), required by default. **No effect on selection** — see the note under the functional table. |
 > | SpliceAI | **IMPLEMENTED** as rung 2 of the screen (VEP plugin over the precomputed raw scores, required by default). Step 2b live backfill is **IMPLEMENTED but OFF by default**. |
+> | SpliceVault | **IMPLEMENTED — review evidence only.** The 300K-RNA VEP plugin (optional, `resources.vep.splicevault`; ~0.85 GB, free) annotates each site-disrupting variant with the most frequent natural mis-splicing events at that site (exon skipping vs a cryptic donor/acceptor, with frame and sample support). Step 5 carries them verbatim plus the rank-1 event and an **agreement** call against the SpliceAI event. Never a gate or a tier input; absent ⇒ Step 2 warns, columns blank. |
 > | LOFTEE | **Not wired.** No HC/LC pLoF confidence. Near-inert for *selection* (HIGH impact already keeps every pLoF); matters for PVS1 grading. |
 > | MPC | **Not wired** (needs dbNSFP). No loss to selection. |
 
@@ -137,7 +139,13 @@ appending `spliceai_wide_*` columns to `candidates.calls.tsv`. The gate and the 
 reading the PRECOMPUTED score, so results stay comparable; enabled + missing env HALTS, like the
 backfill. Step 5 also decomposes the precomputed score into an EVENT (`spliceai_event`,
 `_event_pos`, `_event2`, `_shift_nt`, `_shift_frame`, `_effect`, `spliceai_symbol_mismatch`;
-`src/hprv/splice.py`) at the SAME **0.2** floor as the rung — no new threshold.
+`src/hprv/splice.py`) at the SAME **0.2** floor as the rung — no new threshold. When the optional
+**SpliceVault** plugin table is configured (`resources.vep.splicevault`), each call also carries
+`splicevault_top_events` (300K-RNA's ranked natural mis-splicing events at the site SpliceAI
+predicts lost, verbatim), `_out_of_frame`, `_site_type`, `_site_samples`, `_top1_event` (`ES`,
+`CD+12`, `CA-31`, …), `_top1_frame` and `splicevault_agreement` (`cryptic_confirmed` /
+`cryptic_unseen` / `loss_outcome_supplied` / `site_type_mismatch` / `not_applicable`) — review
+evidence beside the SpliceAI event, read by no gate and no tier.
 
 Two honest caveats on that CADD 25.3:
 - **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on

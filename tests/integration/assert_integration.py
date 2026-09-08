@@ -222,6 +222,27 @@ def main(argv=None) -> int:
           "no SpliceAI event is named where SpliceAI produced no score")
     check(sai and all(r.get("spliceai_symbol_mismatch") == "0" for r in sai),
           "SpliceAI scored the same gene VEP picked -> spliceai_symbol_mismatch=0 (not blank)")
+    # SpliceVault beside it: the `&`-joined event list is parsed, the rank-1 event and frame are
+    # named, and because SpliceAI predicts a lone loss the agreement reads loss_outcome_supplied.
+    check(sai and all(r.get("splicevault_top1_event") == "ES" and r.get("splicevault_top1_frame") == "out_of_frame"
+                      for r in sai),
+          "SpliceVault rank-1 event parsed from the `&`-joined CSQ list: ES / out_of_frame")
+    check(sai and all(r.get("splicevault_agreement") == "loss_outcome_supplied" and r.get("splicevault_out_of_frame") == "0.5"
+                      and r.get("splicevault_site_type") == "acceptor" and r.get("strand") == "1" for r in sai),
+          "a lone SpliceAI loss + SpliceVault events -> loss_outcome_supplied; site type, frameshift fraction and strand ride along")
+    # The plugin annotates any variant in its table: GENE1's below-floor decoys (DS 0.01) carry
+    # events too. The rank-1 event is DATA and is reported; the AGREEMENT call needs a SpliceAI
+    # event above the floor, so it stays blank there — and every row the plugin never touched
+    # carries blank splicevault_* cells (never a fabricated event).
+    sv_below = [r for r in calls if r.get("info_vep_SpliceVault_top_events") and r["symbol"] != "GENESAI"]
+    check(sv_below and all(r.get("splicevault_top1_event") == "ES" and r.get("splicevault_agreement") == ""
+                           and r.get("spliceai_event") == "" for r in sv_below),
+          "SpliceVault events on a below-floor SpliceAI decoy: rank-1 event reported, agreement blank")
+    check(all(r.get(c) == "" for r in calls if not r.get("info_vep_SpliceVault_top_events")
+              for c in ("splicevault_top_events", "splicevault_out_of_frame", "splicevault_site_type",
+                        "splicevault_site_samples", "splicevault_top1_event", "splicevault_top1_frame",
+                        "splicevault_agreement")),
+          "rows the SpliceVault plugin never touched carry blank splicevault_* columns")
 
     # --- Step 6: recurrence-based gene consolidation ---
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}

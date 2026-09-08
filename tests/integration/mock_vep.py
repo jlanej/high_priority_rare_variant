@@ -51,6 +51,12 @@ CSQ_FIELDS = [
     # key names — dbNSFP calls the same quantity `AlphaMissense_score`, and using that name would
     # lift nothing. The mock uses the plugin spelling precisely so a rename upstream breaks here.
     "REVEL", "am_pathogenicity", "am_class",
+    # STRAND (a default CSQ field) and the SpliceVault plugin's seven keys. The plugin returns its
+    # ranked events as a LIST, which VEP's VCF writer joins with `&` — so the mock writes them
+    # `&`-joined, exactly as they arrive in a real CSQ.
+    "STRAND", "SpliceVault_top_events", "SpliceVault_out_of_frame_events", "SpliceVault_site_pos",
+    "SpliceVault_site_type", "SpliceVault_site_sample_count", "SpliceVault_site_max_depth",
+    "SpliceVault_SpliceAI_delta",
 ]
 
 # VEP's own header lines. Step 2 checks these to refuse a wrong-build annotation, so the mock
@@ -119,9 +125,21 @@ def annotate(inp, lookup, out) -> int:
                 f["CADD_RAW"] = row["cadd"]
             if row.get("clnsig"):
                 f["CLIN_SIG"] = row["clnsig"]
+            f["STRAND"] = "1"
             if row.get("spliceai"):
                 f["SpliceAI_pred_DS_AL"] = row["spliceai"]   # one event; spliceai_ds() takes the max
                 f["SpliceAI_pred_SYMBOL"] = row["gene"]
+                # SpliceVault for the site that DS_AL says is lost: exon skipping (out of frame) is the
+                # commonest natural event, a cryptic acceptor 31 nt upstream the second. Shape as the
+                # plugin emits it: rank:type:impact:percent:frame, spaces->_, list joined by `&`.
+                f["SpliceVault_top_events"] = ("1:ES:Skipped_exon_5:63.2:out-of-frame&"
+                                              "2:CA:Cryptic_acceptor_-31:12.1:inframe")
+                f["SpliceVault_out_of_frame_events"] = "0.5"
+                f["SpliceVault_site_pos"] = str(v.POS - 2)
+                f["SpliceVault_site_type"] = "acceptor"
+                f["SpliceVault_site_sample_count"] = "1200"
+                f["SpliceVault_site_max_depth"] = "340"
+                f["SpliceVault_SpliceAI_delta"] = row["spliceai"]
             if row.get("revel"):
                 f["REVEL"] = row["revel"]
             if row.get("alphamissense"):

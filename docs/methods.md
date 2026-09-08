@@ -159,14 +159,22 @@ single pass. VEP was run with `--symbol --biotype --numbers --total_length --hgv
 --af_gnomade --af_gnomadg --max_af --check_existing --flag_pick --pick_order
 mane_select,mane_plus_clinical,canonical,rank`. The gnomAD v4.1 per-population exome and genome
 allele frequencies and the ClinVar clinical significance therefore come from the VEP cache itself.
-Five plugins were applied. Ensembl's stock NMD plugin, which needs no data file, marks a stop-gain,
+Six plugins were applied. Ensembl's stock NMD plugin, which needs no data file, marks a stop-gain,
 frameshift or canonical splice variant predicted to escape nonsense-mediated decay (last exon,
 within 50 nt of the penultimate exon's end, first 100 coding bases, or an intronless transcript).
 The four score plugins were CADD v1.7 (the whole-genome SNV table and the gnomAD-genomes indel
 table), SpliceAI (the precomputed raw genome-wide SNV and indel delta-score files, Illumina
 `genome_scores_v1.3`; the plugin's own cutoff is deliberately not set so raw scores are carried),
 REVEL v1.3 (the GRCh38-sorted distribution), and AlphaMissense (`AlphaMissense_hg38.tsv.gz`,
-with `transcript_match=1` so a score is taken only from the transcript VEP annotated).
+with `transcript_match=1` so a score is taken only from the transcript VEP annotated). The sixth,
+SpliceVault (Dawes et al. 2023), is optional and adds empirical rather than predicted evidence: for
+a variant SpliceAI predicts to disrupt an annotated splice site, the plugin reports the most frequent
+natural mis-splicing events observed at that site across the 300K-RNA compendium of roughly 335,000
+RNA-seq samples — skipping of one or more exons, or use of a cryptic donor or acceptor at a stated
+offset — each with its reading-frame consequence and the percentage of supporting samples, together
+with the site's sample count, maximum depth and the fraction of the top events that shift the frame.
+The plugin is a review resource: when its table is absent Step 2 warns and the corresponding columns
+are left blank, and no selection or ranking step reads them.
 
 Because `--flag_pick` retains every consequence block and marks VEP's choice with `PICK=1`, the
 consequence used downstream is selected when the CSQ fields are lifted to INFO with
@@ -176,7 +184,8 @@ Consequence, IMPACT, SYMBOL, Gene, Feature, BIOTYPE, EXON, INTRON, HGVSc, HGVSp,
 CDS_position, Protein_position (each with its total), MANE_SELECT, NMD, CADD_PHRED, CLIN_SIG, gnomADe_AF, gnomADg_AF, MAX_AF, MAX_AF_POPS, the ten grpmax-eligible population
 frequencies (gnomADe and gnomADg for AFR, AMR, EAS, NFE and SAS), the SpliceAI delta scores and
 positions (DS_AG, DS_AL, DS_DG, DS_DL, DP_AG, DP_AL, DP_DG, DP_DL, SYMBOL), REVEL,
-am_pathogenicity and am_class.
+am_pathogenicity and am_class, STRAND, and the seven SpliceVault fields (top_events,
+out_of_frame_events, site_pos, site_type, site_sample_count, site_max_depth and SpliceAI_delta).
 
 The step halts if Consequence, IMPACT or SYMBOL is missing, if none of the ten grpmax-eligible
 frequency fields is present, if SpliceAI or CADD is configured but not one site received a score,
@@ -319,7 +328,8 @@ the recessive and X-linked models (`recessive_max`), with recessive and X-linked
 1 × 10⁻³ additionally flagged `high_conf_rarity`. Every emitted row carries the genotype of all three
 members as allele strings, the child's GQ, depth and AB, the curated annotations (the HGVS coding
 and protein descriptions, exon and intron numbering, CDS position and MANE status of the transcript
-selected in Step 2, the NMD verdict of Section 13.4, and the SpliceAI event decomposition below) and
+selected in Step 2, the NMD verdict of Section 13.4, the SpliceAI event decomposition below and,
+when the SpliceVault table was configured, the empirical splicing outcome beside it) and
 a `flags` field;
 after the curated columns, every INFO field declared in the per-trio candidate VCF header is
 written verbatim under an `info_` prefix (the union over trios, in header order), including the
@@ -398,6 +408,24 @@ site loss (exon skipping or intron retention, frame undetermined without the exo
 gain as a site gain, two gains as a pseudoexon candidate, two losses as a whole-exon loss
 candidate, and mixed site types as complex (`spliceai_effect`). A call whose SpliceAI gene symbol
 differs from VEP's picked gene is flagged.
+
+**Empirical splicing outcome (SpliceVault).** Where the SpliceVault plugin annotated the call, the
+ranked 300K-RNA events are carried verbatim (`splicevault_top_events`) with the fraction that shift
+the frame, the site type the events are keyed to and its sample support, and the rank-1 event is
+named in a compact form (`ES` for exon skipping; `CD+12` or `CA-31` for a cryptic donor or acceptor
+at that offset from the annotated site, in the transcript's direction) with its frame. The two
+sources are then compared (`splicevault_agreement`). A SpliceAI cryptic shift is `cryptic_confirmed`
+when 300K-RNA lists a cryptic site of the same kind at the same offset — the offset SpliceAI
+reports is genomic, so it is converted to the transcript orientation with the strand VEP supplies,
+falling back to magnitude when the strand is unknown — and `cryptic_unseen` otherwise, a prediction
+the compendium has never observed being used. A lone loss, whose outcome SpliceAI cannot state, is
+marked `loss_outcome_supplied`: the rank-1 SpliceVault event is the most likely consequence and
+supplies the frame the decomposition could not. A loss whose site type differs from the site the
+events are keyed to is `site_type_mismatch`, and a pure gain is `not_applicable`, because the
+compendium describes the use of annotated sites and is silent on sites a variant creates. The
+comparison is blank without SpliceVault data or without a SpliceAI event at or above the floor;
+blank never means disagreement. None of these columns is read by the selection gate or the tier;
+Step 9 appends the rank-1 event and frame to the tier reason string for the reviewer.
 
 **Wide-window rescoring (Step 5b).** The precomputed SpliceAI files were generated with a 50 bp
 window, so a cryptic site or pseudoexon partner further than 50 bp from the variant is invisible to
@@ -636,7 +664,10 @@ The screen sees single-nucleotide and small indel variation only. Loss-of-functi
 (LOFTEE) is not computed, and nonsense-mediated-decay escape is taken from the VEP NMD plugin's
 positional rules rather than from a transcript model; for canonical splice variants it is a
 position proxy and is not used for promotion. The precomputed SpliceAI set does not cover larger indels; a missing score is
-recorded as not covered and cannot retain a variant. The case-only recurrence null is a rank, not
+recorded as not covered and cannot retain a variant. SpliceVault describes how annotated sites
+mis-splice when disrupted and so informs loss events only; it says nothing about a site a variant
+creates, its events are those of a broad tissue compendium rather than the proband's tissue, and
+they are carried as review evidence rather than as a tier input. The case-only recurrence null is a rank, not
 a calibrated association test, and the de novo enrichment is uncalibrated. Under the proxy
 frequency arm the effective rarity stringency depends on the proband's ancestry, because the
 maximum is taken over ancestry groups regardless of the proband's own. The Mendelian-error and
@@ -670,6 +701,7 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 | SpliceAI precomputed raw scores | Illumina genome_scores_v1.3, hg38 (SNV and indel) | splice delta scores, second selection rung |
 | REVEL | v1.3 (GRCh38-sorted) | missense tier, first predictor |
 | AlphaMissense | hg38 release | missense tier, second predictor |
+| SpliceVault (300K-RNA) | Ensembl FTP GRCh38 table, build 2026-02-24 (Dawes et al. 2023); optional | empirical mis-splicing events at the lost site; `splicevault_*` review columns and the agreement with the SpliceAI event |
 | ClinVar sites VCF | 2026-07-06 (pinned; monthly) | review status → gold stars |
 | gnomAD constraint | v2.1.1 lof_metrics.by_gene | LOEUF, pLI; and, unjoined, μ_mis/μ_syn/μ_lof, oe_syn, classic_caf, constraint_flag, CDS length |
 | GeneBayes s_het | Zeng et al. 2024 | constraint predicate |

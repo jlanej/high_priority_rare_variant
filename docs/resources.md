@@ -126,10 +126,11 @@ acquisition instructions printed otherwise. Nothing is installed — only downlo
 | GRCh38 reference FASTA | VEP + `bcftools norm` | `reference.fasta` (`REF_FASTA`) | free | ~1 GB (gz) |
 | VEP indexed cache (r115) | **everything**: consequence/IMPACT, gnomAD v4.1 AFs, ClinVar `CLIN_SIG` | `resources.vep.cache_dir` (`VEP_CACHE`) | free | ~24 GB |
 | CADD SNV + indel | CADD plugin — the general-purpose functional predictor (SpliceAI covers splice), genome-wide, SNV+indel | `resources.vep.cadd_snv` / `cadd_indel` (`CADD_SNV`/`CADD_INDEL`) | **license-gated**, huge | ~82 GB |
-| VEP plugin **code** (`.pm`) | CADD, SpliceAI, REVEL, AlphaMissense (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
+| VEP plugin **code** (`.pm`) | CADD, SpliceAI, REVEL, AlphaMissense, NMD, SpliceVault (LOFTEE code is baked but unused) | `resources.vep.plugins_dir` (`VEP_PLUGINS`) | **in the image** at `/plugins` (not fetched) | — |
 | **ClinVar** GRCh38 sites VCF | Step-2 **transfer** -> `CLNREVSTAT` ⇒ `clinvar_stars` (0-4), a Step-9 ranking input. Also un-stales ClinVar vs the cache's pinned release. **Optional**, degrades with a warning | `resources.clinvar.vcf` (`CLINVAR_VCF`) | free (NCBI) | ~0.18 GB |
 | **REVEL** (dedicated file) | REVEL plugin — Step-9 missense tier. **Required by default**; no effect on selection | `resources.vep.revel` (`REVEL_SCORES`) | free, academic use | ~0.7 GB |
 | **AlphaMissense** | AlphaMissense plugin — Step-9 missense tier. **Required by default**; no effect on selection | `resources.vep.alphamissense` (`ALPHAMISSENSE_SCORES`) | **CC BY-NC-SA 4.0** (`--accept-license`) | ~0.65 GB |
+| **SpliceVault** (300K-RNA) | SpliceVault plugin — the empirical mis-splicing outcome beside the SpliceAI event (`splicevault_*` review columns in Step 5). **Optional**; Step 2 warns, columns blank | `resources.vep.splicevault` (`SPLICEVAULT`) | free (Ensembl FTP; `.tbi` shipped) | ~0.85 GB |
 | **gnomAD v4.1 joint slim** | Step-2 **transfer** -> `gnomad_faf95` (the DEFAULT rarity oracle) + `gnomad_nhomalt` + the `gnomad_AF_joint` witness. **Required** under `resources.gnomad.oracle: faf95`; opt down with `grpmax_proxy` | `resources.gnomad.sites_slim` (`GNOMAD_SITES`) | free (GCS egress; `--only gnomad_sites`) | ~10 GB (streams ~877 GB) |
 | Constraint per-gene TSV | Step-6 ranking (LOEUF/pLI/s_het/pHaplo) — **optional**, skipped if unset | `resources.constraint.*` (`GNOMAD_V2_CONSTRAINT`) | free | small |
 | Samocha mutation-rate table | Step-6 de-novo Poisson (secondary) — **optional**, skipped if unset | `resources.mutation_rate_table` (`MUTRATE_TABLE`) | free | small |
@@ -327,7 +328,7 @@ at it.
 ### What each mode covers
 
 - **`fetch`** (default) prepares `reference`, `vep_cache`, `cadd`, `constraint`,
-  `mutational_target`, `clinvar`, `revel`, `alphamissense`. Pass `--only gnomad_sites` to prepare
+  `mutational_target`, `clinvar`, `revel`, `alphamissense`, `splicevault`. Pass `--only gnomad_sites` to prepare
   the joint slim the default `faf95` oracle requires (not in the bare set only because preparing it
   streams ~877 GB), and `--only loftee,dbnsfp` for the retired resources of a
   [roadmap restoration](ROADMAP.md). **`spliceai` is required by default** (Step 2 plugin +
@@ -335,8 +336,8 @@ at it.
   indel file gated; use `scripts/download_spliceai.sh` for the full raw set.
 - **`verify`** mirrors the DEFAULT config: `gnomad_sites`, `revel` and `alphamissense` are
   reported as REQUIRED (missing ⇒ non-zero exit) unless the config opts down
-  (`oracle: grpmax_proxy`, `missense_predictors_required: false`); `loftee`/`dbnsfp` are reported
-  as *not required*. SpliceAI is checked by `run_pipeline.sh`'s preflight, which HALTS on it by
+  (`oracle: grpmax_proxy`, `missense_predictors_required: false`); `splicevault` and
+  `loftee`/`dbnsfp` are reported as *not required*. SpliceAI is checked by `run_pipeline.sh`'s preflight, which HALTS on it by
   default. `run_pipeline.sh` additionally preflights what it actually needs before doing work.
 - **`emit-env`** exports the `${ENV}` placeholders `config/config.example.yaml` has keys for;
   `GNOMAD_SITES` is emitted uncommented once the slim is present (commented, with the fetch hint,
@@ -462,3 +463,45 @@ MANE-only SNV mirror and leaves the indel file gated.
   (2) Contig naming: the Ensembl mirror uses `1`/`X`, GMKF is `chr`-prefixed — a mismatched `tabix`
   query returns empty with **exit code 0**. Step 2's presence guard ("no `vep_SpliceAI_pred_DS_*`
   lifted") catches a silently-dead plugin, but confirm the score VCF's contigs match your reference.
+
+## SpliceVault (300K-RNA) — optional, review evidence
+
+**WIRED, optional.** The SpliceVault VEP plugin (Dawes et al. 2023, *Nat Genet* 55:324) runs in
+Step 2 when `resources.vep.splicevault` (`${SPLICEVAULT}`) points at its table. It is the empirical
+complement of the SpliceAI event Step 5 decomposes: SpliceAI says *this site is lost*; SpliceVault
+says *what the cell does when that site is lost* — the most frequent natural mis-splicing events
+observed at that annotated site across ~335,000 RNA-seq samples (exon skipping of one or more exons,
+`ES`; a cryptic donor or acceptor at a given offset, `CD`/`CA`), each with its frame and the % of
+samples supporting it. In the SpliceVault paper the top-4 events predicted the variant-induced
+outcome ~90% of the time. It covers site **loss** only — it is silent on sites a variant creates.
+
+| File | Config key (`${ENV}`) | Source | ~Size |
+|---|---|---|---|
+| `SpliceVault_data_GRCh38.tsv.gz` (+ `.tbi`, shipped) | `resources.vep.splicevault` (`SPLICEVAULT`) | Ensembl FTP `current_variation/SpliceVault/` (unversioned path; `SPLICEVAULT_BUILD` in `manifest.env` pins the listing date) | ~0.85 GB |
+
+- **Fetch:** `prepare_resources.sh --only splicevault fetch` — it is also in the DEFAULT fetch set.
+  The `.tbi` is **downloaded**, never rebuilt: the table is not a VCF, so the pipeline's VCF-preset
+  indexer would build a wrong index without complaint.
+- **What Step 2 lifts** (all `vep_`-prefixed, review-only, read by no gate): `SpliceVault_top_events`
+  (a LIST — the plugin's `rank:type:transcript_impact:percent:frame` entries, which VEP's VCF writer
+  joins with `&`), `SpliceVault_out_of_frame_events` (fraction of the top events that shift the
+  frame), `SpliceVault_site_pos`, `SpliceVault_site_type`, `SpliceVault_site_sample_count`,
+  `SpliceVault_site_max_depth`, `SpliceVault_SpliceAI_delta` — plus `STRAND`, needed to compare
+  SpliceAI's genomic shift with SpliceVault's transcript-oriented offsets.
+- **What Step 5 writes:** `splicevault_top_events` verbatim, `_out_of_frame`, `_site_type`,
+  `_site_samples`, `_top1_event` (`ES` / `CD+12` / `CA-31`), `_top1_frame` (`in_frame` /
+  `out_of_frame`) and `splicevault_agreement` — `cryptic_confirmed` (SpliceAI's cryptic shift is a
+  site 300K-RNA already sees used), `cryptic_unseen` (a predicted cryptic site the compendium has
+  never observed — more scepticism), `loss_outcome_supplied` (SpliceAI predicts a lone loss and
+  cannot say what follows; the rank-1 event and its frame are the best estimate),
+  `site_type_mismatch`, `not_applicable` (a pure gain), or blank (no data / no SpliceAI event at
+  the floor — blank never means disagreement). Step 9 appends the rank-1 event to the tier reason
+  string; nothing reads these columns as a gate or a tier input.
+- **Guard.** Configured + loaded + not one site annotated ⇒ Step 2 **WARNs** (not dies — the
+  resource is optional): a table on the wrong build, a bad `.tbi`, or different contig naming all
+  return nothing with exit 0.
+- **Which transcript.** The plugin annotates the transcript its table keys on; the `-s pick`
+  selection upstream decides whether the picked block carries the fields. A row with a SpliceAI
+  event and blank `splicevault_*` is a variant SpliceVault's table does not cover (deep-intronic
+  or a non-annotated site), not a parse failure — the `info_vep_SpliceVault_*` block shows the raw
+  values whenever the plugin wrote any.

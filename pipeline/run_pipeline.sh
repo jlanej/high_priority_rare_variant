@@ -144,6 +144,9 @@ if run_step 2; then
             _opt HPRV_REVEL           "REVEL (resources.vep.revel) — Step 9's missense tier falls back to an off-label CADD rank"
             _opt HPRV_ALPHAMISSENSE   "AlphaMissense (resources.vep.alphamissense) — no SVI-endorsed missense predictor"
         fi
+        # SpliceVault is review evidence beside the SpliceAI event (what the cell does when the
+        # site is lost); optional, so it only warns. prepare_resources.sh --only splicevault fetch.
+        _opt HPRV_SPLICEVAULT "SpliceVault (resources.vep.splicevault) — no empirical mis-splicing outcome (exon skipping vs cryptic site, frame); splicevault_* columns stay blank"
         # SpliceAI is part of the DEFAULT screen (resources.vep.spliceai_required, default true):
         # it is the only signal reaching deep-intronic cryptic sites + exonic-synonymous splice
         # disruption, so its silent absence is a materially weaker screen, not a cosmetic loss.

@@ -3566,7 +3566,7 @@ def test_step5_splice_event_geometry_and_nmd_columns():
     # the curated header carries the new columns in the documented places
     s5 = _load_step5()
     i = s5.COLS.index("hgvsp")
-    assert s5.COLS[i + 1:i + 6] == ["exon", "intron", "cds_position", "mane_select", "nmd_status"]
+    assert s5.COLS[i + 1:i + 7] == ["exon", "intron", "strand", "cds_position", "mane_select", "nmd_status"]
     j = s5.COLS.index("spliceai_ds")
     assert s5.COLS[j + 1:j + 4] == ["spliceai_event", "spliceai_event_pos", "spliceai_event2"]
 
@@ -3693,6 +3693,85 @@ def test_spliceai_rescore_plan_cache_and_merge():
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_splice_parse_splicevault_events_and_agreement():
+    """The SpliceVault plugin returns ranked `rank:type:impact:percent:frame` events as a list that
+    VEP's VCF writer joins with `&` (the plugin's own separator is `|`); both parse, extra colons in
+    the impact text are tolerated, frames normalise, and a cryptic site's offset is the signed
+    integer in its impact. Agreement with the SpliceAI decomposition: a lone loss -> SpliceVault
+    supplies the outcome; a cryptic shift is confirmed only when the same kind of cryptic site sits
+    at the same transcript-oriented offset (sign flips on the minus strand; magnitude without one)."""
+    from hprv import splice as S
+    ev = S.parse_splicevault_events("1:ES:Skipped_exon_5:63.2:out-of-frame&2:CA:Cryptic_acceptor_-31:12.1:inframe")
+    assert [e["type"] for e in ev] == ["ES", "CA"] and ev[0]["rank"] == 1 and ev[1]["rank"] == 2
+    assert ev[0]["frame"] == "out_of_frame" and ev[1]["frame"] == "in_frame"
+    assert ev[0]["offset"] is None and ev[1]["offset"] == -31 and ev[1]["percent"] == 12.1
+    assert ev[0]["impact"] == "Skipped_exon_5"
+    # the plugin's native `|` separator and a percent sign both parse; ranks come back ordered
+    ev2 = S.parse_splicevault_events("2:CD:Cryptic_donor_+12:5%:inframe|1:ES:Skipped_exons_5:6:40.0:out-of-frame")
+    assert [e["type"] for e in ev2] == ["ES", "CD"], "ranked by the rank field, not input order"
+    assert ev2[0]["impact"] == "Skipped_exons_5:6", "an extra colon inside the impact text survives"
+    assert ev2[1]["offset"] == 12 and ev2[1]["percent"] == 5.0
+    assert S.parse_splicevault_events("") == [] and S.parse_splicevault_events(None) == []
+    assert S.parse_splicevault_events(("1:ES:x:1:inframe", "2:CD:y_+4:1:inframe"))[1]["offset"] == 4
+    assert S.splicevault_top1(ev) == ("ES", "out_of_frame") and S.splicevault_top1(ev2) == ("ES", "out_of_frame")
+    assert S.splicevault_top1(S.parse_splicevault_events("1:CD:Cryptic_donor_+12:5:inframe")) == ("CD+12", "in_frame")
+    assert S.splicevault_top1([]) == ("", "")
+
+    loss = S.decompose({"acceptor_loss": 0.6}, {"acceptor_loss": -2}, pos=1000)
+    assert S.splicevault_agreement(loss, ev, strand=1, site_type="acceptor") == "loss_outcome_supplied"
+    assert S.splicevault_agreement(loss, ev, strand=1, site_type="donor") == "site_type_mismatch"
+    assert S.splicevault_agreement(loss, [], strand=1, site_type="acceptor") == ""
+    assert S.splicevault_agreement(S.decompose({}, {}, 1), ev) == "", "no SpliceAI event -> blank"
+    # a cryptic shift: donor loss at +2, donor gain at +14 -> the new donor is +12 from the lost one
+    shift = S.decompose({"donor_loss": 0.7, "donor_gain": 0.4}, {"donor_loss": 2, "donor_gain": 14}, pos=1000)
+    cd12 = S.parse_splicevault_events("1:CD:Cryptic_donor_+12:5:inframe&2:ES:Skipped_exon_3:3:out-of-frame")
+    assert S.splicevault_agreement(shift, cd12, strand=1, site_type="donor") == "cryptic_confirmed"
+    assert S.splicevault_agreement(shift, cd12, strand=-1, site_type="donor") == "cryptic_unseen", \
+        "on the minus strand a genomic +12 is a transcript -12: not the listed +12 site"
+    assert S.splicevault_agreement(shift, cd12, strand=None, site_type="donor") == "cryptic_confirmed", \
+        "strand unknown -> magnitude comparison"
+    assert S.splicevault_agreement(shift, ev, strand=1, site_type="donor") == "cryptic_unseen", \
+        "a cryptic ACCEPTOR in the list does not confirm a predicted cryptic DONOR"
+    gain = S.decompose({"donor_gain": 0.5}, {"donor_gain": 9}, pos=1)
+    assert S.splicevault_agreement(gain, cd12) == "not_applicable", "SpliceVault covers site LOSS only"
+
+
+def test_step5_splicevault_columns():
+    """Step 5 carries SpliceVault beside the SpliceAI event: the ranked list verbatim, the frameshift
+    fraction, the site type SpliceVault keyed on, its sample support, the rank-1 event and frame, and
+    the agreement call — all blank (never a fabricated event) when the plugin table was not there."""
+    info = {"vep_SpliceAI_pred_DS_AL": "0.6", "vep_SpliceAI_pred_DP_AL": "-2", "vep_SpliceAI_pred_SYMBOL": "G1",
+            "vep_STRAND": "-1",
+            "vep_SpliceVault_top_events": "1:ES:Skipped_exon_5:63.2:out-of-frame&2:CA:Cryptic_acceptor_-31:12.1:inframe",
+            "vep_SpliceVault_out_of_frame_events": "0.5", "vep_SpliceVault_site_type": "acceptor",
+            "vep_SpliceVault_site_sample_count": "1200", "vep_SpliceVault_site_pos": "98"}
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, info=info)])
+    r = rows[0]
+    assert r["strand"] == "-1"
+    assert r["spliceai_event"] == "acceptor_loss" and r["spliceai_effect"] == "site_loss"
+    assert r["splicevault_top_events"].startswith("1:ES:Skipped_exon_5")
+    assert r["splicevault_out_of_frame"] == "0.5" and r["splicevault_site_type"] == "acceptor"
+    assert r["splicevault_site_samples"] == "1200"
+    assert r["splicevault_top1_event"] == "ES" and r["splicevault_top1_frame"] == "out_of_frame"
+    assert r["splicevault_agreement"] == "loss_outcome_supplied"
+    # the cryptic-shift case on the minus strand: genomic shift +12 is transcript -12
+    info2 = {"vep_SpliceAI_pred_DS_DL": "0.7", "vep_SpliceAI_pred_DP_DL": "2", "vep_SpliceAI_pred_DS_DG": "0.4",
+             "vep_SpliceAI_pred_DP_DG": "14", "vep_STRAND": "-1", "vep_SpliceVault_site_type": "donor",
+             "vep_SpliceVault_top_events": "1:CD:Cryptic_donor_-12:8.0:inframe"}
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, info=info2)])
+    assert rows[0]["spliceai_shift_nt"] == "12" and rows[0]["splicevault_top1_event"] == "CD-12"
+    assert rows[0]["splicevault_agreement"] == "cryptic_confirmed"
+    # no SpliceVault data -> every splicevault_* cell blank
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5)])
+    for c in ("splicevault_top_events", "splicevault_out_of_frame", "splicevault_site_type",
+              "splicevault_site_samples", "splicevault_top1_event", "splicevault_top1_frame",
+              "splicevault_agreement"):
+        assert rows[0][c] == "", c
+    s5 = _load_step5()
+    i = s5.COLS.index("spliceai_symbol_mismatch")
+    assert s5.COLS[i + 1] == "splicevault_top_events" and "splicevault_agreement" in s5.COLS
 
 
 def _run_all():

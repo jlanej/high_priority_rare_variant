@@ -121,6 +121,16 @@ resources:
     # — NOT `AlphaMissense_score` (that is dbNSFP's column name). A want-list entry copied from the
     # dbNSFP naming populates nothing, silently.
     alphamissense: ${ALPHAMISSENSE_SCORES}   # AlphaMissense_hg38.tsv.gz (+ .tbi)
+    # SpliceVault (300K-RNA; Dawes 2023, Nat Genet) — a VEP plugin, OPTIONAL, review evidence only.
+    # For a variant SpliceAI predicts to destroy a splice site, the table holds the most frequent
+    # natural mis-splicing events at that site across ~335k RNA-seq samples: exon skipping (ES, one
+    # or more exons) vs a cryptic donor/acceptor (CD/CA) at a given offset, each with its frame and
+    # sample support. The top-4 events predict the variant-induced outcome ~90% of the time. Step 5
+    # carries the ranked list verbatim plus the rank-1 event/frame and an AGREEMENT call against the
+    # SpliceAI decomposition (cryptic_confirmed / cryptic_unseen / loss_outcome_supplied /
+    # site_type_mismatch / not_applicable). Never a gate; absent => Step 2 warns, columns blank.
+    # Free: prepare_resources.sh --only splicevault fetch (~0.85 GB + its shipped .tbi).
+    splicevault: ${SPLICEVAULT}          # SpliceVault_data_GRCh38.tsv.gz (+ .tbi)
     # Both are REQUIRED by default: a run that silently lacks them produces a missense tier built
     # on an off-label CADD rank, which is not a calibrated call and must not be mistaken for one
     # in a methods section. HALTS at preflight when a configured-or-not path is missing, exactly

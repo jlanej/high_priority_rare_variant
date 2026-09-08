@@ -965,6 +965,11 @@ def assign_variant_tier(row, cfg=None) -> dict:
     _ev = _s(row.get("spliceai_event"))
     if _ev:
         _ev = "[" + _ev + (";" + _s(row.get("spliceai_effect")) if _s(row.get("spliceai_effect")) else "") + "]"
+    # ...and SpliceVault's rank-1 empirical outcome at the lost site (exon skipping vs cryptic site,
+    # with frame), when the plugin table was configured. Reason string only, never the tier.
+    if _s(row.get("splicevault_top1_event")):
+        _ev += "(SpliceVault_top1=" + _s(row.get("splicevault_top1_event")) + \
+               (":" + _s(row.get("splicevault_top1_frame")) if _s(row.get("splicevault_top1_frame")) else "") + ")"
 
     out = {
         "molecular_effect_class": mec,
