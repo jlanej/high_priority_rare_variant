@@ -156,10 +156,10 @@ flowchart TD
 | 2b | `cohort.sites.annotated.vcf.gz` rewritten in place + `.spliceai_backfill.done` | *(OFF by default; opt in)* live-SpliceAI backfill of variants with no precomputed score (mostly novel indels), folded into the same `vep_SpliceAI_pred_DS_*` fields before Step 3 |
 | 3 | `plausible.sites.vcf.gz` | the target list of loci worth genotyping per trio |
 | 4 | per-trio `*.candidates.annotated.vcf.gz` | real per-trio genotypes (`PP`/`GQ`/`DP`/`AD`/`hiConfDeNovo`) at plausible sites, annotation-carrying |
-| 5 | `candidates.calls.tsv` (one row per call: inheritance mode, `rarity_af`/`rarity_oracle`/`rarity_basis`, `gt_bases`-style genotypes) | diagnostic per-family findings |
+| 5 | `candidates.calls.tsv` (one row per call: inheritance mode, `rarity_af`/`rarity_oracle`/`rarity_basis`, `hgvsc`/`hgvsp`, `gt_bases`-style genotypes, then a dropless `info_<ID>` block — every INFO field of the per-trio VCF, verbatim) | diagnostic per-family findings |
 | 6 | `genes.ranked.tsv` — distinct-individual carriers per model, the case-only recurrence rank, the mutational-target carrier expectation (`exp_carriers_mu`/`p_carrier_excess`, when `--mutrate` carries `mu_*`) + constraint | cross-pedigree discovery signal |
 | 7 | `hprv_summary.xlsx` (documented supplemental table) | consolidated human-readable summary |
-| 8 | `igv/` (variants.tsv + mini-CRAMs + per-trio VCF tracks + trios.tsv + sample_qc.tsv + curation.json + config.json) | jlanej/igv.js trio variant-review ingestion |
+| 8 | `igv/` (variants.tsv — the curated review columns incl. `hgvsc`/`hgvsp`, then every remaining calls column verbatim (`flags`, `gene_id`, `info_*`) — + mini-CRAMs + per-trio VCF tracks + trios.tsv + sample_qc.tsv + curation.json + config.json) | jlanej/igv.js trio variant-review ingestion |
 | 8b | `igv/nhf/<trio>/<sample>.variant_nhf.tsv` → `child_/mother_/father_nhf` (+`_reads`) + `nhf_flag` columns in `variants.tsv` | *(optional, default on)* non-human fraction of each candidate's ALT reads — a contamination / mis-mapping down-rank signal for review |
 | 9 | `variants.prioritized.tsv`, `genes.prioritized.tsv`, `igv/variants.prioritized.tsv` | the re-ranked review list — a rank, never a drop (row-count conservation asserted) |
 

@@ -204,7 +204,16 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. Every row carries `rarity_af` (the value
   the run's oracle produced and every gate applied) + `rarity_oracle` + `rarity_basis`, resolved
   ONCE here and consumed downstream, and `child_gt`/`mother_gt`/`father_gt` are cyvcf2 `gt_bases`
-  — allele STRINGS such as `A/T` or `T/T`, never `0/1`. **Step 6 output**: `genes.ranked.tsv` —
+  — allele STRINGS such as `A/T` or `T/T`, never `0/1`. `hgvsc`/`hgvsp` (VEP HGVS on the split-vep-selected transcript) are curated
+  columns, and AFTER the curated columns comes a DROPLESS `info_<ID>` block: every INFO field the
+  per-trio candidate VCF header declares, verbatim — including the raw multi-transcript `CSQ` as
+  `info_CSQ`, i.e. every transcript's HGVS, not only the picked one (the union over trios, in
+  header order; a VCF
+  `.` reads blank, a Flag reads `1`; `05_inheritance_screen.info_values` parses the VCF LINE so a
+  Float keeps the VCF's digits). The prefix is load-bearing: the raw `hiConfDeNovo` (a comma list
+  of children) would otherwise collide with the curated flag. This projection was the ONE place an
+  annotation could vanish — HGVSc/HGVSp were lifted in Step 2 and never reached a TSV — so keep
+  both blocks intact. **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
   `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
   (`p_recurrence`/`q_recurrence`/`*_exome_wide_sig` — a RANK, never a calibrated test: 2 carriers
@@ -226,7 +235,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **Step 8 output**: `igv/` for the jlanej/igv.js variant-review server (`src/hprv/igv.py` +
   `08_igv_export.sh`): `variants.tsv` — its headline `frequency` column IS `rarity_af`, the value
   the run's oracle produced and every gate applied; it must never be a different quantity from the
-  one that did the filtering, with `grpmax_af`/`faf95` alongside as the raw inputs. (Only
+  one that did the filtering, with `grpmax_af`/`faf95` alongside as the raw inputs. `hgvsc`/`hgvsp` sit beside `impact`, and every calls column Step 8
+  does not already represent is appended verbatim after the track columns
+  (`igv.passthrough_columns`: `flags`, `hiConfDeNovo`, `review_prior_crosscheck`, the Ensembl
+  `gene` as `gene_id`, the whole `info_*` block) — the review table is dropless with respect to
+  `candidates.calls.tsv`, and it used to be a second silent projection. (Only
   `chrom/pos/ref/alt` required; extra columns are
   filterable; per-member `*_file`/`*_index` + `*_vcf*` track paths are RELATIVE to the data-dir
   `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
@@ -691,12 +704,12 @@ two things that look identical in the output are not the same fact:
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **81 tests, no network and no VCF.**
+  **83 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
   without it — and `_run_all` then refuses to print "All N passed", instead reporting
-  `68 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
+  `70 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
   cache-invalidation guards. **CI installs pyyaml + openpyxl AND fails the job on that
   "NOT full coverage" line**, so a skipped test can never read as a green run. Before calling this
   suite green, run it the way CI does — with those two installed, not an env that happens to carry

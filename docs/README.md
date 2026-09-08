@@ -431,6 +431,11 @@ yield, synonymous-λ calibration.
 ### Review export (Step 8) & non-human-fraction (Step 8b)
 - **Step 8** (igv.js review export): `outputs.igv.padding` **1000** bp mini-CRAM flank;
   `extract_jobs` = `runtime.threads` (samtools `-@` per slice; slices run **serially**).
+  `variants.tsv` is **dropless** with respect to `candidates.calls.tsv`: the curated review columns
+  (now including `hgvsc`/`hgvsp`) come first, then every calls column Step 8 does not already
+  represent rides through verbatim (`flags`, `hiConfDeNovo`, `review_prior_crosscheck`, the
+  Ensembl `gene` as `gene_id`, and Step 5's `info_<ID>` block — every INFO field of the per-trio
+  VCF). Any extra column is filterable in the review server.
 - **Step 8b** (non-human-fraction — *optional review aid, outside the VEP-only annotation contract;
   never a selection filter*): `outputs.igv.nonhuman_screen.enabled` **true** — but activates only
   when `resources.kraken2_db` is set (else warns + skips, NHF columns blank). `members` **carriers**
