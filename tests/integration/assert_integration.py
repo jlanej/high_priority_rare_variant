@@ -281,6 +281,30 @@ def main(argv=None) -> int:
         check(any(str(k).startswith("vep_") for v in VCF(trio_vcfs["CH_A"]) for k, _ in v.INFO),
               "vep_* annotations still transfer into the per-trio VCF")
 
+        # --- DROPLESS at the annotation level. Step 5 projected the per-trio VCF onto a fixed
+        # column list, which is where vep_HGVSc/HGVSp (and vep_Feature, vep_MANE_SELECT,
+        # hprv_keep_reason, ...) vanished with no trace. Every INFO field the candidate VCF header
+        # declares must now reach candidates.calls.tsv as info_<ID>, verbatim, and HGVS is curated. ---
+        import re as _re
+        info_ids = _re.findall(r"^##INFO=<ID=([^,>]+)", hdr, _re.MULTILINE)
+        calls_cols = set(calls[0].keys()) if calls else set()
+        missing_info = [i for i in info_ids if f"info_{i}" not in calls_cols]
+        check(bool(info_ids) and not missing_info,
+              f"every INFO field of the CH_A candidate VCF reaches candidates.calls.tsv as info_* "
+              f"({len(info_ids)} declared; missing: {missing_info[:5]})")
+        check(bool(calls) and all(r.get("info_hprv_keep_reason") for r in calls),
+              "info_hprv_keep_reason (Step 3's keep reason) is populated on every call")
+        dn = next((r for r in calls if r["trio_id"] == "CH_A" and r["mode"] == "denovo"
+                   and r["symbol"] == "GENE1"), None)
+        if check(dn is not None, "CH_A GENE1 de novo row available for the HGVS check"):
+            check(dn["hgvsc"].startswith("ENST_MOCK_GENE1:c.")
+                  and dn["hgvsp"].startswith("ENSP_MOCK_GENE1:p."),
+                  f"hgvsc/hgvsp reach candidates.calls.tsv ({dn['hgvsc']!r}, {dn['hgvsp']!r})")
+            check(dn["hgvsc"] == dn["info_vep_HGVSc"] and dn["hgvsp"] == dn["info_vep_HGVSp"],
+                  "curated hgvsc/hgvsp agree with the verbatim info_vep_HGVSc/HGVSp")
+            check(dn["info_vep_MANE_SELECT"] == "NM_MOCK_GENE1" and dn["info_vep_Feature"] == "ENST_MOCK_GENE1",
+                  "MANE_SELECT / Feature — lifted in Step 2 but never a curated column — ride through info_*")
+
     # --- Step 9: prioritization (gene excess + artifact panel + variant tiering) ---
     vpath9 = os.path.join(W, "variants.prioritized.tsv")
     gpath9 = os.path.join(W, "genes.prioritized.tsv")
@@ -294,6 +318,13 @@ def main(argv=None) -> int:
         # regresses a reviewer silently receives a shortened list with no counter recording it.
         check(len(pv) == len(src),
               f"never-drop: prioritized rows == input rows ({len(src)}; got {len(pv)})")
+        for col in ("hgvsc", "hgvsp"):
+            check(col in pv[0], f"variants.prioritized.tsv carries '{col}'")
+        ipath = os.path.join(W, "igv", "variants.prioritized.tsv")
+        if check(os.path.exists(ipath), "igv/variants.prioritized.tsv written"):
+            ih = list(rows(ipath)[0].keys())
+            check(all(c in ih for c in ("hgvsc", "hgvsp", "info_vep_HGVSc", "flags", "gene_id")),
+                  "the igv review table inherits hgvsc/hgvsp, info_*, flags and gene_id from Step 8 verbatim")
         # --- Genotype QC must READ the base-form GT Step 5 writes (`T/T`, never `1/1`). Every
         # hom-alt call carries AB ~1.0, so a zygosity test that never fires pushed them all through
         # the het band: gt_qc_pass=0 and -2 points on every recessive candidate. ---
@@ -707,6 +738,26 @@ def main(argv=None) -> int:
         for col in ("chrom", "pos", "ref", "alt", "inheritance", "child_file", "child_gt"):
             check(col in vh, f"variants.tsv has '{col}' column")
         check(len(vrows) == len(calls), f"variants.tsv rows == candidate calls ({len(calls)})")
+        # --- Dropless Step 8: every calls column is represented in variants.tsv (verbatim or
+        # renamed), and the pass-through values match the calls table row for row (Step 8 is 1:1
+        # and in order). `flags` used to be reduced to `origin`; the Ensembl `gene` was dropped. ---
+        from hprv import igv as _igv
+        calls_header = list(calls[0].keys()) if calls else []
+        expect = {name for _, name in _igv.passthrough_columns(calls_header)} | {"hgvsc", "hgvsp"}
+        missing_v = sorted(c for c in expect if c not in vh)
+        check(not missing_v,
+              f"variants.tsv carries every unmapped calls column ({len(expect)} expected; missing: {missing_v[:6]})")
+        with open(vpath) as fh:
+            vd = list(csv.DictReader(fh, delimiter="\t"))
+        pairs = list(zip(calls, vd))
+        check(bool(pairs) and all(v["hgvsc"] == c["hgvsc"] and v["hgvsp"] == c["hgvsp"] for c, v in pairs),
+              "hgvsc/hgvsp in variants.tsv equal candidates.calls.tsv row for row")
+        check(bool(pairs) and all(v["flags"] == c["flags"] for c, v in pairs),
+              "flags (origin_unverified, transmitting_parent_qc_fail, ...) survive into variants.tsv verbatim")
+        check(bool(pairs) and all(v["gene_id"] == c["gene"] and v["gene"] == c["symbol"] for c, v in pairs),
+              "the Ensembl gene ID rides along as gene_id while `gene` stays the symbol")
+        check(bool(pairs) and all(v["info_vep_HGVSc"] == c["info_vep_HGVSc"] for c, v in pairs),
+              "the info_* block survives into variants.tsv verbatim")
         fi = vh.index("child_file")
         check(any(r[fi] for r in vrows), "at least one child_file (mini-CRAM) populated")
     check(os.path.exists(os.path.join(W, "igv", "crams", "CH_A", "CH_A.cram")),
