@@ -46,7 +46,8 @@ for the vetted design and the artifact each step produces):
 | 2 | Annotate the union **once** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache), then two `bcftools annotate` transfers: ClinVar review status, and the gnomAD joint slim for `faf95`/`nhomalt` (required under the default `faf95` oracle) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
 | 4 | Recover **real per-trio genotypes** at plausible sites + transfer annotations | per-trio `*.candidates.annotated.vcf.gz` |
-| 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary | `candidates.calls.tsv` |
+| 5 | Pedigree-aware inheritance screen + genotype QC: **dominant** (inherited het), recessive (hom / comp-het-in-trans), X-linked; de novo is secondary. Each call carries HGVS, exon/CDS geometry, the NMD verdict, the decomposed SpliceAI event and every INFO field verbatim | `candidates.calls.tsv` |
+| 5b | **Wide-window SpliceAI** over the called set (live `-D 4999`, one chunk per SLURM array task, scores cached per variant): `spliceai_wide_*` evidence columns beside the precomputed score the gate used | `candidates.calls.tsv` (+ `spliceai_rescore/scores.tsv`) |
 | 6 | **Cross-pedigree gene consolidation**: tally distinct individuals per gene by model (dominant het / biallelic / X-linked), weighted by constraint; a case-only recurrence rank plus, with a mutational-target table, the expected-carrier excess (`p_carrier_excess`) | `genes.ranked.tsv` |
 | 7 | Consolidated **.xlsx** supplemental-table summary (documented: gene consolidation, calls, resolution, QC, audit) | `hprv_summary.xlsx` |
 | 8 | **igv.js** trio variant-review export: `variants.tsv` + mini-CRAM slices (child/mother/father) + per-trio VCF tracks | `igv/` |
@@ -136,6 +137,12 @@ balance bands from `AD`):
   inferred from chrX heterozygosity when the PED is unknown).
 - **De novo** — detected via GATK `hiConfDeNovo` (child-membership checked) but treated as a
   *secondary cross-reference* only; dedicated de novo filtering/review lives in separate machinery.
+- **Splice events and transcript geometry** — every call carries the SpliceAI event behind its
+  score (`spliceai_event`, the affected site's position, a paired event, the exon-boundary shift
+  and its frame, `spliceai_effect`), VEP's exon/intron numbering and CDS position, MANE status and
+  the NMD verdict (`nmd_status`: `escaping`/`triggering`/`not_assessed`, from the VEP NMD plugin);
+  **Step 5b** re-scores every call live at a 4,999 bp window (`spliceai_wide_*`), the class the
+  50 bp precomputed set cannot see. Evidence for review — the gate keeps reading the precomputed max.
 
 **6. Cross-pedigree gene consolidation.** Candidate calls are aggregated per gene into a count of
 **distinct individuals** carrying a qualifying variant under each model (dominant het / biallelic
@@ -191,8 +198,9 @@ orders it, in two layers ([docs/prioritization.md](docs/prioritization.md)):
   overlay that **defaults OFF** (so hprv stays phenotype-agnostic). `rank_delta` exposes exactly
   which calls a gene list promoted — the set to scrutinise for confirmation bias.
 
-Three honest limits carried in the output rather than papered over: **no pLoF reaches V5** (the
-NMD-escape test needs three more VEP fields in `variants.tsv`), the missense tier reads REVEL, then
+Three honest limits carried in the output rather than papered over: **V5 is reached only by a
+nonsense or frameshift the VEP NMD plugin assessed and did not flag as escaping**
+(`nmd_status=triggering`; canonical splice and every unassessed pLoF stay V4), the missense tier reads REVEL, then
 AlphaMissense, then CADD in a **fixed precedence** (`missense_evidence_source` names which spoke;
 the CADD fallback is labelled `cadd_offlabel` and claims no graded strength), and
 **`priority_points` is not an ACMG score** — never read against Tavtigian's P/LP/VUS bands.

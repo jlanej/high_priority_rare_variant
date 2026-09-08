@@ -130,6 +130,14 @@ cover (insertions > 1 nt, deletions > 4 nt) simply carry no splice evidence, whi
 but cannot rescue them either. Set it `true` to score that gap live (`indels_only` **true**,
 `distance` **500** bp); an absent isolated `spliceai` env then HALTS at preflight, while a transient
 scoring failure degrades to precomputed-only with the union left intact.
+`resources.vep.spliceai_rescore.enabled` **true** (Step 5b) — every CALLED variant is re-scored live
+at `distance` **4999** bp in chunks of `chunk_size` **1000** (one SLURM array task each; the per-
+variant cache under `spliceai_rescore/scores.tsv` means a Step-5 re-run scores nothing new),
+appending `spliceai_wide_*` columns to `candidates.calls.tsv`. The gate and the Step-9 tier keep
+reading the PRECOMPUTED score, so results stay comparable; enabled + missing env HALTS, like the
+backfill. Step 5 also decomposes the precomputed score into an EVENT (`spliceai_event`,
+`_event_pos`, `_event2`, `_shift_nt`, `_shift_frame`, `_effect`, `spliceai_symbol_mismatch`;
+`src/hprv/splice.py`) at the SAME **0.2** floor as the rung — no new threshold.
 
 Two honest caveats on that CADD 25.3:
 - **Provenance error in the name.** 25.3 is Pejaver-2022's PP3-*supporting* cutoff, calibrated on
@@ -160,7 +168,7 @@ AlphaMissense **≥ 0.564** / **≤ 0.34** are **implemented as Step-9 tier cut 
 (`prioritization.variant_tier.revel_*` / `alphamissense_*`), consulted in a fixed precedence —
 REVEL, then AlphaMissense, then off-label CADD — never as a max over whatever is available, because
 best-of-N is an uncalibrated cherry-pick. There is deliberately **no 0.932 "strong" cut in code**
-(V5 is unreachable, so nothing would consume it). Both plugins are required by default
+(V5 is the NMD-triggering pLoF rung, not a missense rung, so nothing would consume it). Both plugins are required by default
 (`resources.vep.missense_predictors_required: true`; set `false` to run on the `cadd_offlabel`
 fallback). hprv still assigns **no ACMG weight**: the same cut points are used to ORDER candidates.
 *Still NOT implemented (needs resources this contract does not have):* LOFTEE HC-no-flags +
@@ -343,8 +351,8 @@ a read-level review list.
 
 | Tier | Rule | Points |
 |---|---|---|
-| **V5** | NMD-competent pLoF in a LoF-mechanism gene | +8 — **UNREACHABLE**: `variants.tsv` has no EXON/CDS_position, so every pLoF caps at V4 |
-| **V4** | `spliceai_ds ≥ 0.5`; a HIGH-impact pLoF (NMD indeterminate); or missense `revel ≥ 0.773` (Pejaver *moderate*) | +4 |
+| **V5** | a `stop_gained`/`frameshift_variant` whose `nmd_status` is **`triggering`** — the VEP NMD plugin (Step 2) assessed it and did not flag it as escaping (last exon / within 50 nt of the penultimate exon's end / first 100 coding nt / intronless); resolved in Step 5, gated by `prioritization.variant_tier.nmd_escape.enabled` **true** | +8 — canonical splice, `escaping` and `not_assessed` pLoF stay V4; absence of a verdict is never a promotion |
+| **V4** | `spliceai_ds ≥ 0.5`; a HIGH-impact pLoF not promoted to V5 (NMD-`escaping`, `not_assessed`, or any canonical-splice variant); or missense `revel ≥ 0.773` (Pejaver *moderate*) | +4 |
 | **V3** | `spliceai_ds ≥ 0.2`; missense `revel ≥ 0.644`; missense `am_pathogenicity ≥ 0.564` (REVEL absent); or missense `cadd ≥ 25.3` | +2 — the CADD route is `cadd_offlabel`, a discovery rank, **not** PP3 |
 | **V2** | missense scored *between* the calibrated cuts; missense with no predictor at all; in-frame indel | +1 |
 | **V1** | missense `revel ≤ 0.290` or `am_pathogenicity ≤ 0.34` (calibrated benign range); non-coding/synonymous kept via the CADD rung | +0.5 |
@@ -418,7 +426,7 @@ constraint table (~3 MB; `prepare_resources.sh --only mutational_target`). Not i
 `resources.constraint.gnomad_v2_constraint`, which is projected down to the LOEUF/pLI priors and has
 no `mu_*` columns. Absent → loud WARN, every gene reads T0, the variant layer still runs.
 
-*TARGET:* V5 (needs three more VEP fields), pLoF confidence (LOFTEE), single-site excess
+*TARGET:* pLoF confidence (LOFTEE), single-site excess
 de-escalation, per-ancestry candidate
 yield, synonymous-λ calibration.
 

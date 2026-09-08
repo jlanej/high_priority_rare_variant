@@ -1,7 +1,7 @@
 # Methods: screening non-jointly-genotyped trio callsets for inherited rare variation with hprv
 
 *A methods description derived from the pipeline code and shipped configuration
-(`config/config.example.yaml`) at commit `6a46819`, 2026-09-08. Every threshold quoted is the
+(`config/config.example.yaml`) as of 2026-09-08 (the git history records the exact commit). Every threshold quoted is the
 shipped default and is configurable; the implementing script for each step is listed in Table 3.
 A rendered copy is at `docs/methods.pdf`.*
 
@@ -21,8 +21,8 @@ run (Section 7). Cross-trio information is used only as a recurrence count of di
 The analysis proceeds through a trio-resolution preflight and ten steps (Steps 0 to 9). Variant
 loci are unioned across trios into a site-only list (Step 1), annotated once (Step 2), reduced to
 biologically plausible sites (Step 3), and then the true per-trio genotypes are recovered at those
-sites (Step 4) and classified by inheritance mode with genotype-level quality control (Step 5).
-Calls are consolidated per gene (Step 6), summarised for review (Steps 7 and 8), and re-ranked by a
+sites (Step 4) and classified by inheritance mode with genotype-level quality control (Step 5),
+then re-scored for splicing at a wide window (Step 5b). Calls are consolidated per gene (Step 6), summarised for review (Steps 7 and 8), and re-ranked by a
 gene-level excess statistic, an artifact panel, and a per-variant evidence tier (Step 9).
 
 Three rules govern every stage. First, rarity, functional impact, and genotype quality are gated
@@ -64,7 +64,8 @@ determine the output, and are skipped on re-run when the key matches; the inexpe
 The keys are: for the site union, the manifest plus each trio VCF's path, size and modification time,
 the FILTER expression, the excluded contigs and the sample subset; for annotation, a checksum of
 the union plus the identity of the cache and each plugin score file, the two transfer sources, the
-transcript selector and the frequency oracle; for per-trio candidate VCFs, a checksum of the
+transcript selector, the frequency oracle, the VEP flag recipe and the list of lifted fields; for
+per-trio candidate VCFs, a checksum of the
 plausible-site file plus the source VCF identity and sample subset; for prioritization, a SHA-256
 over every input table, the configuration and the scalar arguments. A marker whose key differs
 from the current inputs invalidates the cached product, and every bgzip product is
@@ -154,11 +155,14 @@ carry no gnomAD frequency, would otherwise be called as homozygous recessive in 
 The cohort union was annotated once, never per trio, with Ensembl VEP release 115 against the
 matching offline GRCh38 cache (`--cache --offline --assembly GRCh38 --fasta`), sharded by contig for
 resumability and re-assembled before any downstream operation, so the product is identical to a
-single pass. VEP was run with `--symbol --biotype --numbers --hgvs --canonical --mane
+single pass. VEP was run with `--symbol --biotype --numbers --total_length --hgvs --canonical --mane
 --af_gnomade --af_gnomadg --max_af --check_existing --flag_pick --pick_order
 mane_select,mane_plus_clinical,canonical,rank`. The gnomAD v4.1 per-population exome and genome
 allele frequencies and the ClinVar clinical significance therefore come from the VEP cache itself.
-Four plugins were applied: CADD v1.7 (the whole-genome SNV table and the gnomAD-genomes indel
+Five plugins were applied. Ensembl's stock NMD plugin, which needs no data file, marks a stop-gain,
+frameshift or canonical splice variant predicted to escape nonsense-mediated decay (last exon,
+within 50 nt of the penultimate exon's end, first 100 coding bases, or an intronless transcript).
+The four score plugins were CADD v1.7 (the whole-genome SNV table and the gnomAD-genomes indel
 table), SpliceAI (the precomputed raw genome-wide SNV and indel delta-score files, Illumina
 `genome_scores_v1.3`; the plugin's own cutoff is deliberately not set so raw scores are carried),
 REVEL v1.3 (the GRCh38-sorted distribution), and AlphaMissense (`AlphaMissense_hg38.tsv.gz`,
@@ -168,8 +172,8 @@ Because `--flag_pick` retains every consequence block and marks VEP's choice wit
 consequence used downstream is selected when the CSQ fields are lifted to INFO with
 `bcftools +split-vep`: the picked block when a PICK field exists, otherwise the worst consequence
 (`resources.vep.csq_select` overrides this). The lifted fields, each prefixed `vep_`, are
-Consequence, IMPACT, SYMBOL, Gene, Feature, BIOTYPE, HGVSc, HGVSp, MANE_SELECT, CADD_PHRED,
-CLIN_SIG, gnomADe_AF, gnomADg_AF, MAX_AF, MAX_AF_POPS, the ten grpmax-eligible population
+Consequence, IMPACT, SYMBOL, Gene, Feature, BIOTYPE, EXON, INTRON, HGVSc, HGVSp, cDNA_position,
+CDS_position, Protein_position (each with its total), MANE_SELECT, NMD, CADD_PHRED, CLIN_SIG, gnomADe_AF, gnomADg_AF, MAX_AF, MAX_AF_POPS, the ten grpmax-eligible population
 frequencies (gnomADe and gnomADg for AFR, AMR, EAS, NFE and SAS), the SpliceAI delta scores and
 positions (DS_AG, DS_AL, DS_DG, DS_DL, DP_AG, DP_AL, DP_DG, DP_DL, SYMBOL), REVEL,
 am_pathogenicity and am_class.
@@ -313,8 +317,10 @@ proband are skipped. A "rare" test at limit *L* passes when the oracle value is 
 *L*; the limits are 1 × 10⁻⁴ for the dominant and de novo models (`dominant_max`) and 1 × 10⁻² for
 the recessive and X-linked models (`recessive_max`), with recessive and X-linked calls below
 1 × 10⁻³ additionally flagged `high_conf_rarity`. Every emitted row carries the genotype of all three
-members as allele strings, the child's GQ, depth and AB, the curated annotations (including the
-HGVS coding and protein descriptions on the transcript selected in Step 2) and a `flags` field;
+members as allele strings, the child's GQ, depth and AB, the curated annotations (the HGVS coding
+and protein descriptions, exon and intron numbering, CDS position and MANE status of the transcript
+selected in Step 2, the NMD verdict of Section 13.4, and the SpliceAI event decomposition below) and
+a `flags` field;
 after the curated columns, every INFO field declared in the per-trio candidate VCF header is
 written verbatim under an `info_` prefix (the union over trios, in header order), including the
 complete VEP consequence string for every transcript, so no annotation computed in Step 2 is
@@ -380,6 +386,29 @@ QC failure, rarity, no gene, Mendelian inconsistency, parental no-call, the iner
 [1 × 10⁻⁴, 1 × 10⁻²) heterozygous band, a disabled mode, or the hiConf tag), so that per trio the
 number examined equals skipped plus called plus no-row. ClinVar P/LP alleles the child carried that
 yielded no row are counted separately.
+
+**Splice event decomposition.** The screen gates on the maximum of SpliceAI's four delta scores;
+each call also carries the event behind that maximum. The component with the largest delta score at
+or above the screen's 0.2 floor is named (`spliceai_event`: acceptor or donor, gain or loss) with
+the genomic position of the affected site (the variant position plus the model's offset), and a
+second component at or above the floor is named alongside it. A gain and a loss of the same site
+type are read as a cryptic-site shift whose exon-boundary displacement is the difference of the two
+offsets and whose frame follows from that displacement modulo three; a lone loss is recorded as a
+site loss (exon skipping or intron retention, frame undetermined without the exon length), a lone
+gain as a site gain, two gains as a pseudoexon candidate, two losses as a whole-exon loss
+candidate, and mixed site types as complex (`spliceai_effect`). A call whose SpliceAI gene symbol
+differs from VEP's picked gene is flagged.
+
+**Wide-window rescoring (Step 5b).** The precomputed SpliceAI files were generated with a 50 bp
+window, so a cryptic site or pseudoexon partner further than 50 bp from the variant is invisible to
+the screen. Every distinct variant in the calls table was therefore re-scored live with the SpliceAI
+model at a 4,999 bp window (the window used by the ClinGen splicing recommendations), in chunks of
+1,000 variants that run as independent scheduler array tasks, with results cached per variant so a
+re-run of Step 5 scores nothing anew. The gene entry with the largest delta score is kept whole and
+decomposed exactly as above into `spliceai_wide_*` columns, together with the wide-window maximum,
+its difference from the precomputed maximum, and a flag marking an event more than 50 bp from the
+variant. These columns are evidence for review; the selection gate and the Step 9 tier continue to
+read the precomputed score so that results remain comparable between runs.
 
 ## 12. Gene-level consolidation (Step 6)
 
@@ -498,10 +527,13 @@ Each call is assigned a molecular effect class from its consequence (canonical s
 missense, in-frame indel, otherwise synonymous/UTR/intronic; HIGH impact of any other term is
 treated as pLoF) and a tier V0 to V5. V0 (molecularly benign prediction) requires impact LOW or
 MODIFIER with both a SpliceAI score < 0.1 and a CADD score < 15 present; a missing score can never
-satisfy V0. V4: SpliceAI ≥ 0.5, or a HIGH-impact pLoF or canonical splice variant. V5 is defined for
-a pLoF predicted to trigger nonsense-mediated decay but is unreachable in the current
-implementation because exon position is not carried; every pLoF is therefore capped at V4 with
-`nmd_status = INDETERMINATE`, and pLoF confidence is `UNAVAILABLE` because LOFTEE is not run. V3:
+satisfy V0. V5: a stop-gain or frameshift variant whose `nmd_status` is `triggering`, that is, one
+the NMD plugin assessed and did not flag as escaping nonsense-mediated decay (`nmd_escape.enabled`,
+default true). V4: SpliceAI ≥ 0.5, or a HIGH-impact pLoF or canonical splice variant not promoted to
+V5. Canonical splice variants never reach V5, because the plugin judges the variant's own position
+rather than the aberrant transcript, and a pLoF whose `nmd_status` is `escaping` or `not_assessed`
+stays at V4: the absence of a verdict is never a promotion. pLoF confidence is `UNAVAILABLE`
+because LOFTEE is not run. V3:
 SpliceAI ≥ 0.2. For missense, a single predictor speaks in a fixed order and is named in
 `missense_evidence_source`: REVEL (≥ 0.773 → V4, ≥ 0.644 → V3, ≤ 0.290 → V1, otherwise V2); if
 REVEL is absent, AlphaMissense (≥ 0.564 → V3, ≤ 0.34 → V1, otherwise V2); if both are absent, CADD
@@ -601,8 +633,9 @@ data wherever two identical-looking values are different facts: `rarity_oracle` 
 ## 16. Limitations inherent in the implementation
 
 The screen sees single-nucleotide and small indel variation only. Loss-of-function confidence
-(LOFTEE) is not computed and nonsense-mediated-decay escape is not evaluated, so no pLoF reaches
-the top variant tier. The precomputed SpliceAI set does not cover larger indels; a missing score is
+(LOFTEE) is not computed, and nonsense-mediated-decay escape is taken from the VEP NMD plugin's
+positional rules rather than from a transcript model; for canonical splice variants it is a
+position proxy and is not used for promotion. The precomputed SpliceAI set does not cover larger indels; a missing score is
 recorded as not covered and cannot retain a variant. The case-only recurrence null is a rank, not
 a calibrated association test, and the de novo enrichment is uncalibrated. Under the proxy
 frequency arm the effective rarity stringency depends on the proband's ancestry, because the
@@ -630,7 +663,8 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 
 | Resource | Version or release | Role |
 |---|---|---|
-| Ensembl VEP and offline cache | release 115, GRCh38 | consequence, IMPACT, symbol, HGVS, MANE, gnomAD v4.1 point AFs, ClinVar CLIN_SIG |
+| Ensembl VEP and offline cache | release 115, GRCh38 | consequence, IMPACT, symbol, HGVS, exon/CDS geometry, MANE, gnomAD v4.1 point AFs, ClinVar CLIN_SIG |
+| Ensembl VEP NMD plugin | release 115 plugin set (no data file) | NMD-escape verdict behind `nmd_status` and the V5 rung |
 | gnomAD joint sites (slim) | v4.1 | faf95, FAF group, nhomalt, joint and grpmax AF (default frequency oracle) |
 | CADD | v1.7, GRCh38 (whole-genome SNVs; gnomAD-genomes r4.0 indels) | functional score, third selection rung |
 | SpliceAI precomputed raw scores | Illumina genome_scores_v1.3, hg38 (SNV and indel) | splice delta scores, second selection rung |
@@ -680,6 +714,9 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 | Established-gene ceiling; CDS ceiling | T1; T2 | Step 9 |
 | Min control genes; max down-weight fraction | 1,000; 0.20 | Step 9 |
 | SpliceAI strong / supporting / benign | ≥ 0.5 / ≥ 0.2 / < 0.1 | Step 9 |
+| SpliceAI event floor | 0.2 (the SpliceAI rung) | Steps 5, 5b |
+| Step 5b wide-window rescoring | enabled; 4,999 bp window; 1,000 variants per chunk | Step 5b |
+| NMD escape grading (V5) | enabled; the VEP NMD plugin's fixed rules | Steps 2, 5, 9 |
 | CADD benign; CADD missense (off-label) | < 15; ≥ 25.3 | Step 9 |
 | REVEL moderate / supporting / benign | ≥ 0.773 / ≥ 0.644 / ≤ 0.290 | Step 9 |
 | AlphaMissense supporting / benign | ≥ 0.564 / ≤ 0.34 | Step 9 |
@@ -709,7 +746,8 @@ All code paths are relative to the repository root: scripts under `pipeline/`, s
 | 2 (2b) | `02_annotate_sites.sh` (`02b_spliceai_backfill.sh`; `src/hprv/spliceai_backfill.py`) | `cohort.sites.annotated.vcf.gz` |
 | 3 | `03_select_plausible.py`; `src/hprv/selection.py`, `annotations.py` | `plausible.sites.vcf.gz` |
 | 4 | `04_subset_and_annotate_trios.sh` | `trios/<trio>.candidates.annotated.vcf.gz`; `trios.candidates.tsv` |
-| 5 | `05_inheritance_screen.py`; `src/hprv/genotype.py` | `candidates.calls.tsv` |
+| 5 | `05_inheritance_screen.py`; `src/hprv/genotype.py`, `splice.py` | `candidates.calls.tsv` |
+| 5b | `05b_spliceai_rescore.sh`; `src/hprv/spliceai_rescore.py`, `splice.py` | `candidates.calls.tsv` (`spliceai_wide_*` appended); `spliceai_rescore/scores.tsv` |
 | 6 | `06_gene_burden.py` | `genes.ranked.tsv` |
 | 7 | `07_report_xlsx.py`; `src/hprv/report.py` | `hprv_summary.xlsx` |
 | 8 (8b) | `08_igv_export.sh`; `src/hprv/igv.py` | `igv/variants.tsv`, `igv/crams/`, `igv/vcfs/`, `igv/nhf/` |
