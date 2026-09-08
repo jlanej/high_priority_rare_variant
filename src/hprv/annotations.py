@@ -78,6 +78,18 @@ F = {
     "cds_position": "vep_CDS_position",
     "protein_position": "vep_Protein_position",
     "nmd": "vep_NMD",
+    "strand": "vep_STRAND",          # 1 / -1: needed to compare SpliceAI's genomic shift with
+                                     #   SpliceVault's transcript-oriented cryptic-site offsets
+    # --- SpliceVault (300K-RNA) plugin: the most frequent natural mis-splicing events at the site
+    #     SpliceAI predicts lost — exon skipping vs which cryptic site, with frame. Review evidence,
+    #     never a gate; optional (Step 2 warns when the table is absent). See splice.py.
+    "splicevault_top_events": "vep_SpliceVault_top_events",
+    "splicevault_out_of_frame": "vep_SpliceVault_out_of_frame_events",
+    "splicevault_site_pos": "vep_SpliceVault_site_pos",
+    "splicevault_site_type": "vep_SpliceVault_site_type",
+    "splicevault_site_samples": "vep_SpliceVault_site_sample_count",
+    "splicevault_site_max_depth": "vep_SpliceVault_site_max_depth",
+    "splicevault_spliceai_delta": "vep_SpliceVault_SpliceAI_delta",
     # --- functional prediction ---
     # CADD from the dedicated plugin (CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep):
     # genome-wide, SNV+indel. Alongside SpliceAI it is one of only TWO keep-paths for
@@ -585,6 +597,46 @@ def spliceai_components(variant):
     dp = {e: _int_field(variant, "spliceai_dp_" + _splice.EVENT_SUFFIX[e].lower())
           for e in _splice.EVENTS}
     return ds, dp
+
+
+def strand(variant) -> Optional[int]:
+    """VEP STRAND of the picked transcript: 1 or -1, else None."""
+    v = _int_field(variant, "strand")
+    return v if v in (1, -1) else None
+
+
+# --- SpliceVault (src/hprv/splice.py) ------------------------------------------
+def _str_joined(variant, key) -> Optional[str]:
+    """A String INFO field that split-vep may have typed Number=.: a tuple joins with ','."""
+    v = _raw(variant, key)
+    if v is None:
+        return None
+    if isinstance(v, (tuple, list)):
+        v = ",".join(str(x) for x in v)
+    s = str(v)
+    return None if s in ("", ".") else s
+
+
+def splicevault_top_events(variant) -> Optional[str]:
+    """The plugin's ranked event list, verbatim (VEP joins the list with `&`)."""
+    return _str_joined(variant, "splicevault_top_events")
+
+
+def splicevault_events(variant) -> list:
+    return _splice.parse_splicevault_events(splicevault_top_events(variant))
+
+
+def splicevault_out_of_frame(variant) -> Optional[float]:
+    """Fraction of the top events that shift the frame, or None."""
+    return _max_float(variant, "splicevault_out_of_frame")
+
+
+def splicevault_site_type(variant) -> Optional[str]:
+    return _str(variant, "splicevault_site_type")
+
+
+def splicevault_site_samples(variant) -> Optional[int]:
+    return _int_field(variant, "splicevault_site_samples")
 
 
 def spliceai_event(variant, floor: float = 0.2) -> dict:

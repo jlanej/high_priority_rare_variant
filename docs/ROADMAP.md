@@ -93,7 +93,10 @@ carriers show a second hit; high impact but a new matched-tumor pipeline.
   before publication (see prioritization.md §6).
 - **Constitutional-mosaic tier** (VAF 0.03–0.30, beta-binomial vs DP) — the rigid 0.25 AB floor drops
   mosaic TP53/NF1; shares VAF machinery with a **CHIP confounder flag**.
-- **Extended-window splicing** (SpliceVault / Pangolin) for deep-intronic/cryptic pseudoexons.
+- **Extended-window splicing** — DONE in part: SpliceVault (300K-RNA) runs as a Step-2 plugin
+  (`resources.vep.splicevault`; `splicevault_*` columns + `splicevault_agreement` against the SpliceAI
+  event) and Step 5b re-scores the called set live at −D 4999 (`spliceai_wide_*`). Remaining:
+  Pangolin as a second, independently-trained predictor for deep-intronic/cryptic pseudoexons.
 - **Age-dependent penetrance model** (gated on #4); **per-gene predictor calibration override table**
   (ClinGen VCEP cutoffs); **PMS2/PMS2CL paralog resolution** (short-read partial rescue);
   **STR/ExpansionHunter** (low CPS relevance — neuro/general-rare-disease only).

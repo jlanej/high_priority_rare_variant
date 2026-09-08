@@ -119,7 +119,9 @@ SPLICEAI_FIELDS="SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG Spl
 want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE EXON INTRON HGVSc HGVSp cDNA_position \
       CDS_position Protein_position MANE_SELECT NMD \
       CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS \
-      REVEL am_pathogenicity am_class"
+      REVEL am_pathogenicity am_class STRAND \
+      SpliceVault_top_events SpliceVault_out_of_frame_events SpliceVault_site_pos SpliceVault_site_type \
+      SpliceVault_site_sample_count SpliceVault_site_max_depth SpliceVault_SpliceAI_delta"
 
 # The $OUT-complete short-circuit applies only to run styles that PRODUCE $OUT (default, ingest,
 # gather). --shard-contig produces a per-contig shard and --emit-shard-manifest produces a manifest.
@@ -147,7 +149,7 @@ if [[ -f "$_kin" ]]; then
     _vkey+="-$(cksum <<<"recipe=${VEP_RECIPE[*]}" | awk '{print $1}')"   # a changed flag re-annotates
     for _res in "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
                 "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
-                "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}"; do
+                "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_SPLICEVAULT:-}"; do
         if is_set "$_res" && [[ -e "$_res" ]]; then
             _vkey+="-$(cksum <<<"$_res$(hprv_stat_key "$_res")" | awk '{print $1}')"
         else
@@ -180,7 +182,7 @@ binds="$outdir $HPRV_TMPDIR"
 for r in "$SITES" "$REF" "$PRE_VEP" "${HPRV_VEP_CACHE:-}" "${HPRV_VEP_PLUGINS:-}" \
          "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
          "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
-         "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_CLINVAR_VCF:-}" \
+         "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}" "${HPRV_SPLICEVAULT:-}" "${HPRV_CLINVAR_VCF:-}" \
          "${HPRV_GNOMAD_SITES:-}"; do
     is_set "$r" && [[ -e "$r" ]] && binds+=" $(abspath_dir "$r")"
 done
@@ -387,6 +389,18 @@ else
         vep_args+=(--plugin "AlphaMissense,file=${HPRV_ALPHAMISSENSE},transcript_match=1")
     else warn "AlphaMissense plugin inactive — no effect on the screen; Step 9's missense tier loses the SVI-endorsed predictor that reaches Strong on constrained genes. See docs/resources.md#alphamissense."; fi
 
+    # SpliceVault (300K-RNA; Dawes 2023): for a variant SpliceAI predicts to destroy a splice site,
+    # the most frequent natural mis-splicing events at THAT site — exon skipping vs which cryptic
+    # donor/acceptor, with frame and the % of ~335k RNA-seq samples supporting each. It is the
+    # complement of the SpliceAI event Step 5 decomposes (SpliceAI: the site is lost; SpliceVault:
+    # what replaces it). Review evidence only — never a gate. Optional + graceful, like CADD; the
+    # plugin takes `file=` and a tabix-indexed table from the Ensembl FTP site (prepare_resources.sh
+    # --only splicevault). It annotates only the transcript its table keys on, so SYMBOL/transcript
+    # choices upstream (-s pick) decide whether a row receives it.
+    if is_set "${HPRV_SPLICEVAULT:-}" && [[ -e "$HPRV_SPLICEVAULT" ]]; then
+        vep_args+=(--plugin "SpliceVault,file=${HPRV_SPLICEVAULT}")
+    else warn "SpliceVault plugin inactive — no empirical mis-splicing outcome (exon skipping vs cryptic site, frame) beside the SpliceAI event; the splicevault_* columns stay blank. See docs/resources.md#splicevault."; fi
+
     if is_set "$SHARD_CONTIG"; then
         # --- scatter (one SLURM array task): annotate a single contig -> shard + .done, then stop.
         # No split-vep, no gather, no $OUT — the dependent gather job assembles the whole. Idempotent
@@ -567,6 +581,14 @@ if is_set "${HPRV_CADD_SNV:-}" && [[ -e "${HPRV_CADD_SNV:-}" ]] && _have CADD_PH
 received a PHRED score — the score files are inert (wrong build, wrong contig naming, truncated download, or a \
 bad .tbi). CADD is the only keep-path for anything below MODERATE impact, so the screen would silently go \
 impact-only. Re-fetch/verify with prepare_resources.sh, or unset cadd_snv/cadd_indel to run deliberately without it."
+fi
+# SpliceVault is review evidence (never a gate), so an empty column WARNS rather than dies — but it
+# must still be said out loud: a table on the wrong build or with a bad .tbi returns nothing, exit 0.
+if is_set "${HPRV_SPLICEVAULT:-}" && [[ -e "${HPRV_SPLICEVAULT:-}" ]] && _have SpliceVault_site_type \
+   && [[ "${n_sites:-0}" -gt 0 ]]; then
+    _n_sv="$(_n_present vep_SpliceVault_site_type)"
+    log "Step 2: SpliceVault events present on $_n_sv / $n_sites sites (only splice-site-disrupting variants in its table carry any)"
+    [[ "${_n_sv:-0}" -gt 0 ]] || warn "SpliceVault is configured and its plugin loaded, but NOT ONE of $n_sites sites received an event — the table is probably on the wrong build, wrongly indexed, or its contig naming differs from this cohort. The splicevault_* columns will be blank."
 fi
 # $HPRV_TMPDIR defaults to the PERSISTENT $W/tmp and is never cleaned, while split.vcf.gz is
 # REWRITTEN every run. index_vcf() is a no-op when any index exists, so a stale index left by a run

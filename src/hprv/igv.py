@@ -50,6 +50,10 @@ COLUMNS = [
     # The SpliceAI event behind the score (Step 5 decomposes it; src/hprv/splice.py): which
     # component, the affected site's position, the effect class and the frame of a cryptic shift.
     "spliceai_event", "spliceai_event_pos", "spliceai_effect", "spliceai_shift_frame",
+    # SpliceVault: the rank-1 empirical mis-splicing event at the lost site, its frame, how it
+    # relates to the SpliceAI event, and the frameshift fraction of the top events.
+    "splicevault_top1_event", "splicevault_top1_frame", "splicevault_agreement",
+    "splicevault_out_of_frame",
     # Calibrated missense predictors (REVEL / AlphaMissense plugins). Filterable in igv.js like
     # every other extra column. Blank on non-missense is EXPECTED — these are missense-only
     # scores, not a coverage gap.
@@ -80,7 +84,8 @@ COLUMNS = [
 CONSUMED_CALLS_COLUMNS = frozenset({
     "chrom", "pos", "ref", "alt", "trio_id", "symbol", "consequence", "impact", "hgvsc", "hgvsp",
     "exon", "mane_select", "nmd_status", "spliceai_event", "spliceai_event_pos", "spliceai_effect",
-    "spliceai_shift_frame",
+    "spliceai_shift_frame", "splicevault_top1_event", "splicevault_top1_frame", "splicevault_agreement",
+    "splicevault_out_of_frame",
     "rarity_af", "mode", "pair_id", "child_gt", "mother_gt", "father_gt",
     "child_gq", "child_dp", "child_ab", "grpmax_af", "max_af", "rarity_oracle", "rarity_basis",
     "faf95", "faf95_group", "nhomalt", "max_af_pops", "cadd", "spliceai_ds",
@@ -255,6 +260,10 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "spliceai_ds": r.get("spliceai_ds"),
                 "spliceai_event": r.get("spliceai_event"), "spliceai_event_pos": r.get("spliceai_event_pos"),
                 "spliceai_effect": r.get("spliceai_effect"), "spliceai_shift_frame": r.get("spliceai_shift_frame"),
+                "splicevault_top1_event": r.get("splicevault_top1_event"),
+                "splicevault_top1_frame": r.get("splicevault_top1_frame"),
+                "splicevault_agreement": r.get("splicevault_agreement"),
+                "splicevault_out_of_frame": r.get("splicevault_out_of_frame"),
                 "revel": r.get("revel"), "alphamissense": r.get("alphamissense"),
                 "alphamissense_class": r.get("alphamissense_class"),
                 # renamed on the way through (clnsig -> clin_sig); clinvar_stars keeps its name

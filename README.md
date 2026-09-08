@@ -22,7 +22,8 @@ only as a lightweight cross-reference, and mtDNA is out of scope.
 
 > 📋 **VEP-centric contract — know what the screen can and cannot see *before* you run it.**
 > Almost every annotation comes from one source: a **VEP 115 GRCh38 cache + the CADD, SpliceAI,
-> REVEL and AlphaMissense plugins** (SpliceAI and REVEL/AlphaMissense are required by default).
+> REVEL, AlphaMissense, NMD and SpliceVault plugins** (SpliceAI and REVEL/AlphaMissense are required
+> by default; SpliceVault is optional review evidence — what the cell does when a splice site is lost).
 > Exactly **two** things are `bcftools annotate`-transferred, because the cache cannot supply them
 > at any price: the **ClinVar sites VCF** (review status ⇒ gold stars, which rank in Step 9 and
 > never gate) and the **gnomAD v4.1 joint slim** (real **`faf95`** + **`nhomalt`**). The slim is

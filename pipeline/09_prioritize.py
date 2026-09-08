@@ -93,6 +93,7 @@ VARIANT_COLUMNS = [
     # 5b did not run) — evidence columns; neither moves a tier
     "spliceai_event", "spliceai_event_pos", "spliceai_effect", "spliceai_shift_frame",
     "spliceai_wide_ds", "spliceai_wide_event", "spliceai_wide_effect", "spliceai_wide_distal",
+    "splicevault_top1_event", "splicevault_top1_frame", "splicevault_agreement",
     "missense_evidence_source", "revel", "alphamissense", "alphamissense_class",
     "cadd", "consequence", "impact", "hgvsc", "hgvsp", "exon", "mane_select",
     "rarity_strength", "rarity_oracle", "rarity_basis", "rarity_af", "grpmax_af", "faf95",
@@ -933,6 +934,8 @@ def main(argv=None) -> int:
                                         "spliceai_ds", "spliceai_event", "spliceai_event_pos",
                                         "spliceai_effect", "spliceai_shift_frame", "spliceai_wide_ds",
                                         "spliceai_wide_event", "spliceai_wide_effect", "spliceai_wide_distal",
+                                        "splicevault_top1_event", "splicevault_top1_frame",
+                                        "splicevault_agreement",
                                         "cadd", "revel", "alphamissense", "alphamissense_class",
                                         "faf95", "faf95_group", "nhomalt", "rarity_af",
                                         "rarity_basis",
