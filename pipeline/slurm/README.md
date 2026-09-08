@@ -1,14 +1,22 @@
 # Distributed run on SLURM
 
 Runs the pipeline as a coherent SLURM job graph, with **Step 2 (VEP) scattered one
-contig per node** and the rest chained by dependencies:
+contig per node**, **Step 5b (wide-window SpliceAI) scattered one chunk of calls per task**,
+and the rest chained by dependencies:
 
 ```
-prep ─afterok→ plan ─submits→ scatter[array 0..N] ─afterok→ gather ─afterok→ downstream
-(Steps 0–1)    (enumerate       (one contig of        (concat shards +     (Steps 3–8)
-               contigs, submit   VEP+CADD per task)    split-vep + output)
+prep ─afterok→ plan ─submits→ scatter[array 0..N] ─afterok→ gather ─afterok→ calls ─submits→
+(Steps 0–1)    (enumerate       (one contig of        (concat shards +     (Steps 3–5, then
+               contigs, submit   VEP+CADD per task)    split-vep + output)  plan the 5b chunks)
                the rest)
+
+        rescore-scatter[array 0..M] ─afterok→ rescore-gather ─afterok→ downstream
+        (one chunk of calls,                  (merge spliceai_wide_*    (Steps 6–DOWN_TO)
+         live SpliceAI -D 4999)                into the calls table)
 ```
+
+`calls` skips straight to `downstream` when no chunk is pending (rescoring disabled, or every
+variant already in the per-variant cache).
 
 **Coherence.** Every edge is `--dependency=afterok`, so any failure halts everything
 downstream — you never get a call set built from a partial Step 2. As a second guard,
@@ -64,8 +72,8 @@ in `cluster.env`:
 DOWN_TO=7
 ```
 
-The `downstream` job then runs Steps 3–7, and `submit_slurm.sh` finishes with the annotated call
-set, gene ranking and xlsx in `$HPRV_WORK`. Run Step 8 afterwards on a node that can see the
+The `downstream` job then runs Steps 6–7 (Steps 3–5 ran in `calls`), and the graph finishes with
+the annotated call set, gene ranking and xlsx in `$HPRV_WORK`. Run Step 8 afterwards on a node that can see the
 CRAMs — it only reads files already in `$HPRV_WORK`, so it is a plain one-off:
 
 ```sh
@@ -73,7 +81,8 @@ apptainer exec --cleanenv --bind "$HPRV_BINDS" "$HPRV_SIF" \
     run_pipeline.sh --config "$HPRV_CONFIG" --from 8 --to 8
 ```
 
-(`DOWN_FROM` is configurable too, for symmetry; the range must satisfy `3 <= FROM <= TO <= 8`.)
+(`DOWN_FROM` is configurable too; it defaults to 6 because `calls` runs Steps 3–5, and the range
+must satisfy `3 <= FROM <= TO <= 9`. Setting it to 3 re-runs the cheap, idempotent Steps 3–5.)
 The audit summary is re-assembled at the end of each run, so it ends up reflecting Step 8 once
 that runs.
 
@@ -95,6 +104,23 @@ The distributed path produces **byte-identical output to a single in-process VEP
 only the `vep` call is scattered; `split-vep` and every guard run once on the reassembled
 whole. This is enforced by `tests/integration/assert_shard_equivalence.sh` (sharded ==
 single) and exercised in CI.
+
+## Step 5b (SpliceAI wide-window rescoring) as a chunk array
+
+The screen gates on Illumina's precomputed SpliceAI scores (`-D 50`), which cannot see a cryptic
+site or pseudoexon partner further than 50 bp from the variant. Step 5b re-scores every variant in
+`candidates.calls.tsv` live at `-D 4999` and appends `spliceai_wide_*` columns — evidence for review;
+the gate and the Step-9 tier keep reading the precomputed score. At ~1 variant/s/CPU a 20k-variant
+call set is ~6 h serial, so the graph scatters it: the `calls` phase runs Steps 3–5, plans only the
+variants not already in the per-variant cache (`$HPRV_WORK/spliceai_rescore/scores.tsv`) into chunks
+of `resources.vep.spliceai_rescore.chunk_size`, and submits `rescore-scatter` (one chunk per task)
+→ `rescore-gather` (merges into the calls table; dies if any chunk is unscored) → `downstream`.
+
+Knobs in `cluster.env`: `RESCORE_CPUS/MEM/TIME`, `RESCORE_CONCURRENCY`, `RESCORE_GATHER_*`. Scoring
+runs in the image's isolated `spliceai` conda env (TensorFlow); each task sizes TensorFlow's thread
+pools to `RESCORE_CPUS`. Nothing here touches a shared data store, so concurrency can be wide.
+Disable with `resources.vep.spliceai_rescore.enabled: false`; `calls` then submits `downstream`
+directly.
 
 ## Not yet distributed
 

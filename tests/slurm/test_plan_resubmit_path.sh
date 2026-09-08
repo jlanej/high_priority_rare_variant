@@ -68,8 +68,8 @@ echo "recorded re-submissions:"; grep -o 'phase.sbatch [a-z]*' "$T/sbatch.log" |
 check "plan re-submits by the shared-storage path (not the spool)" \
   'grep -q "$SLURM_SRC/phase.sbatch scatter" "$T/sbatch.log" && ! grep -q "$spool/phase.sbatch" "$T/sbatch.log"'
 check "the re-submitted path actually exists" '[[ -f "$SLURM_SRC/phase.sbatch" ]]'
-check "all three phases re-submitted (scatter/gather/downstream)" \
-  'grep -q "phase.sbatch scatter" "$T/sbatch.log" && grep -q "phase.sbatch gather" "$T/sbatch.log" && grep -q "phase.sbatch downstream" "$T/sbatch.log"'
+check "all three phases re-submitted (scatter/gather/calls — calls later submits the 5b array + downstream)" \
+  'grep -q "phase.sbatch scatter" "$T/sbatch.log" && grep -q "phase.sbatch gather" "$T/sbatch.log" && grep -q "phase.sbatch calls" "$T/sbatch.log"'
 
 # (2) WITHOUT the fix (HPRV_SLURM_DIR stripped): SLURM_DIR falls back to $HERE=spool, whose
 #     phase.sbatch does not exist -> the guard must fail LOUDLY, not emit a broken sbatch path.

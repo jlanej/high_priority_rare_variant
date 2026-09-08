@@ -29,6 +29,8 @@ CFG="" FROM=0 TO=9
 S2_PASSTHRU=()
 # Distributed Step-8b (NHF) pass-throughs — see pipeline/slurm/ and 08_igv_export.sh.
 S8_PASSTHRU=()
+# Distributed Step-5b (SpliceAI wide-window rescoring) pass-throughs — see 05b_spliceai_rescore.sh.
+S5_PASSTHRU=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) CFG="$2"; shift 2;;
@@ -40,6 +42,9 @@ while [[ $# -gt 0 ]]; do
         --nhf-emit-manifest)      S8_PASSTHRU+=(--nhf-emit-manifest "$2"); shift 2;;
         --nhf-trio)               S8_PASSTHRU+=(--nhf-trio "$2"); shift 2;;
         --nhf-gather)             S8_PASSTHRU+=(--nhf-gather); shift;;
+        --rescore-emit-manifest)  S5_PASSTHRU+=(--emit-manifest "$2"); shift 2;;
+        --rescore-chunk)          S5_PASSTHRU+=(--chunk "$2"); shift 2;;
+        --rescore-gather)         S5_PASSTHRU+=(--gather); shift;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) die "unknown arg: $1";;
     esac
@@ -182,6 +187,14 @@ if run_step 2 && [[ "$(cfg_get resources.vep.spliceai_backfill.enabled false)" =
     _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
     hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI backfill (Step 2b) is ENABLED but its isolated env is not available at '$_sai_env' (no executable bin/spliceai). That env ships only in the container image — run inside it (apptainer exec hprv.sif ...), point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_backfill.enabled: false to run without the live backfill. See docs/resources.md#spliceai."
 fi
+# Step 5b (wide-window SpliceAI over the called set) needs the same isolated env wherever it SCORES:
+# the serial path and a --rescore-chunk array task. Planning (--rescore-emit-manifest) and the gather
+# do not, so a SLURM `calls` job can plan on a node that never runs TensorFlow.
+if run_step 5 && [[ "$(cfg_get resources.vep.spliceai_rescore.enabled true)" != "false" ]] \
+        && [[ ${#S5_PASSTHRU[@]} -eq 0 || "${S5_PASSTHRU[0]:-}" == "--chunk" ]]; then
+    _sai_env="${HPRV_SPLICEAI_ENV:-/opt/conda/envs/spliceai}"
+    hprv_run -- test -x "$_sai_env/bin/spliceai" || die "SpliceAI wide-window rescoring (Step 5b) is ENABLED (resources.vep.spliceai_rescore.enabled) but its isolated env is not available at '$_sai_env'. It ships only in the container image — run inside it, point HPRV_SPLICEAI_ENV at the env, or set resources.vep.spliceai_rescore.enabled: false."
+fi
 RESOLVED="$W/trios.resolved.tsv"
 
 # ---------------------------------------------------------------------------
@@ -284,9 +297,42 @@ if run_step 4; then
 fi
 
 if run_step 5; then
-    log "== Step 5: inheritance screen =="
-    python3 "$HERE/05_inheritance_screen.py" --manifest "$W/trios.candidates.tsv" \
-        --config "$CFG" --out "$W/candidates.calls.tsv" --qc-report "$W/qc_report.tsv"
+    s5b_on=0; [[ "$(cfg_get resources.vep.spliceai_rescore.enabled true)" != "false" ]] && s5b_on=1
+    s5b_args=(--calls "$W/candidates.calls.tsv" --ref "$HPRV_REF_FASTA" --outdir "$W/spliceai_rescore"
+              --distance "$(cfg_get resources.vep.spliceai_rescore.distance 4999)"
+              --chunk-size "$(cfg_get resources.vep.spliceai_rescore.chunk_size 1000)"
+              --floor "$(cfg_get filters.functional.spliceai_ds_min 0.2)"
+              --threads "$(cfg_get runtime.threads 4)")
+    if [[ ${#S5_PASSTHRU[@]} -gt 0 && "${S5_PASSTHRU[0]:-}" != "--emit-manifest" ]]; then
+        # A distributed Step-5b sub-task (a --rescore-chunk array element, or the gather). Step 5
+        # PROPER IS NOT RE-RUN HERE: concurrent array tasks must never each rewrite
+        # candidates.calls.tsv. The SLURM `calls` phase ran it once, before planning the chunks.
+        if [[ "$s5b_on" -eq 1 ]]; then
+            log "== Step 5b: distributed sub-task (${S5_PASSTHRU[*]}) =="
+            bash "$HERE/05b_spliceai_rescore.sh" "${s5b_args[@]}" "${S5_PASSTHRU[@]}"
+        else
+            log "== Step 5b: disabled (resources.vep.spliceai_rescore.enabled: false) — sub-task ${S5_PASSTHRU[*]} is a no-op =="
+        fi
+    else
+        log "== Step 5: inheritance screen =="
+        python3 "$HERE/05_inheritance_screen.py" --manifest "$W/trios.candidates.tsv" \
+            --config "$CFG" --out "$W/candidates.calls.tsv" --qc-report "$W/qc_report.tsv"
+        # Step 5b: wide-window SpliceAI over the called set — spliceai_wide_* columns appended to
+        # candidates.calls.tsv, scores cached per variant under $W/spliceai_rescore/. Serial here;
+        # --rescore-emit-manifest only PLANS the chunks so a SLURM array can score them
+        # (pipeline/slurm/). Enabled means required: any failure (exit 3 = env unavailable) HALTS.
+        if [[ "$s5b_on" -eq 1 ]]; then
+            log "== Step 5b: SpliceAI wide-window rescoring of the called set =="
+            b_rc=0
+            bash "$HERE/05b_spliceai_rescore.sh" "${s5b_args[@]}" ${S5_PASSTHRU[@]+"${S5_PASSTHRU[@]}"} || b_rc=$?
+            [[ "$b_rc" -eq 0 ]] || die "Step 5b (SpliceAI wide-window rescoring) failed (rc=$b_rc) — see the error above. Set resources.vep.spliceai_rescore.enabled: false to run without it."
+        elif [[ ${#S5_PASSTHRU[@]} -gt 0 ]]; then
+            # --rescore-emit-manifest while disabled: the SLURM planner still needs a manifest to read
+            # (an ABSENT file must never mean "nothing to do"), so write an empty one.
+            : > "${S5_PASSTHRU[1]}"
+            log "== Step 5b: disabled (resources.vep.spliceai_rescore.enabled: false) — wrote an empty chunk manifest to ${S5_PASSTHRU[1]} =="
+        fi
+    fi
 fi
 
 if run_step 6; then
@@ -420,7 +466,7 @@ python3 -m hprv.audit --dir "$HPRV_AUDIT_DIR" --out "$HPRV_AUDIT_DIR/summary.md"
 
 log "Pipeline complete. Key outputs in $W:"
 log "  trios.resolved.tsv  trio_resolution.tsv  qc_report.tsv"
-log "  candidates.calls.tsv  genes.ranked.tsv  hprv_summary.xlsx"
+log "  candidates.calls.tsv (+ spliceai_rescore/scores.tsv, the Step-5b cache)  genes.ranked.tsv  hprv_summary.xlsx"
 log "  igv/variants.tsv (+ crams/ vcfs/ trios.tsv curation.json)"
 log "  variants.prioritized.tsv  genes.prioritized.tsv"
 log "  audit/summary.md  audit/counts.tsv"
