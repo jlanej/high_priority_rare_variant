@@ -96,6 +96,10 @@ def annotate(inp, lookup, out) -> int:
             f["BIOTYPE"] = "protein_coding"
             f["CANONICAL"] = "YES"
             f["MANE_SELECT"] = f"NM_MOCK_{row['gene']}"
+            # HGVS on the picked transcript, so the pass-through into candidates.calls.tsv and
+            # variants.tsv can be asserted end-to-end (Step 5 silently dropped them once).
+            f["HGVSc"] = f"ENST_MOCK_{row['gene']}:c.{v.POS}{v.REF}>{f['Allele']}"
+            f["HGVSp"] = f"ENSP_MOCK_{row['gene']}:p.Mock{v.POS}"
             f["PICK"] = "1"
             if row.get("cadd"):
                 f["CADD_PHRED"] = row["cadd"]

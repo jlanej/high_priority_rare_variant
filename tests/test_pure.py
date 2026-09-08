@@ -3361,6 +3361,118 @@ def test_report_describes_the_run_oracle():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_step5_hgvs_and_info_passthrough_are_dropless():
+    """The VCF->TSV projection in Step 5 was the ONE place an annotation could vanish: vep_HGVSc /
+    vep_HGVSp were lifted in Step 2, carried through Steps 3-4 inside the per-trio VCF, and never
+    read. Now `hgvsc`/`hgvsp` are curated columns and EVERY INFO field the candidate VCF header
+    declares is emitted verbatim as info_<ID> (header order; a `.` reads blank; a Flag reads 1).
+    The prefix keeps the raw hiConfDeNovo (a list of children) apart from the curated flag."""
+    s5 = _load_step5()
+    hdr = ('##INFO=<ID=vep_HGVSc,Number=.,Type=String,Description="x">\n'
+           '##INFO=<ID=vep_HGVSp,Number=.,Type=String,Description="x">\n'
+           '##INFO=<ID=vep_Feature,Number=.,Type=String,Description="x">\n'
+           '##INFO=<ID=hprv_keep_reason,Number=1,Type=String,Description="x">\n'
+           '##INFO=<ID=hiConfDeNovo,Number=.,Type=String,Description="x">\n'
+           '##INFO=<ID=vep_NEVER_SET,Number=1,Type=Float,Description="x">\n'
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="not an INFO line">\n')
+    assert s5.info_ids_from_header(hdr) == ["vep_HGVSc", "vep_HGVSp", "vep_Feature",
+                                            "hprv_keep_reason", "hiConfDeNovo", "vep_NEVER_SET"]
+    info = {"vep_HGVSc": "ENST1:c.100A>T", "vep_HGVSp": "ENSP1:p.Lys34Ter", "vep_Feature": "ENST1",
+            "hprv_keep_reason": "impact_moderate", "hiConfDeNovo": "C,OTHER"}
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, info=info)], header=hdr)
+    assert _calls(rows) == [("dominant", 100, "origin=mat")], _calls(rows)
+    r = rows[0]
+    assert r["hgvsc"] == "ENST1:c.100A>T" and r["hgvsp"] == "ENSP1:p.Lys34Ter", r
+    assert r["info_vep_HGVSc"] == "ENST1:c.100A>T" and r["info_vep_Feature"] == "ENST1"
+    assert r["info_hprv_keep_reason"] == "impact_moderate"
+    # two different facts, two columns: the raw child list vs "is THIS child listed"
+    assert r["info_hiConfDeNovo"] == "C,OTHER" and r["hiConfDeNovo"] == "1", r
+    assert r["info_vep_NEVER_SET"] == "", "a declared-but-absent field is blank, never 0"
+    # the Trio exposes the prefixed block for main()'s union over trios
+    trio = s5.Trio(_FakeVCF([], raw_header=hdr),
+                   {"child": "C", "father": "D", "mother": "M", "sex": "2"}, G.GtThresholds())
+    assert trio.info_cols[:2] == ["info_vep_HGVSc", "info_vep_HGVSp"]
+    # hgvsc/hgvsp sit right after impact in the curated header
+    i = s5.COLS.index("impact")
+    assert s5.COLS[i + 1:i + 3] == ["hgvsc", "hgvsp"], s5.COLS[i:i + 4]
+
+    # The VERBATIM path: a record that renders as a VCF line is parsed as text, so a Float keeps
+    # the VCF's own digits (cyvcf2 would widen the float32), a Flag reads 1, `.` reads blank,
+    # percent-encoding stays encoded, and an undeclared-in-record field reads blank.
+    class _Line:
+        INFO = _INFO({})
+
+        def __str__(self):
+            return ("chr1\t100\t.\tA\tT\t50\tPASS\t"
+                    "vep_HGVSc=ENST1:c.100A%3BT;FLAGGY;vep_Missing=.;vep_AF=1.62583e-05"
+                    "\tGT\t0/1\t0/0\t0/0\n")
+    got = s5.info_values(_Line(), ["vep_HGVSc", "FLAGGY", "vep_Missing", "vep_AF", "vep_Absent"])
+    assert got == {"info_vep_HGVSc": "ENST1:c.100A%3BT", "info_FLAGGY": "1",
+                   "info_vep_Missing": "", "info_vep_AF": "1.62583e-05", "info_vep_Absent": ""}, got
+    # the TYPED fallback (no VCF line available): tuples join with commas, None is blank
+    fv = FakeVar({"vep_gnomADe_NFE_AF": (0.001, 0.004), "vep_X": None})
+    got = s5.info_values(fv, ["vep_gnomADe_NFE_AF", "vep_X"])
+    assert got == {"info_vep_gnomADe_NFE_AF": "0.001,0.004", "info_vep_X": ""}, got
+    assert s5.info_values(fv, []) == {}
+
+
+def test_igv_variants_tsv_passes_unmapped_calls_columns_through():
+    """Step 8 wrote only its fixed COLUMNS (extrasaction='ignore'), silently dropping `flags`
+    beyond origin, hiConfDeNovo, review_prior_crosscheck, the Ensembl `gene` and the whole info_*
+    block. Every calls column not already represented now rides through verbatim after the track
+    columns; `gene` (an Ensembl ID) is renamed gene_id because variants.tsv `gene` is the symbol;
+    a name collision gets a calls_ prefix instead of a silent overwrite or a silent drop."""
+    import csv as _csv
+    from hprv import igv
+    d = tempfile.mkdtemp(prefix="_hprv_igvpass_")
+    try:
+        data = os.path.join(d, "igv")
+        os.makedirs(data, exist_ok=True)
+        manifest = os.path.join(d, "trios.resolved.tsv")
+        _write_tsv(manifest, ["trio_id", "vcf", "ped", "samples"],
+                   [{"trio_id": "T1", "vcf": "x.vcf.gz", "ped": "x.ped", "samples": "KID,DAD,MOM"}])
+        calls = os.path.join(d, "candidates.calls.tsv")
+        cols = ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
+                "consequence", "impact", "hgvsc", "hgvsp", "rarity_af", "rarity_oracle",
+                "child_gt", "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck",
+                "flags", "info_vep_HGVSc", "info_hprv_keep_reason", "frequency"]
+        row = {"trio_id": "T1", "mode": "dominant", "pair_id": "", "chrom": "chr1", "pos": "100",
+               "ref": "A", "alt": "T", "gene": "ENSG00000001", "symbol": "G1",
+               "consequence": "stop_gained", "impact": "HIGH", "hgvsc": "ENST1:c.100A>T",
+               "hgvsp": "ENSP1:p.Lys34Ter", "rarity_af": "1e-05", "rarity_oracle": "faf95",
+               "child_gt": "A/T", "mother_gt": "A/T", "father_gt": "A/A", "hiConfDeNovo": "",
+               "review_prior_crosscheck": "", "flags": "origin=mat;origin_unverified",
+               "info_vep_HGVSc": "ENST1:c.100A>T", "info_hprv_keep_reason": "impact_high",
+               "frequency": "COLLIDE"}
+        _write_tsv(calls, cols, [row])
+        out = os.path.join(data, "variants.tsv")
+        assert igv.build_variants_tsv(calls, manifest, data, out) == 1
+        with open(out) as fh:
+            rd = _csv.DictReader(fh, delimiter="\t")
+            header, got = list(rd.fieldnames), next(rd)
+        assert header[:len(igv.COLUMNS)] == igv.COLUMNS, "curated columns first, positions unchanged"
+        assert len(header) == len(set(header)), "duplicate column names"
+        assert got["gene"] == "G1" and got["gene_id"] == "ENSG00000001", (got["gene"], got["gene_id"])
+        assert got["hgvsc"] == "ENST1:c.100A>T" and got["hgvsp"] == "ENSP1:p.Lys34Ter"
+        assert got["origin"] == "mat" and got["flags"] == "origin=mat;origin_unverified"
+        assert got["info_vep_HGVSc"] == "ENST1:c.100A>T" and got["info_hprv_keep_reason"] == "impact_high"
+        assert got["hiConfDeNovo"] == "" and got["review_prior_crosscheck"] == ""
+        # the curated `frequency` is the oracle value; the colliding calls column is kept aside
+        assert got["frequency"] == "1e-05" and got["calls_frequency"] == "COLLIDE", got["frequency"]
+        # consumed (renamed) calls columns are NOT duplicated
+        for c in ("mode", "symbol", "clnsig", "child_gq"):
+            assert c not in header, c
+        assert igv.passthrough_columns(cols) == [
+            ("gene", "gene_id"), ("hiConfDeNovo", "hiConfDeNovo"),
+            ("review_prior_crosscheck", "review_prior_crosscheck"), ("flags", "flags"),
+            ("info_vep_HGVSc", "info_vep_HGVSc"), ("info_hprv_keep_reason", "info_hprv_keep_reason"),
+            ("frequency", "calls_frequency")]
+        assert igv.passthrough_columns(None) == []
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run_all():
     import inspect
     fns = [f for n, f in sorted(globals().items())
