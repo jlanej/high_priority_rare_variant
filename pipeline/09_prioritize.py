@@ -57,7 +57,7 @@ import sys
 
 from hprv import audit
 from hprv import prioritize as P
-from hprv.config import get, load_config
+from hprv.config import get, get_bool, load_config
 
 GENE_KEYS = ("gene", "gene_symbol", "symbol")
 
@@ -89,8 +89,12 @@ VARIANT_COLUMNS = [
     "priority_points_prior", "rank_prior", "rank_delta", "cap_applied",
     "variant_tier", "variant_tier_reason", "molecular_effect_class",
     "nmd_status", "plof_confidence", "spliceai_status", "spliceai_ds",
+    # the event behind the precomputed score, and the Step-5b wide-window rescoring (blank when
+    # 5b did not run) — evidence columns; neither moves a tier
+    "spliceai_event", "spliceai_event_pos", "spliceai_effect", "spliceai_shift_frame",
+    "spliceai_wide_ds", "spliceai_wide_event", "spliceai_wide_effect", "spliceai_wide_distal",
     "missense_evidence_source", "revel", "alphamissense", "alphamissense_class",
-    "cadd", "consequence", "impact", "hgvsc", "hgvsp",
+    "cadd", "consequence", "impact", "hgvsc", "hgvsp", "exon", "mane_select",
     "rarity_strength", "rarity_oracle", "rarity_basis", "rarity_af", "grpmax_af", "faf95",
     "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "rarity_driven_by_single_group",
@@ -502,6 +506,19 @@ def main(argv=None) -> int:
     min_ctrl = args.min_control_genes if args.min_control_genes >= 0 else \
         int(get(cfg, f"{pfx}.gene_downweight.min_control_genes", 1000))
     prior_enabled = bool(get(cfg, f"{pfx}.composite.gene_list_prior.enabled", False))
+    # V5 depends on nmd_status=triggering (Step 5, from the VEP NMD plugin). A config.yaml copied
+    # from the example BEFORE the plugin was wired still carries the retired
+    # `nmd_escape: {enabled: false, penultimate_exon_nt: 50}` line, which would silently cap every
+    # pLoF at V4 again. Say so, loudly, when the input actually carries verdicts the switch discards.
+    nmd_on = get_bool(cfg, f"{pfx}.variant_tier.nmd_escape.enabled", True)
+    n_trig = sum(1 for r in variants if str(r.get("nmd_status") or "").strip().lower() == "triggering")
+    if not nmd_on and n_trig:
+        sys.stderr.write(
+            f"WARN: prioritization.variant_tier.nmd_escape.enabled is FALSE while {n_trig} input rows "
+            "carry nmd_status=triggering — V5 is switched off by config and every pLoF stays V4. Set it "
+            "true (or delete the key; the default is true) to use the NMD plugin's verdict.\n")
+    audit.record("09_prioritize", "nmd_escape_enabled", int(nmd_on))
+    audit.record("09_prioritize", "variants_nmd_triggering", n_trig)
     # The Class-B overlay is OFF unless something says otherwise, and `enabled` is that
     # something. An explicit --gene-prior IS the intent, so it always wins; a config PATH is
     # honored only when `enabled: true`. Falling back to the config path unconditionally would
@@ -912,7 +929,10 @@ def main(argv=None) -> int:
         # clinvar_stars IS re-emitted by score_variant (normalised to int or ''), so it comes
         # from `sc` below and must NOT be listed here or the raw value would win.
         row = {c: norm.get(c) for c in ("chrom", "pos", "ref", "alt", "trio_id", "origin",
-                                        "pair_id", "consequence", "impact", "hgvsc", "hgvsp", "spliceai_ds",
+                                        "pair_id", "consequence", "impact", "hgvsc", "hgvsp", "exon", "mane_select",
+                                        "spliceai_ds", "spliceai_event", "spliceai_event_pos",
+                                        "spliceai_effect", "spliceai_shift_frame", "spliceai_wide_ds",
+                                        "spliceai_wide_event", "spliceai_wide_effect", "spliceai_wide_distal",
                                         "cadd", "revel", "alphamissense", "alphamissense_class",
                                         "faf95", "faf95_group", "nhomalt", "rarity_af",
                                         "rarity_basis",
@@ -1097,10 +1117,12 @@ def main(argv=None) -> int:
         f"{n_dw_variants} variants ({dw_frac:.2%}); control ceiling applied to {n_ctrl_ceiling} "
         f"gene(s), CDS-fallback ceiling to {n_cds_ceiling}\n"
         f"  variant tiers: " + ", ".join(f"{t}={tier_v_tally[t]}" for t in P.VARIANT_TIERS) + "\n")
+    if not tier_v_tally.get("V5"):
+        sys.stderr.write(
+            "  NOTE: no variant reached V5 — V5 needs a stop_gained/frameshift with "
+            "nmd_status=triggering (Step 5 resolves it from the VEP NMD plugin; not_assessed means "
+            "the plugin did not run on this annotation) and nmd_escape.enabled.\n")
     sys.stderr.write(
-        "  NOTE: no variant reached V5 — the NMD-escape test needs VEP's EXON / CDS_position / "
-        "transcript length in variants.tsv, so every pLoF is capped at V4. This is a resource "
-        "gap, not a scoring choice.\n"
         "  NOTE: priority_points is NOT an ACMG score. Do not read the totals against "
         "Tavtigian's P>=10 / LP 6-9 / VUS 0-5 bands, and never emit a P/LP/VUS label from them.\n")
     if prior_genes:

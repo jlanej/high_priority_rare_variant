@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import splice as _splice
+
 
 # gnomAD v4.1 genetic-ancestry groups that gnomAD's OWN grpmax includes. grpmax
 # deliberately EXCLUDES asj / fin / mid / ami / remaining: bottlenecked founder groups
@@ -63,6 +65,19 @@ F = {
     "hgvsc": "vep_HGVSc",
     "hgvsp": "vep_HGVSp",
     "mane": "vep_MANE_SELECT",
+    # --- transcript geometry (VEP --numbers / --total_length) and the stock NMD plugin ---
+    # EXON/INTRON are "k/n" on the picked transcript; the three positions read "pos/len" because
+    # Step 2 passes --total_length. NMD is Ensembl's own plugin (no data file): it writes
+    # NMD_escaping_variant on a stop_gained / frameshift / canonical-splice variant that escapes
+    # nonsense-mediated decay (last exon, within 50 nt of the penultimate exon's end, first 100
+    # coding bases, intronless transcript) and NOTHING otherwise — see nmd_status() for why the
+    # blank must be resolved where the header is.
+    "exon": "vep_EXON",
+    "intron": "vep_INTRON",
+    "cdna_position": "vep_cDNA_position",
+    "cds_position": "vep_CDS_position",
+    "protein_position": "vep_Protein_position",
+    "nmd": "vep_NMD",
     # --- functional prediction ---
     # CADD from the dedicated plugin (CSQ CADD_PHRED -> vep_CADD_PHRED via split-vep):
     # genome-wide, SNV+indel. Alongside SpliceAI it is one of only TWO keep-paths for
@@ -500,3 +515,82 @@ def hiconf_denovo_children(variant):
 def is_hiconf_denovo_for(variant, child_id) -> bool:
     kids = hiconf_denovo_children(variant)
     return bool(kids) and child_id in kids
+
+
+# --- transcript geometry, MANE, NMD ------------------------------------------
+def exon(variant) -> Optional[str]:
+    """VEP EXON as 'k/n' (exon number / exon count on the picked transcript), or None."""
+    return _str(variant, "exon")
+
+
+def intron(variant) -> Optional[str]:
+    return _str(variant, "intron")
+
+
+def cds_position(variant) -> Optional[str]:
+    """VEP CDS_position — 'pos/len' under --total_length (Step 2 passes it) — or None."""
+    return _str(variant, "cds_position")
+
+
+def mane_select(variant) -> Optional[str]:
+    """The MANE Select transcript ID when the picked transcript IS MANE Select, else None."""
+    return _str(variant, "mane")
+
+
+# The consequences Ensembl's NMD plugin grades (the four it evaluates the escape rules on).
+NMD_CONSEQUENCES = frozenset({"stop_gained", "frameshift_variant",
+                              "splice_donor_variant", "splice_acceptor_variant"})
+
+
+def nmd_status(variant, plugin_present: bool) -> str:
+    """``escaping`` | ``triggering`` | ``not_assessed`` — resolved ONCE here, where the header is.
+
+    The NMD plugin writes ``NMD_escaping_variant`` when a covered consequence sits in the last
+    exon, within 50 nt of the penultimate exon's end, in the first 100 coding bases, or in an
+    intronless transcript (Abou Tayoun 2018's PVS1 escape rules) — and writes NOTHING otherwise.
+    So a blank means two different things: "assessed, predicted to trigger NMD" (the plugin ran
+    and the consequence is one it covers) or "nobody looked" (no plugin, or a consequence it never
+    grades). A TSV cannot tell those apart later; this function can, because it sees the header.
+    Step 9 consumes the verdict and never re-derives it — the same rule as rarity_basis.
+    """
+    if _str(variant, "nmd"):
+        return "escaping"
+    cq = (consequence(variant) or "").lower()
+    covered = any(tok in NMD_CONSEQUENCES for tok in cq.replace("&", ",").split(","))
+    return "triggering" if (plugin_present and covered) else "not_assessed"
+
+
+# --- SpliceAI event decomposition (src/hprv/splice.py) -----------------------
+def spliceai_symbol(variant) -> Optional[str]:
+    """The gene SpliceAI scored against (its own GENCODE annotation), or None."""
+    return _str(variant, "spliceai_symbol")
+
+
+def _int_field(variant, key) -> Optional[int]:
+    v = _raw(variant, key)
+    if isinstance(v, (tuple, list)):
+        v = v[0] if v else None
+    if v is None or str(v).strip() in ("", "."):
+        return None
+    try:
+        return int(float(str(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def spliceai_components(variant):
+    """(ds, dp) dicts keyed by splice.EVENTS, straight from the four DS_* / DP_* INFO fields."""
+    ds = {e: _max_float(variant, "spliceai_ds_" + _splice.EVENT_SUFFIX[e].lower())
+          for e in _splice.EVENTS}
+    dp = {e: _int_field(variant, "spliceai_dp_" + _splice.EVENT_SUFFIX[e].lower())
+          for e in _splice.EVENTS}
+    return ds, dp
+
+
+def spliceai_event(variant, floor: float = 0.2) -> dict:
+    """splice.decompose() over the precomputed components: WHICH event, WHERE, and the effect.
+
+    The floor is the screen's own spliceai_ds_min, so the same number that says a variant HAS a
+    splice signal decides which components count as events (a max below it names no event)."""
+    ds, dp = spliceai_components(variant)
+    return _splice.decompose(ds, dp, pos=getattr(variant, "POS", None), floor=floor)

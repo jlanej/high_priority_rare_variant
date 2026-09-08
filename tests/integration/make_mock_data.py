@@ -73,6 +73,10 @@ V = []
 def add(**k):
     k.setdefault("cadd", ""); k.setdefault("af", None); k.setdefault("af_pop", "gnomADe_NFE_AF")
     k.setdefault("spliceai", "")
+    # The NMD plugin's verdict: "" = the plugin ran and predicts NMD (blank, as the real plugin
+    # leaves it); "escaping" = NMD_escaping_variant. Only meaningful on the four consequences
+    # the plugin grades (stop_gained, frameshift, canonical splice).
+    k.setdefault("nmd", "")
     # Calibrated missense predictors. Default ABSENT (not 0.0) so most rows exercise the
     # fall-through to CADD/none, and the few that set them exercise the calibrated limbs.
     k.setdefault("revel", ""); k.setdefault("alphamissense", "")
@@ -120,7 +124,7 @@ add(file="A", chrom="chr1", pos=17000, gene="GENE6", csq="stop_gained", impact="
 #     must still be made (never-drop) but flagged parent_ad_unmeasured — the flag that makes a
 #     vacuous pass distinguishable from a measured one.
 add(file="A", chrom="chr1", pos=16000, gene="GENEDN2", csq="stop_gained", impact="HIGH",
-    hidenovo="CH_A",
+    hidenovo="CH_A", nmd="escaping",   # a last-exon stop: NMD-escaping, so it stays V4 (GENE1 -> V5)
     gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)},
     adov={"FA_A": "."})
 # 6c) HALF-CALLED father (`0/.`). With cyvcf2's default strict_gt=False this reads as HOM_REF and
@@ -504,7 +508,7 @@ def main(argv=None) -> int:
     # not_functional, quietly destroying the very comp-het the multiallelic case exists to test.
     with open(os.path.join(W, "annot.tsv"), "w") as fh:
         fh.write("chrom\tpos\tref\talt\tgene\tcsq\timpact\tcadd\taf\taf_pop\tclnsig\t"
-                 "spliceai\trevel\talphamissense\tfaf95\tfaf95_group\tnhomalt\n")
+                 "spliceai\trevel\talphamissense\tfaf95\tfaf95_group\tnhomalt\tnmd\n")
         seen = set()
         for v in V:
             alts = [altbase(v["pos"])]
@@ -520,7 +524,7 @@ def main(argv=None) -> int:
                          f"{v['gene']}\t{v['csq']}\t{v['impact']}\t{v['cadd']}\t{af}\t"
                          f"{v['af_pop']}\t{v['clnsig']}\t{v['spliceai']}\t"
                          f"{v['revel']}\t{v['alphamissense']}\t"
-                         f"{v['faf95']}\t{v['faf95_group']}\t{v['nhomalt']}\n")
+                         f"{v['faf95']}\t{v['faf95_group']}\t{v['nhomalt']}\t{v['nmd']}\n")
 
     # Step-6 tables. The de novo rate table carries mut_syn too, and a gene (GENE5) whose mut_lof
     # is MISSING: Step 6 must impute it from mis+syn (dn_mu_src=imputed), never charge it as 0.
@@ -679,12 +683,13 @@ reference: {{fasta: {W}/reference.fa}}
 resources:
   # Step 2 ingests this instead of invoking `vep` (mock_vep.py writes it). Everything else in
   # Step 2 — build checks, split-vep, selector, frequency guard — runs for real against it.
-  # spliceai_backfill is off by default; pinned explicitly here so a future default flip cannot
-  # silently start invoking TensorFlow in CI (host runs have no such env — it ships only in the
-  # image). The precomputed SpliceAI keep-path is still exercised: mock_vep.py writes
-  # vep_SpliceAI_pred_DS_* directly.
+  # spliceai_backfill (Step 2b, default off) and spliceai_rescore (Step 5b, default ON) are both
+  # disabled here: each runs the live TensorFlow model in the isolated `spliceai` env that ships only
+  # in the image, and CI runs on a bare host. The precomputed SpliceAI keep-path is still exercised
+  # (mock_vep.py writes vep_SpliceAI_pred_DS_*), and the rescoring path has its own stub-model test
+  # (tests/test_spliceai_rescore.sh).
   vep: {{annotated_vcf: {W}/cohort.sites.vep.vcf.gz, version: 115,
-         spliceai_backfill: {{enabled: false}}}}
+         spliceai_backfill: {{enabled: false}}, spliceai_rescore: {{enabled: false}}}}
   # The gnomAD joint slim -> Step 2's SECOND bcftools transfer -> real faf95 + nhomalt. Wired
   # here so the integration exercises the transfer, the 0-match guard, and the faf95-before-proxy
   # precedence in annotations.frequency() — not just the proxy fallback.

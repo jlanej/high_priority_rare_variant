@@ -37,8 +37,8 @@ COLUMNS = [
     # first, and it must not be a different quantity from the one that did the filtering.
     # `rarity_oracle` / `rarity_basis` say which quantity that was and how it arose; `grpmax_af`
     # and `faf95` ride further right as the raw inputs.
-    "trio_id", "gene", "consequence", "impact", "hgvsc", "hgvsp", "frequency", "inheritance",
-    "origin", "pair_id",
+    "trio_id", "gene", "consequence", "impact", "hgvsc", "hgvsp", "exon", "mane_select",
+    "nmd_status", "frequency", "inheritance", "origin", "pair_id",
     "child_gt", "mother_gt", "father_gt", "child_GQ", "child_DP", "child_AB",
     # max_af/max_af_pops are shown next to grpmax_af so a reviewer can spot a call whose
     # frequency is driven by a founder group grpmax excludes (see annotations.GRPMAX_POPS).
@@ -47,6 +47,9 @@ COLUMNS = [
     "rarity_af", "rarity_oracle", "rarity_basis", "grpmax_af", "faf95", "faf95_group",
     "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
+    # The SpliceAI event behind the score (Step 5 decomposes it; src/hprv/splice.py): which
+    # component, the affected site's position, the effect class and the frame of a cryptic shift.
+    "spliceai_event", "spliceai_event_pos", "spliceai_effect", "spliceai_shift_frame",
     # Calibrated missense predictors (REVEL / AlphaMissense plugins). Filterable in igv.js like
     # every other extra column. Blank on non-missense is EXPECTED — these are missense-only
     # scores, not a coverage gap.
@@ -76,6 +79,8 @@ COLUMNS = [
 # igv/variants.prioritized.tsv copies every input column verbatim, so it inherits all of it.
 CONSUMED_CALLS_COLUMNS = frozenset({
     "chrom", "pos", "ref", "alt", "trio_id", "symbol", "consequence", "impact", "hgvsc", "hgvsp",
+    "exon", "mane_select", "nmd_status", "spliceai_event", "spliceai_event_pos", "spliceai_effect",
+    "spliceai_shift_frame",
     "rarity_af", "mode", "pair_id", "child_gt", "mother_gt", "father_gt",
     "child_gq", "child_dp", "child_ab", "grpmax_af", "max_af", "rarity_oracle", "rarity_basis",
     "faf95", "faf95_group", "nhomalt", "max_af_pops", "cadd", "spliceai_ds",
@@ -224,6 +229,8 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "trio_id": trio, "gene": r.get("symbol") or r.get("gene"),
                 "consequence": r.get("consequence"), "impact": r.get("impact"),
                 "hgvsc": r.get("hgvsc"), "hgvsp": r.get("hgvsp"),
+                "exon": r.get("exon"), "mane_select": r.get("mane_select"),
+                "nmd_status": r.get("nmd_status"),
                 # THE ORACLE'S value — the same number as `rarity_af`, shown early because it
                 # is the frequency a reviewer reads first. It was hardwired to `grpmax_af`, so
                 # under the default faf95 oracle the headline column disagreed with the value
@@ -246,6 +253,8 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "nhomalt": r.get("nhomalt"),
                 "max_af_pops": r.get("max_af_pops"), "cadd": r.get("cadd"),
                 "spliceai_ds": r.get("spliceai_ds"),
+                "spliceai_event": r.get("spliceai_event"), "spliceai_event_pos": r.get("spliceai_event_pos"),
+                "spliceai_effect": r.get("spliceai_effect"), "spliceai_shift_frame": r.get("spliceai_shift_frame"),
                 "revel": r.get("revel"), "alphamissense": r.get("alphamissense"),
                 "alphamissense_class": r.get("alphamissense_class"),
                 # renamed on the way through (clnsig -> clin_sig); clinvar_stars keeps its name

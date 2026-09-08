@@ -51,7 +51,7 @@ import math
 import re
 from typing import Optional
 
-from hprv.config import get
+from hprv.config import get, get_bool
 
 # --- tier / state vocabularies (single source of truth for the output columns) ------
 GENE_TIERS = ("T0_no_downweight", "T1_watch", "T2_downweight", "T3_strong_downweight")
@@ -75,8 +75,8 @@ HEMIZYGOUS_MODES = frozenset({"x_linked_recessive", "denovo_x_hemi"})
 GENE_KEYS_LOWER = frozenset({"gene", "gene_symbol", "symbol", "gene_name", "hgnc", "hgnc_symbol",
                              "#gene", "gene_id"})
 
-# HIGH-impact terms that make a variant V5-ELIGIBLE (subject to the NMD gate, which is
-# indeterminate today — see nmd_status()). Mirrors annotations.LOF_CONSEQUENCES minus the
+# HIGH-impact terms that make a variant V5-ELIGIBLE (subject to the NMD verdict Step 5 carries in
+# nmd_status — see nmd_status() below). Mirrors annotations.LOF_CONSEQUENCES minus the
 # structural terms a short-read SNV/indel screen never emits.
 PLOF_CONSEQUENCES = ("stop_gained", "frameshift_variant", "splice_acceptor_variant",
                      "splice_donor_variant", "start_lost")
@@ -922,16 +922,19 @@ def spliceai_status(spliceai_ds, ref="", alt="") -> str:
 
 
 def nmd_status(row=None) -> str:
-    """Always ``INDETERMINATE`` today, and that is a resource gap, not a modelling choice.
+    """``escaping`` | ``triggering`` | ``not_assessed`` — READ from the row, never re-derived.
 
-    Abou Tayoun 2018 grades PVS1 by whether the predicted truncation triggers NMD: a nonsense
-    or frameshift in the last exon, or the last 50 nt of the penultimate exon, escapes NMD and
-    drops from Very Strong. ``variants.tsv`` carries no exon number, CDS position or transcript
-    length, so the test cannot be evaluated and **no pLoF can reach V5**. The fix is small and
-    specific — carry VEP's ``EXON``, ``CDS_position`` and the transcript exon count / CDS
-    length through Step 2 into ``variants.tsv`` — and needs no new resource.
+    Step 5 resolves it where the VCF header is (``annotations.nmd_status``): Ensembl's stock NMD
+    plugin, which Step 2 runs, writes ``NMD_escaping_variant`` on a stop_gained / frameshift /
+    canonical-splice variant in the last exon, within 50 nt of the penultimate exon's end, in the
+    first 100 coding bases, or in an intronless transcript (Abou Tayoun 2018's PVS1 escape rules)
+    and nothing otherwise — so a blank means "triggers NMD" only when the plugin ran AND the
+    consequence is one it grades. A table cannot tell that apart from "nobody looked"; Step 5 can.
+    Any other value (a legacy table, an ingested VEP VCF made without the plugin) reads
+    ``not_assessed``, which keeps every pLoF at V4 — absence of a verdict is never a verdict.
     """
-    return "INDETERMINATE"
+    s = str((row or {}).get("nmd_status") or "").strip().lower()
+    return s if s in ("escaping", "triggering") else "not_assessed"
 
 
 def assign_variant_tier(row, cfg=None) -> dict:
@@ -957,6 +960,11 @@ def assign_variant_tier(row, cfg=None) -> dict:
     mec = molecular_effect_class(row.get("consequence"), imp, row.get("ref"), row.get("alt"))
     sai_state = spliceai_status(row.get("spliceai_ds"))
     nmd = nmd_status(row)
+    # The event behind the score (Step 5's decomposition), for the reason strings only: the tier
+    # is decided by the max delta score exactly as before, so tiers stay comparable run to run.
+    _ev = _s(row.get("spliceai_event"))
+    if _ev:
+        _ev = "[" + _ev + (";" + _s(row.get("spliceai_effect")) if _s(row.get("spliceai_effect")) else "") + "]"
 
     out = {
         "molecular_effect_class": mec,
@@ -1054,18 +1062,32 @@ def assign_variant_tier(row, cfg=None) -> dict:
         merged["variant_tier_reason"] = f"{splice_reason}&{m['variant_tier_reason']}"
         return merged
 
-    # V4 — strong splice, or an NMD-INDETERMINATE pLoF. V5 is defined so the ladder is complete
-    # and the implementation has a target, but it is UNREACHABLE today: every pLoF lands here.
+    # V5/V4 — strong splice, or a pLoF. V5 is a stop_gained/frameshift predicted to TRIGGER NMD
+    # (the VEP NMD plugin's verdict, carried as nmd_status); every other pLoF lands on V4.
     if ds is not None and ds >= sai_strong:
-        out.update(_merge_splice("V4", f"spliceai_ds={ds:.3g}>={sai_strong:g}"))
+        out.update(_merge_splice("V4", f"spliceai_ds={ds:.3g}>={sai_strong:g}{_ev}"))
         return out
     if mec in ("plof", "canonical_splice") and imp == "HIGH":
         note = ("canonical_splice_site" if mec == "canonical_splice" else "plof")
         # Walker 2023 is explicit that a canonical site with a LOW SpliceAI score deserves
         # scrutiny, not automatic Very Strong — so report the score beside the tier.
-        extra = "" if ds is None else f",spliceai_ds={ds:.3g}"
-        out.update(variant_tier="V4",
-                   variant_tier_reason=f"{note}:nmd_status=INDETERMINATE(V5_unreachable){extra}")
+        extra = ("" if ds is None else f",spliceai_ds={ds:.3g}") + (f",spliceai_event={_ev}" if _ev else "")
+        # V5: a nonsense or frameshift predicted to TRIGGER NMD (Abou Tayoun 2018, via the VEP NMD
+        # plugin). Canonical-splice variants stay V4 whatever the verdict: there the plugin judges
+        # the variant's own position, not the aberrant transcript — a proxy, reported not scored.
+        # Escaping and not_assessed pLoF stay V4: absence of a verdict is never a promotion.
+        nmd_on = get_bool(cfg, f"{pfx}.nmd_escape.enabled", True)
+        if nmd_on and nmd == "triggering" and mec == "plof" \
+                and any(t in cq for t in ("stop_gained", "frameshift_variant")):
+            out.update(variant_tier="V5",
+                       variant_tier_reason=f"plof:nmd_status=triggering(VEP_NMD_plugin){extra}")
+            return out
+        why = {"escaping": "nmd_status=escaping(last_exon|penultimate_50nt|first_100nt|intronless)",
+               "triggering": "nmd_status=triggering(canonical_splice:position_proxy,V4_cap)"
+               }.get(nmd, "nmd_status=not_assessed(V5_needs_the_VEP_NMD_plugin)")
+        if nmd == "triggering" and not nmd_on:
+            why = "nmd_status=triggering(nmd_escape.enabled=false,V5_off)"
+        out.update(variant_tier="V4", variant_tier_reason=f"{note}:{why}{extra}")
         return out
 
     # V3 — supporting splice, or a high-CADD missense. The CADD route is a DISCOVERY RANK, not
@@ -1074,7 +1096,7 @@ def assign_variant_tier(row, cfg=None) -> dict:
     # REVEL (PP3 0.644/0.773/0.932). So the tier carries missense_evidence_source so no
     # downstream reader mistakes it for a calibrated call.
     if ds is not None and ds >= sai_sup:
-        out.update(_merge_splice("V3", f"spliceai_ds={ds:.3g}>={sai_sup:g}"))
+        out.update(_merge_splice("V3", f"spliceai_ds={ds:.3g}>={sai_sup:g}{_ev}"))
         return out
     if mec == "missense":
         out.update(_missense_result())
