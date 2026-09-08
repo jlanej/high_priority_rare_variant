@@ -313,7 +313,12 @@ proband are skipped. A "rare" test at limit *L* passes when the oracle value is 
 *L*; the limits are 1 × 10⁻⁴ for the dominant and de novo models (`dominant_max`) and 1 × 10⁻² for
 the recessive and X-linked models (`recessive_max`), with recessive and X-linked calls below
 1 × 10⁻³ additionally flagged `high_conf_rarity`. Every emitted row carries the genotype of all three
-members as allele strings, the child's GQ, depth and AB, the annotations, and a `flags` field.
+members as allele strings, the child's GQ, depth and AB, the curated annotations (including the
+HGVS coding and protein descriptions on the transcript selected in Step 2) and a `flags` field;
+after the curated columns, every INFO field declared in the per-trio candidate VCF header is
+written verbatim under an `info_` prefix (the union over trios, in header order), including the
+complete VEP consequence string for every transcript, so no annotation computed in Step 2 is
+lost in the projection from VCF to table.
 
 **De novo (secondary).** An autosomal de novo requires a heterozygous child with both parents
 homozygous reference, the child passing the de novo predicate, both parents passing the clean-parent
@@ -553,10 +558,13 @@ the QC report and the raw audit counts.
 ### 14.2 IGV review export
 
 Step 8 writes a data directory for the igv.js trio variant-review server: `variants.tsv` with one
-row per candidate call (coordinates, gene, consequence, impact, the oracle frequency as the
-headline `frequency` column, inheritance mode, origin, pair identifier, the three genotypes, the
-proband's GQ, depth and AB, every frequency and predictor column, ClinVar significance and stars,
-the non-human-read columns, and relative paths to the alignment and VCF tracks), per-trio VCF
+row per candidate call (coordinates, gene symbol, consequence, impact, HGVS coding and protein
+descriptions, the oracle frequency as the headline `frequency` column, inheritance mode, origin,
+pair identifier, the three genotypes, the proband's GQ, depth and AB, every frequency and
+predictor column, ClinVar significance and stars, the non-human-read columns, and relative paths
+to the alignment and VCF tracks), followed by every remaining column of the calls table verbatim
+(the full `flags` field, the de novo tag, the Ensembl gene identifier as `gene_id`, and the
+`info_` block), per-trio VCF
 tracks, `sample_qc.tsv` from Step 0, a trio list and an empty curation state. When a
 sample-to-CRAM map is supplied, mini-CRAMs are sliced for each trio member around the candidate
 loci (± 1,000 bp, merged) with `samtools view -C --write-index`, retaining all reads by default,
