@@ -155,7 +155,9 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `zero_ci`/`absent` witness — and `gnomad_AF_grpmax`, from the gnomAD v4.1 joint slim) —
   `bcftools annotate` transfers under their own namespaces on purpose, so which oracle a field
   came from is readable at a glance. Those are the ONLY two transfers. `vep_Consequence`, `vep_IMPACT`, `vep_SYMBOL`, `vep_Gene`, `vep_Feature`,
-  `vep_BIOTYPE`, `vep_HGVSc`, `vep_HGVSp`, `vep_MANE_SELECT`, `vep_CADD_PHRED`, `vep_CLIN_SIG`,
+  `vep_BIOTYPE`, `vep_EXON`, `vep_INTRON`, `vep_HGVSc`, `vep_HGVSp`, `vep_cDNA_position`,
+  `vep_CDS_position`, `vep_Protein_position` ("pos/len" under `--total_length`), `vep_MANE_SELECT`,
+  `vep_NMD` (the stock NMD plugin: `NMD_escaping_variant` or absent), `vep_CADD_PHRED`, `vep_CLIN_SIG`,
   `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` (+ `DP_*`, `SYMBOL`; `annotations.spliceai_ds()` = the max,
   the splice keep-path — present only when the SpliceAI plugin is configured),
   `vep_REVEL` + `vep_am_pathogenicity`/`vep_am_class` (the calibrated missense predictors —
@@ -174,9 +176,12 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **`bcftools +split-vep` does not accept `--threads`** (it is a plugin; passing it aborts the
   step). Thread the VEP call with `--fork` instead.
 - **Step 2 idempotency keys and guards.** Per-contig VEP shard `.done` files are keyed on the VEP
-  INPUTS (union cksum + cache dir/version + plugin file size/mtime), so a changed union or a new
-  plugin file re-runs the shard; the annotated-union `.done` additionally keys `csq_select`, and a
-  union `.done` mismatch invalidates the union. SpliceAI and CADD have VALUE-level 0-lift guards
+  INPUTS (union cksum + cache dir/version + plugin file size/mtime + the `VEP_RECIPE` flag list —
+  a data-less plugin such as NMD, or `--total_length`, has no file to key on and used to be served
+  from stale shards), so a changed union, a new plugin file or a changed flag re-runs the shard;
+  the annotated-union `.done` additionally keys `csq_select`, the oracle and the split-vep `want`
+  lift list (a widened lift re-runs split-vep on the cached shards, not VEP), and a union `.done`
+  mismatch invalidates the union. SpliceAI and CADD have VALUE-level 0-lift guards
   (`die` when configured but no variant received a score). Under `oracle: faf95` a missing or
   FAILED gnomAD slim transfer is a hard stop, including on the `resources.vep.annotated_vcf`
   ingest path (Step 3 also asserts `gnomad_AF_joint` is declared in the header). Ingest mode dies
@@ -204,8 +209,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. Every row carries `rarity_af` (the value
   the run's oracle produced and every gate applied) + `rarity_oracle` + `rarity_basis`, resolved
   ONCE here and consumed downstream, and `child_gt`/`mother_gt`/`father_gt` are cyvcf2 `gt_bases`
-  — allele STRINGS such as `A/T` or `T/T`, never `0/1`. `hgvsc`/`hgvsp` (VEP HGVS on the split-vep-selected transcript) are curated
-  columns, and AFTER the curated columns comes a DROPLESS `info_<ID>` block: every INFO field the
+  — allele STRINGS such as `A/T` or `T/T`, never `0/1`. `hgvsc`/`hgvsp` (VEP HGVS on the split-vep-selected transcript),
+  `exon`/`intron`/`cds_position`/`mane_select`, `nmd_status` (`escaping`/`triggering`/`not_assessed`,
+  resolved HERE with the VCF header: a blank NMD-plugin value is `triggering` only for the four
+  consequences the plugin grades AND only when `vep_NMD` is declared — a TSV cannot tell that apart
+  later) and the SpliceAI event decomposition (`spliceai_event`, `_event_pos`, `_event2`,
+  `_shift_nt`, `_shift_frame`, `_effect`, `spliceai_symbol_mismatch`; `src/hprv/splice.py`, floor =
+  `spliceai_ds_min`) are curated columns, and AFTER the curated columns comes a DROPLESS `info_<ID>` block: every INFO field the
   per-trio candidate VCF header declares, verbatim — including the raw multi-transcript `CSQ` as
   `info_CSQ`, i.e. every transcript's HGVS, not only the picked one (the union over trios, in
   header order; a VCF
@@ -323,6 +333,9 @@ one of the two `bcftools annotate` transfers) — nothing may reach around that.
 | SpliceAI | SpliceAI plugin | `vep_SpliceAI_pred_DS_{AG,AL,DG,DL}` | `spliceai_ds()` (max of 4) | Step 3 rung 2; Step 9 V4/V3/V0 | **HALT** (`spliceai_required: true`) |
 | REVEL | REVEL plugin | `vep_REVEL` | `revel()` | Step 9 missense tier **only** | **HALT** (`missense_predictors_required: true`) |
 | AlphaMissense | AlphaMissense plugin | `vep_am_pathogenicity` / `vep_am_class` | `alphamissense()` | Step 9 missense tier **only** | **HALT** (same knob) |
+| EXON / INTRON / cDNA·CDS·Protein position | VEP cache CSQ (`--numbers`, `--total_length`) | `vep_EXON`, `vep_INTRON`, `vep_CDS_position`, … | `exon()` / `intron()` / `cds_position()` | Step 5 columns (`exon`, `intron`, `cds_position`); reviewer geometry | blank |
+| NMD escape | **NMD plugin** (stock Ensembl, no data file) | `vep_NMD` | `nmd_status(v, plugin_present)` — resolved in Step 5 WITH the header | Step 9's V5 rung (`nmd_status=triggering` only) | `not_assessed` — never a promotion; Step 2 WARNs |
+| SpliceAI event | the four DS/DP components (SpliceAI plugin) | `vep_SpliceAI_pred_D{S,P}_*` | `spliceai_event()` → `splice.decompose()` | Step 5 `spliceai_event`/`_effect`/… columns; Step 9 reason strings | no event named (max still reported) |
 | ClinVar significance | VEP cache CSQ | `vep_CLIN_SIG` | `clnsig()` / `clnsig_is_plp()` | Step 3 P/LP override; Step 9 clinical | cache always has it |
 | ClinVar review status | **transfer** (ClinVar VCF) | `clinvar_CLNREVSTAT` | `clinvar_stars()` | Step 9 clinical damp | WARN, stars `UNAVAILABLE` = FULL weight |
 | faf95 | **transfer** (gnomAD joint slim) | `gnomad_faf95` (+ `_group`) | `faf95()` | **every rarity gate** | **HALT** when `oracle: faf95` (the default) |
@@ -356,6 +369,8 @@ two things that look identical in the output are not the same fact:
 | `moi_coherence` | `coherent` / `discordant` / `unknown` — `unknown` is EXACTLY neutral; hemizygous modes are never `discordant` |
 | `spliceai_status` | `scored` / `not_covered` — absence is not "no effect" |
 | `nhf_status` | `clean` / `flagged` / `not_screened` — three states, never two |
+| `nmd_status` | `escaping` / `triggering` / `not_assessed` — resolved in Step 5 (plugin declared + graded consequence); V5 ONLY via `triggering`, canonical splice never promotes |
+| `spliceai_effect` | `site_loss` / `site_gain` / `cryptic_shift_in_frame` / `cryptic_shift_frameshift` / `cryptic_shift` / `paired_gains` / `paired_losses` / `complex` — WHICH SpliceAI event, not just its size |
 | `clinvar_review_status` | `N_star` or `UNAVAILABLE` (= full weight, NOT 0 stars) |
 
 ## Gotchas that WILL bite you
@@ -649,6 +664,14 @@ two things that look identical in the output are not the same fact:
   (default 200000) caps the MIE/CHARR scan at the first `max_sites` QC-passing autosomal biallelic
   sites, and the chrX sex scan is capped the same way. Quote `mie_rate` as a rate over `n_sites`,
   not as a genome-wide figure.
+- **The SLURM graph has a `calls` phase between `gather` and `downstream`.** It runs Steps 3-5 and
+  PLANS the Step-5b SpliceAI rescoring array (`--rescore-emit-manifest`), then submits
+  `rescore-scatter` (one chunk per task, `--rescore-chunk N`) → `rescore-gather` → `downstream`,
+  or `downstream` alone on an empty manifest. `DOWN_FROM` therefore defaults to **6**. A sub-task
+  never re-runs Step 5 proper (concurrent tasks must not rewrite `candidates.calls.tsv`); the
+  scores are cached PER VARIANT in `spliceai_rescore/scores.tsv` because Step 5 rewrites the
+  calls table every run, and a changed `-D` invalidates the cache. Guards:
+  `tests/test_slurm_rescore_phases.sh`, `tests/test_spliceai_rescore.sh`.
 - **SLURM `DOWN_TO` may be 9** (Step 9 runs on the downstream node); `nhf-plan` now dies when no
   kraken2 DB was supplied instead of scheduling nothing, and the CI smoke test's probes fail the
   job rather than merely printing.
@@ -704,12 +727,12 @@ two things that look identical in the output are not the same fact:
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **83 tests, no network and no VCF.**
+  **87 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
   without it — and `_run_all` then refuses to print "All N passed", instead reporting
-  `70 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
+  `74 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
   cache-invalidation guards. **CI installs pyyaml + openpyxl AND fails the job on that
   "NOT full coverage" line**, so a skipped test can never read as a green run. Before calling this
   suite green, run it the way CI does — with those two installed, not an env that happens to carry

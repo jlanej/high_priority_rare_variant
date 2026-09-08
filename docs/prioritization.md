@@ -13,8 +13,8 @@ column.
 
 | Layer | What it is | Examples here |
 | --- | --- | --- |
-| **IMPLEMENTED** | Step 9 (`pipeline/09_prioritize.py`, `src/hprv/prioritize.py`) does this today | The NB2 trimmed-fit excess statistic + mid-p calibration diagnostic; the six artifact signals; the four-tier down-weight with both ceilings; the V0–V4 variant ladder (V5 defined, unreachable) with the REVEL → AlphaMissense → CADD missense precedence; the ClinVar review-status damp (rank only); the additive `priority_points` composite; both rankings |
-| **TARGET** | Documented, **not** running | V5 (needs NMD annotation), ACMG-graded missense strength (the tier ORDERS on REVEL/AlphaMissense cut points; it assigns no PP3/BP4 weight), pLoF confidence (needs LOFTEE), per-ancestry yield, single-site de-escalation. A ClinVar star *gate* is retired by design — stars rank |
+| **IMPLEMENTED** | Step 9 (`pipeline/09_prioritize.py`, `src/hprv/prioritize.py`) does this today | The NB2 trimmed-fit excess statistic + mid-p calibration diagnostic; the six artifact signals; the four-tier down-weight with both ceilings; the V0–V5 variant ladder (V5 via the VEP NMD plugin's verdict, `nmd_status=triggering`) with the REVEL → AlphaMissense → CADD missense precedence; the ClinVar review-status damp (rank only); the additive `priority_points` composite; both rankings |
+| **TARGET** | Documented, **not** running | ACMG-graded missense strength (the tier ORDERS on REVEL/AlphaMissense cut points; it assigns no PP3/BP4 weight), pLoF confidence (needs LOFTEE), per-ancestry yield, single-site de-escalation. A ClinVar star *gate* is retired by design — stars rank |
 | **REFERENCE** | Literature the design rests on, not a claim about this code | Tavtigian's point system as an ACMG classifier; PVS1 grading; the SVI one-predictor rule |
 
 **The one thing to hold onto before reading any number below.** The excess statistic is a
@@ -590,23 +590,30 @@ resource gaps below make several ACMG codes unimplementable.
 
 | tier | name | definition | status |
 |---|---|---|---|
-| **V5** | high-confidence LoF | HIGH-impact pLoF + NMD-competent + LoF-mechanism gene | **UNREACHABLE** — see below |
-| **V4** | strong splice / unresolved LoF / moderate-calibrated missense | `spliceai_ds ≥ 0.5`; **or** a HIGH-impact pLoF with indeterminate NMD status (= every pLoF today); **or** missense with `revel ≥ 0.773` (Pejaver moderate) | IMPLEMENTED |
+| **V5** | NMD-triggering LoF | a `stop_gained` / `frameshift_variant` whose Step-5 `nmd_status` is `triggering` — the VEP NMD plugin assessed it and did not flag it as escaping; canonical splice never promotes (the plugin judges the variant's position, a proxy) | IMPLEMENTED (`nmd_escape.enabled`, default **true**) |
+| **V4** | strong splice / unpromoted LoF / moderate-calibrated missense | `spliceai_ds ≥ 0.5`; **or** a HIGH-impact pLoF that is NMD-`escaping` or `not_assessed`, or any canonical-splice variant; **or** missense with `revel ≥ 0.773` (Pejaver moderate) | IMPLEMENTED |
 | **V3** | supporting splice / supporting-calibrated missense | `spliceai_ds ≥ 0.2`; **or** missense with `revel ≥ 0.644`; **or** (REVEL absent) `am_pathogenicity ≥ 0.564`; **or** (both absent) `cadd ≥ 25.3` (off-label, `cadd_offlabel`) | IMPLEMENTED |
 | **V2** | between-cuts or unscored missense / in-frame indel | missense scored between a predictor's benign and supporting cuts, or with no predictor at all; `inframe_insertion`/`inframe_deletion` | IMPLEMENTED |
 | **V1** | calibrated-benign missense / non-coding discovery rank | missense with `revel ≤ 0.290` or (REVEL absent) `am_pathogenicity ≤ 0.34`; non-coding/synonymous kept only via the CADD rung, with `spliceai_ds < 0.2` | IMPLEMENTED |
 | **V0** | molecularly benign prediction | `spliceai_ds < 0.1` **and** `cadd < 15` **and** impact ∈ {LOW, MODIFIER} — **hard-caps the total** | IMPLEMENTED |
 
-**No pLoF can currently reach V5, and that is a resource gap rather than a scoring choice.** Abou
-Tayoun 2018 grades PVS1 by whether the predicted truncation triggers nonsense-mediated decay: a
+**V5 is reached only through an NMD verdict, and the verdict is resolved where the evidence is.**
+Abou Tayoun 2018 grades PVS1 by whether the predicted truncation triggers nonsense-mediated decay: a
 nonsense or frameshift in the **last exon or the last 50 nt of the penultimate exon** escapes NMD
 and drops from Very Strong, because the truncated protein may retain function or act by a different
 mechanism. Singer-Berk 2023 shows empirically that applying such a framework materially reduces the
-false-positive rate of predicted-LoF calls. `variants.tsv` carries **no exon number, CDS position
-or transcript length**, so the test cannot be evaluated and every pLoF is capped at **V4** with
-`nmd_status = INDETERMINATE`. **The fix is small, specific, and needs no new resource**: carry
-VEP's `EXON`, `CDS_position` and the transcript's exon count / CDS length through Step 2 into
-`variants.tsv`. This is the single highest-value addition to Step 9.
+false-positive rate of predicted-LoF calls. Step 2 runs Ensembl's stock **NMD plugin** (no data
+file), which writes `NMD_escaping_variant` on a stop_gained / frameshift / canonical-splice variant
+in the last exon, within 50 nt of the penultimate exon's end, in the first 100 coding bases, or in
+an intronless transcript — and writes NOTHING otherwise. A blank therefore means two different
+things, and only the VCF header can tell them apart: Step 5 resolves `nmd_status` to `escaping`,
+`triggering` (the plugin ran AND the consequence is one it grades) or `not_assessed` (no plugin, or
+a consequence it never grades). Step 9 CONSUMES that column and never re-derives it — the same rule
+as `rarity_basis`. `escaping` and `not_assessed` stay at V4: absence of a verdict is never a
+promotion. Canonical-splice variants are reported with their verdict but capped at V4, because for
+them the plugin judges the variant's own position rather than the aberrant transcript. VEP's
+`EXON`/`INTRON`, `cDNA/CDS/Protein_position` (with totals, `--total_length`) now also ride along as
+columns, so the geometry behind the verdict is inspectable.
 
 Additional unresolved pLoF caveats, flagged rather than silently ignored: no LOFTEE, so
 `plof_confidence` is `UNAVAILABLE` everywhere and there is no HC/LC distinction or low-confidence
@@ -629,7 +636,7 @@ letting a blank satisfy a benign rule would cap exactly the variants nobody scor
 
 **The missense tier reads ONE predictor in a fixed precedence, and the column says which.** REVEL
 first (the ClinGen-calibrated choice: `revel_supporting` 0.644 → V3, `revel_moderate` 0.773 → V4,
-`revel_benign_max` 0.290 → V1; no 0.932 "strong" cut is coded because V5 is unreachable), then
+`revel_benign_max` 0.290 → V1; no 0.932 "strong" cut is coded — V5 is the NMD-triggering pLoF rung, not a missense rung), then
 AlphaMissense where REVEL has no score (`alphamissense_supporting` 0.564 → V3,
 `alphamissense_benign_max` 0.34 → V1), then CADD where both are absent. ClinGen SVI says commit to
 **one** predictor chosen before seeing results, so this is a precedence, never a max over whatever
@@ -669,8 +676,8 @@ must never rescue a molecularly-benign prediction.
 **One TARGET check is specified but not wired.** V5 eligibility should additionally require that
 loss of function is an established mechanism for the gene (operationalised as ClinGen dosage
 haploinsufficiency score 3 — a *phenotype-agnostic gene-mechanism annotation*, not a disease gene
-list). It would only ever withhold a *promotion* to V5, never drop a variant. Since V5 is
-unreachable anyway, this check is moot today.
+list). It would only ever withhold a *promotion* to V5, never drop a variant. It is the one
+remaining TARGET check on a rung that is now reachable.
 
 ### 10. Rarity, quality, and the three-state NHF rule
 
@@ -1139,8 +1146,8 @@ participates in the idempotency key so toggling it re-runs rather than serving a
 | Recurrence cap | **+2**, on the carrier count | IMPLEMENTED | The Step-6 null is case-only and saturates (audit A-2) |
 | ClinVar P/LP | **+4**; positive limb × `low_star_scale` **0.5** below `min_review_stars` **2** | IMPLEMENTED | `clinvar_stars` from the Step-2 transfer; blank ⇒ `review_status = UNAVAILABLE` ⇒ full weight. Stars rank, never gate |
 | `gene_list_prior.enabled` | **false** | IMPLEMENTED | Class-B overlay; with it off the two rankings are identical |
-| V5 (NMD-competent LoF) | +8 | **TARGET** | Needs VEP `EXON`/`CDS_position`/transcript length in `variants.tsv` |
-| Calibrated missense (REVEL → AlphaMissense → CADD) | REVEL 0.644 (V3) / 0.773 (V4) / ≤ 0.290 (V1); AlphaMissense 0.564 / ≤ 0.34; CADD 25.3 off-label | IMPLEMENTED | Fixed precedence, never a max; `missense_evidence_source` names which spoke; no 0.932 strong cut (V5 unreachable). Plugins required by default |
+| V5 (NMD-triggering LoF) | +8; `nmd_escape.enabled` **true** | IMPLEMENTED | `nmd_status=triggering` from the VEP NMD plugin, resolved in Step 5; canonical splice / escaping / not_assessed stay V4 |
+| Calibrated missense (REVEL → AlphaMissense → CADD) | REVEL 0.644 (V3) / 0.773 (V4) / ≤ 0.290 (V1); AlphaMissense 0.564 / ≤ 0.34; CADD 25.3 off-label | IMPLEMENTED | Fixed precedence, never a max; `missense_evidence_source` names which spoke; no 0.932 strong cut (V5 is not a missense rung). Plugins required by default |
 | pLoF confidence (LOFTEE HC/LC) | — | **TARGET** | LOFTEE data not bind-mounted |
 | Single-site de-escalation | `max_site_share ≥ 0.5 & n_trios ≥ 5` | **TARGET** | Columns emitted; the de-escalation rule is not wired |
 | Per-ancestry candidate yield | — | **TARGET** | No ancestry labels; the audit A-4 diagnostic |
@@ -1173,9 +1180,9 @@ gene-specific ClinGen VCEP threshold overrides any generic cutoff here.
 - **Per-trio concentration is computed but not flagged.** A gene whose excess comes from 1–2 trios
   is a *sample* problem (contamination, audit **A-1**), not a *locus* problem. `n_trios_obs` is
   emitted; the `n_g ≥ 10 & n_trios ≤ 2` flag is not.
-- **No NMD, no LOFTEE, no parental genotype QC.** The first needs three extra VEP fields carried
-  into `variants.tsv`, the second is a resource question ([ROADMAP.md](ROADMAP.md) R5), the third
-  needs columns Step 5 does not currently carry. (REVEL/AlphaMissense and ClinVar stars are wired.)
+- **No LOFTEE, no parental genotype QC.** The first is a resource question ([ROADMAP.md](ROADMAP.md)
+  R5), the second needs columns Step 5 does not currently carry. (REVEL/AlphaMissense, ClinVar stars
+  and the NMD verdict are wired.)
 - **Segdup and family signals are optional inputs.** Without a segdup table matching the offset
   table's coordinate build, `sig_segdup` is silently off; Step 9 warns, but the corroboration count
   is then measured on five signals rather than six and the tier volumes will differ from the
@@ -1226,7 +1233,7 @@ Retrieved and verified 2026-07-29; PMIDs and DOIs checked against PubMed metadat
   variants.* Genet Med 2015. PMID **25741868**, doi **10.1038/gim.2015.30**
 - Abou Tayoun AN, Pesaran T, DiStefano MT, et al. *Recommendations for interpreting the loss of
   function PVS1 ACMG/AMP variant criterion.* Hum Mutat 2018. PMID **30192042**, doi
-  **10.1002/humu.23626** — NMD-escape grading; why V5 is unreachable here.
+  **10.1002/humu.23626** — NMD-escape grading; the rules the VEP NMD plugin applies for V5.
 - Singer-Berk M, Gudmundsson S, Baxter S, et al. *Advanced variant classification framework reduces
   the false positive rate of predicted loss-of-function variants in population sequencing data.*
   Am J Hum Genet 2023. PMID **37633279**, doi **10.1016/j.ajhg.2023.08.005**
