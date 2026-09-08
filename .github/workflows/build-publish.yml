@@ -75,6 +75,17 @@ jobs:
       - name: SLURM plan-resubmit regression test
         run: bash tests/slurm/test_plan_resubmit_path.sh
 
+      # The Step-5b glue: `calls` plans the SpliceAI rescoring chunks and submits the array, its
+      # gather and the downstream tail (or downstream alone on an empty manifest); the scatter maps
+      # the array index onto --rescore-chunk. Stubbed sbatch/run_pipeline, pure bash.
+      - name: SLURM Step-5b phase glue smoke test
+        run: bash tests/test_slurm_rescore_phases.sh
+
+      # Step 5b end to end against a STUB model: per-variant cache reuse, window invalidation, and
+      # serial == distributed (emit-manifest / chunk / gather) byte for byte. python3 + bash only.
+      - name: Step-5b SpliceAI wide-window rescoring regression test
+        run: bash tests/test_spliceai_rescore.sh
+
       # The image bakes in resources/manifest.env, and prepare_resources.sh reads it by a path
       # relative to itself. .gitignore's `resources/` rule silently swallowed the manifest for
       # most of this repo's life (fixed in e2c09f0): it existed on every dev box, so nothing

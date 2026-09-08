@@ -3,7 +3,8 @@
 # phase.sbatch — one node's worth of the hprv pipeline. Invoked by submit_slurm.sh
 # (and, for the scatter array + gather + downstream, by the `plan` phase) as:
 #     sbatch [resources] phase.sbatch <phase>
-# phase in: prep | plan | scatter | gather | downstream
+# phase in: prep | plan | scatter | gather | calls | rescore-scatter | rescore-gather | downstream
+#           (+ nhf-plan | nhf-scatter | nhf-gather for the optional Step-8b array)
 #
 # Every phase runs run_pipeline.sh INSIDE the container, so config->env resolution
 # and the .done idempotency are identical to a normal run — this file is only the
@@ -11,7 +12,7 @@
 # submit_slurm.sh) AND by the gather step's own shard-completeness check.
 # =============================================================================
 set -euo pipefail
-PHASE="${1:?phase.sbatch needs a phase: prep|plan|scatter|gather|downstream|nhf-plan|nhf-scatter|nhf-gather}"
+PHASE="${1:?phase.sbatch needs a phase: prep|plan|scatter|gather|calls|rescore-scatter|rescore-gather|downstream|nhf-plan|nhf-scatter|nhf-gather}"
 # $HERE is RELIABLE only when this file is run directly (a test, or a manual invocation). Under
 # sbatch it is NOT: SLURM copies the batch script into the job spool dir and runs it as
 # `slurm_script`, so ${BASH_SOURCE[0]} points at /var/spool/slurmd/job<ID>/, not this file on
@@ -75,13 +76,16 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
                 --cpus-per-task="$GATHER_CPUS" --mem="$GATHER_MEM" --time="$GATHER_TIME" \
                 --export=ALL,HPRV_WORK="$HPRV_WORK" \
                 --job-name=hprv-gather "$SELF" gather)
-        down=$(sbatch --parsable --dependency=afterok:"$gath" \
+        # After gather: the `calls` phase runs Steps 3-5, then PLANS the Step-5b SpliceAI rescoring
+        # array and submits it + its gather + the downstream tail (Steps DOWN_FROM..DOWN_TO) —
+        # job-submits-job again, because the chunk count is only known once the calls exist.
+        calls=$(sbatch --parsable --dependency=afterok:"$gath" \
                 --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" ${SLURM_QOS:+--qos="$SLURM_QOS"} \
-                --cpus-per-task="$DOWN_CPUS" --mem="$DOWN_MEM" --time="$DOWN_TIME" \
+                --cpus-per-task="${CALLS_CPUS:-$DOWN_CPUS}" --mem="${CALLS_MEM:-$DOWN_MEM}" --time="${CALLS_TIME:-$DOWN_TIME}" \
                 --export=ALL,HPRV_WORK="$HPRV_WORK" \
-                --job-name=hprv-down "$SELF" downstream)
-        log "submitted scatter=$arr gather=$gath downstream=$down"
-        printf 'scatter %s\ngather %s\ndownstream %s\n' "$arr" "$gath" "$down" > "$HPRV_WORK/slurm_jobids.txt"
+                --job-name=hprv-calls "$SELF" calls)
+        log "submitted scatter=$arr gather=$gath calls=$calls (calls submits rescore-scatter -> rescore-gather -> downstream)"
+        printf 'scatter %s\ngather %s\ncalls %s\n' "$arr" "$gath" "$calls" > "$HPRV_WORK/slurm_jobids.txt"
         ;;
     scatter)
         # One array task -> one contig. $SLURM_ARRAY_TASK_ID indexes the manifest (0-based).
@@ -96,6 +100,63 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         # otherwise — never a partial call set), concats, then finishes Step 2 (split-vep + guards).
         log "gather shards -> annotated union"
         rp --from 2 --to 2 --annotate-gather
+        ;;
+    calls)
+        # Steps 3-5 (selection, per-trio genotypes, the inheritance screen), then PLAN Step 5b —
+        # the wide-window SpliceAI rescoring of the called set — as chunks for an array.
+        # --rescore-emit-manifest runs Step 5 proper ONCE and writes only the PENDING chunks (the
+        # scores are cached per variant), so a resubmit schedules a smaller array. An EMPTY manifest
+        # (rescoring disabled, or everything already cached) goes straight to downstream. The file
+        # must EXIST: an absent manifest must never read as "nothing to do".
+        MANIFEST="$HPRV_WORK/spliceai_rescore/manifest.txt"
+        mkdir -p "$(dirname "$MANIFEST")"
+        # A manifest from an EARLIER attempt must never be read as this run's plan: remove it first,
+        # so the existence check below proves that Step 5b wrote one NOW.
+        rm -f "$MANIFEST"
+        log "Steps 3-5, then planning the SpliceAI rescoring chunks -> $MANIFEST"
+        rp --from 3 --to 5 --rescore-emit-manifest "$MANIFEST"
+        [[ -f "$MANIFEST" ]] || { echo "calls: Step 5b wrote no chunk manifest at $MANIFEST" >&2; exit 1; }
+        n=$(grep -cve '^[[:space:]]*$' "$MANIFEST" 2>/dev/null || true); n=${n:-0}
+        SELF="$SLURM_DIR/phase.sbatch"
+        [[ -f "$SELF" ]] || { echo "calls: cannot re-submit — $SELF not found (HPRV_SLURM_DIR wrong?)" >&2; exit 1; }
+        sub() { sbatch --parsable ${SLURM_ACCOUNT:+--account="$SLURM_ACCOUNT"} \
+                    ${SLURM_PARTITION:+--partition="$SLURM_PARTITION"} ${SLURM_QOS:+--qos="$SLURM_QOS"} \
+                    --export=ALL,HPRV_WORK="$HPRV_WORK" "$@"; }
+        df="${DOWN_FROM:-6}"; dt="${DOWN_TO:-9}"
+        if [[ "$n" -eq 0 ]]; then
+            log "no SpliceAI rescoring chunks pending — submitting downstream (Steps $df-$dt) directly"
+            down=$(sub --cpus-per-task="${DOWN_CPUS:-8}" --mem="${DOWN_MEM:-32G}" --time="${DOWN_TIME:-24:00:00}" \
+                    --job-name=hprv-down "$SELF" downstream)
+            log "submitted downstream=$down"
+            printf 'downstream %s\n' "$down" >> "$HPRV_WORK/slurm_jobids.txt"
+            exit 0
+        fi
+        log "submitting rescore array of $n chunk(s) (max ${RESCORE_CONCURRENCY:-20} concurrent) + gather + downstream (Steps $df-$dt)"
+        arr=$(sub --cpus-per-task="${RESCORE_CPUS:-4}" --mem="${RESCORE_MEM:-16G}" --time="${RESCORE_TIME:-02:00:00}" \
+                --array=0-$((n - 1))%"${RESCORE_CONCURRENCY:-20}" \
+                --job-name=hprv-rescore "$SELF" rescore-scatter)
+        gath=$(sub --dependency=afterok:"$arr" \
+                --cpus-per-task="${RESCORE_GATHER_CPUS:-2}" --mem="${RESCORE_GATHER_MEM:-8G}" --time="${RESCORE_GATHER_TIME:-01:00:00}" \
+                --job-name=hprv-rescore-gather "$SELF" rescore-gather)
+        down=$(sub --dependency=afterok:"$gath" \
+                --cpus-per-task="${DOWN_CPUS:-8}" --mem="${DOWN_MEM:-32G}" --time="${DOWN_TIME:-24:00:00}" \
+                --job-name=hprv-down "$SELF" downstream)
+        log "submitted rescore-scatter=$arr rescore-gather=$gath downstream=$down"
+        printf 'rescore-scatter %s\nrescore-gather %s\ndownstream %s\n' "$arr" "$gath" "$down" >> "$HPRV_WORK/slurm_jobids.txt"
+        ;;
+    rescore-scatter)
+        # One array task -> one chunk of the called set, scored live at the wide window. Idempotent
+        # per chunk (content + window key), so a requeued element re-scores only what did not finish.
+        # Step 5 proper is NOT re-run by a sub-task (run_pipeline.sh), so tasks never race on the
+        # calls table.
+        log "SpliceAI rescoring chunk $SLURM_ARRAY_TASK_ID"
+        rp --from 5 --to 5 --rescore-chunk "$SLURM_ARRAY_TASK_ID"
+        ;;
+    rescore-gather)
+        # afterok on the whole array. Refuses to merge while any chunk is unscored — never a
+        # partial spliceai_wide_* block that looks complete.
+        log "SpliceAI rescoring gather -> candidates.calls.tsv"
+        rp --from 5 --to 5 --rescore-gather
         ;;
     nhf-plan)
         # Step 8b (NHF) as a PER-TRIO array. Requires a COMPLETED Step 8 — the array reads the
@@ -152,12 +213,14 @@ is $SLURM_DIR on shared storage the compute nodes can see?)" >&2; exit 1; }
         rp --from 8 --to 8 --nhf-gather
         ;;
     downstream)
-        # Range is configurable (DOWN_FROM..DOWN_TO, default 3..9 — Step 9 reads only $W and runs
-        # here too). Some sites must stop the distributed graph at Step 7 and run Step 8
-        # (mini-CRAM/igv export) elsewhere — e.g. the source CRAM store is a FUSE mount visible only
-        # on login/interactive nodes, not batch compute. Set DOWN_TO=7 in cluster.env and run
-        # Steps 8-9 separately (see slurm/README.md).
-        df="${DOWN_FROM:-3}"; dt="${DOWN_TO:-9}"
+        # Range is configurable (DOWN_FROM..DOWN_TO, default 6..9 — Steps 3-5 now run in the `calls`
+        # phase ahead of the Step-5b array, and Step 9 reads only $W so it runs here too). Some
+        # sites must stop the distributed graph at Step 7 and run Step 8 (mini-CRAM/igv export)
+        # elsewhere — e.g. the source CRAM store is a FUSE mount visible only on login/interactive
+        # nodes, not batch compute. Set DOWN_TO=7 in cluster.env and run Steps 8-9 separately (see
+        # slurm/README.md). DOWN_FROM=3 is still accepted (it re-runs 3-5, which are cheap and
+        # idempotent; Step 5b re-merges its per-variant cache).
+        df="${DOWN_FROM:-6}"; dt="${DOWN_TO:-9}"
         [[ "$df" =~ ^[0-9]+$ && "$dt" =~ ^[0-9]+$ && "$df" -ge 3 && "$dt" -le 9 && "$df" -le "$dt" ]] \
             || { echo "phase.sbatch: DOWN_FROM..DOWN_TO must satisfy 3<=FROM<=TO<=9 (got '$df'..'$dt')" >&2; exit 2; }
         log "Steps $df-$dt"
