@@ -76,7 +76,9 @@ RUN set -eux; \
     perl -MDBD::SQLite -e1 2>/dev/null || apt-get install -y --no-install-recommends libdbd-sqlite3-perl || true; \
     apt-get clean; rm -rf /var/lib/apt/lists/*; \
     # GUARANTEE: the plugin CODE must be present — fail the build if not
-    for p in LoF CADD dbNSFP SpliceAI; do test -f "/plugins/$p.pm" || { echo "MISSING plugin code: /plugins/$p.pm" >&2; exit 1; }; done; \
+    # ...including the four score plugins Step 2 runs AND the stock NMD plugin (no data file — it is
+    # what Step 9's V5 rung rests on, so a base image that dropped it must fail here, not at run time)
+    for p in LoF CADD dbNSFP SpliceAI REVEL AlphaMissense NMD; do test -f "/plugins/$p.pm" || { echo "MISSING plugin code: /plugins/$p.pm" >&2; exit 1; }; done; \
     # Every LOFTEE runtime Perl dep must load in VEP's Perl (DBI also proves the conda-Perl un-shadow
     # worked; DBD::SQLite = conservation db; Bio::DB::BigFile = GERP bigwig; Bio::Perl) — fail loudly.
     for m in DBI DBD::SQLite Bio::DB::BigFile Bio::Perl; do \

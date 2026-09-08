@@ -213,6 +213,15 @@ def main(argv=None) -> int:
     sai = [r for r in calls if r["symbol"] == "GENESAI"]
     check(sai and all(r.get("spliceai_ds") == "0.55" for r in sai),
           "the SpliceAI delta score (0.55) flows into candidates.calls.tsv for the curator")
+    # ...and is DECOMPOSED: the mock puts the 0.55 in DS_AL, so the event is an acceptor loss with
+    # no paired event -> site_loss (exon skipping / intron retention; frame needs the exon length).
+    check(sai and all(r.get("spliceai_event") == "acceptor_loss" and r.get("spliceai_effect") == "site_loss"
+                      for r in sai),
+          "the SpliceAI event is decomposed: DS_AL=0.55 -> spliceai_event=acceptor_loss, effect=site_loss")
+    check(all(r.get("spliceai_event") == "" for r in calls if not r.get("spliceai_ds")),
+          "no SpliceAI event is named where SpliceAI produced no score")
+    check(sai and all(r.get("spliceai_symbol_mismatch") == "0" for r in sai),
+          "SpliceAI scored the same gene VEP picked -> spliceai_symbol_mismatch=0 (not blank)")
 
     # --- Step 6: recurrence-based gene consolidation ---
     genes = {r["gene"]: r for r in rows(os.path.join(W, "genes.ranked.tsv"))}
@@ -464,14 +473,24 @@ def main(argv=None) -> int:
                       "the V0 mechanism gate itself reads 0.0")
         # ...while a genuine pLoF in the same gene DOES earn the constraint term
         hi = [r for r in pv if r["gene"] == "GENE1" and r["impact"] == "HIGH"]
-        check(hi and all(r["variant_tier"] == "V4" for r in hi),
-              "a HIGH-impact pLoF scores V4 (V5 is unreachable — no NMD annotation)")
+        # GENE1's stop_gained is NOT flagged by the (mock) NMD plugin -> Step 5 resolves
+        # nmd_status=triggering -> V5, the rung that was unreachable before the verdict reached
+        # the tables. GENEDN2's stop_gained IS flagged (a last-exon stop) -> escaping -> V4.
+        check(hi and all(r["nmd_status"] == "triggering" for r in hi),
+              "a stop_gained the NMD plugin did not flag reads nmd_status=triggering")
+        check(hi and all(r["variant_tier"] == "V5" for r in hi),
+              "an NMD-triggering stop_gained reaches V5 (+8), no longer capped at V4")
         check(hi and any(float(r["pts_gene_constraint"]) > 0.0 for r in hi),
               "the same constrained gene DOES earn the constraint term for a credible effect")
-        check(all(r["nmd_status"] == "INDETERMINATE" for r in pv if r["impact"] == "HIGH"),
-              "every pLoF carries nmd_status=INDETERMINATE (no exon/CDS columns exist)")
-        check(all(r["variant_tier"] != "V5" for r in pv),
-              "no variant reaches V5 — unreachable until variants.tsv carries EXON/CDS_position")
+        esc = [r for r in pv if r["gene"] == "GENEDN2"]
+        check(esc and all(r["nmd_status"] == "escaping" and r["variant_tier"] == "V4" for r in esc),
+              "a last-exon stop_gained (NMD_escaping_variant) reads escaping and stays V4")
+        check(all(r["nmd_status"] == "not_assessed" for r in pv if r["impact"] != "HIGH"),
+              "every non-pLoF reads nmd_status=not_assessed (the plugin grades four consequences)")
+        check(all(r["variant_tier"] != "V5" for r in pv if r["nmd_status"] != "triggering"),
+              "V5 is reached ONLY through nmd_status=triggering")
+        check(hi and all(r["exon"] for r in hi),
+              "exon (k/n, VEP --numbers) rides through to variants.prioritized.tsv")
         check(all(r["plof_confidence"] == "UNAVAILABLE" for r in pv),
               "plof_confidence is UNAVAILABLE everywhere (no LOFTEE under this contract)")
 

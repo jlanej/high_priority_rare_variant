@@ -91,6 +91,36 @@ else
 fi
 VEP_VERSION="${HPRV_VEP_VERSION:-115}"
 
+# --- THE ANNOTATION RECIPE -----------------------------------------------------------------------
+# Every VEP flag that shapes the CSQ (paths, --fork and the plugin DATA files are keyed separately),
+# and the CSQ fields split-vep lifts. Both are part of the cache keys below: a flag with no data file
+# behind it (--plugin NMD, --total_length) or a widened lift used to be served from stale shards and
+# a stale union, because the keys tracked only the inputs and the plugin score FILES.
+#   --numbers       EXON/INTRON as "k/n" on the picked transcript
+#   --total_length  cDNA/CDS/Protein positions as "pos/len" (the last-exon and 50-nt tests need len)
+#   --plugin NMD    Ensembl's stock plugin (no data file): NMD_escaping_variant on a stop_gained /
+#                   frameshift / canonical-splice variant in the last exon, within 50 nt of the
+#                   penultimate exon's end, in the first 100 coding bases, or in an intronless
+#                   transcript — the verdict Step 5 resolves into nmd_status and Step 9 needs before
+#                   any pLoF may reach V5.
+VEP_RECIPE=(--symbol --biotype --numbers --total_length --hgvs --canonical --mane
+            --af_gnomade --af_gnomadg --max_af --check_existing
+            --flag_pick --pick_order "mane_select,mane_plus_clinical,canonical,rank"
+            --plugin NMD)
+# The grpmax-ELIGIBLE gnomAD populations (annotations.GRPMAX_POPS) — the proxy rarity oracle.
+# Deliberately NOT the full population set and NOT MAX_AF: see the frequency check below.
+GRPMAX_AF_FIELDS="gnomADe_AFR_AF gnomADe_AMR_AF gnomADe_EAS_AF gnomADe_NFE_AF gnomADe_SAS_AF \
+                  gnomADg_AFR_AF gnomADg_AMR_AF gnomADg_EAS_AF gnomADg_NFE_AF gnomADg_SAS_AF"
+SPLICEAI_FIELDS="SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
+                 SpliceAI_pred_DP_AG SpliceAI_pred_DP_AL SpliceAI_pred_DP_DG SpliceAI_pred_DP_DL \
+                 SpliceAI_pred_SYMBOL"
+# NB `am_pathogenicity`/`am_class` are the AlphaMissense PLUGIN's key names. dbNSFP calls the same
+# quantity `AlphaMissense_score`; using that name here would lift nothing, silently.
+want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE EXON INTRON HGVSc HGVSp cDNA_position \
+      CDS_position Protein_position MANE_SELECT NMD \
+      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS \
+      REVEL am_pathogenicity am_class"
+
 # The $OUT-complete short-circuit applies only to run styles that PRODUCE $OUT (default, ingest,
 # gather). --shard-contig produces a per-contig shard and --emit-shard-manifest produces a manifest.
 # --- CONTENT KEYS ------------------------------------------------------------------------------
@@ -114,6 +144,7 @@ _vkey=""; _skey=""
 if [[ -f "$_kin" ]]; then
     _vkey="$(cksum < "$_kin" | awk '{print $1"-"$2}')"
     _vkey+="-$(cksum <<<"cache=${HPRV_VEP_CACHE:-}|v=${VEP_VERSION}" | awk '{print $1}')"
+    _vkey+="-$(cksum <<<"recipe=${VEP_RECIPE[*]}" | awk '{print $1}')"   # a changed flag re-annotates
     for _res in "${HPRV_CADD_SNV:-}" "${HPRV_CADD_INDEL:-}" \
                 "${HPRV_SPLICEAI_SNV:-}" "${HPRV_SPLICEAI_INDEL:-}" \
                 "${HPRV_REVEL:-}" "${HPRV_ALPHAMISSENSE:-}"; do
@@ -131,7 +162,7 @@ if [[ -f "$_kin" ]]; then
             _skey+="-0"
         fi
     done
-    _skey+="-$(cksum <<<"sel=${HPRV_CSQ_SELECT:-}|oracle=${HPRV_GNOMAD_ORACLE:-faf95}" | awk '{print $1}')"
+    _skey+="-$(cksum <<<"sel=${HPRV_CSQ_SELECT:-}|oracle=${HPRV_GNOMAD_ORACLE:-faf95}|want=${want}" | awk '{print $1}')"
 fi
 if ! is_set "$SHARD_CONTIG" && ! is_set "$EMIT_MANIFEST"; then
     # An unreadable input leaves the key empty -> never skip; recomputing is the safe direction
@@ -305,12 +336,11 @@ else
         --cache --offline --dir_cache "$HPRV_VEP_CACHE" --cache_version "$VEP_VERSION"
         --species homo_sapiens --assembly GRCh38 --fasta "$REF"
         --vcf --compress_output bgzip --force_overwrite --no_stats
-        --symbol --biotype --numbers --hgvs --canonical --mane
-        # The rarity oracle and the clinical evidence, straight from the cache. Without
-        # --af_gnomade/--af_gnomadg there is NO population frequency anywhere in this pipeline;
-        # without --check_existing there is no CLIN_SIG. Both are load-bearing, not extras.
-        --af_gnomade --af_gnomadg --max_af --check_existing
-        --flag_pick --pick_order mane_select,mane_plus_clinical,canonical,rank
+        # The recipe (VEP_RECIPE at the top; part of the shard cache key). The rarity oracle and
+        # the clinical evidence come straight from the cache: without --af_gnomade/--af_gnomadg
+        # there is NO population frequency anywhere in this pipeline; without --check_existing
+        # there is no CLIN_SIG. Both are load-bearing, not extras.
+        "${VEP_RECIPE[@]}"
         --fork "$THREADS"
     )
     is_set "${HPRV_VEP_PLUGINS:-}" && vep_args+=(--dir_plugins "$HPRV_VEP_PLUGINS")
@@ -409,18 +439,8 @@ done <<< "$vep_header"
 [[ -n "$csq_line" ]] || die "VEP output has no CSQ header — annotation failed"
 csq_fmt="${csq_line##*Format: }"; csq_fmt="${csq_fmt%%\">*}"
 [[ -n "$csq_fmt" ]] || die "VEP CSQ header has no Format description"
-# The grpmax-ELIGIBLE gnomAD populations (annotations.GRPMAX_POPS) — the rarity oracle.
-# Deliberately NOT the full population set and NOT MAX_AF: see the frequency check below.
-GRPMAX_AF_FIELDS="gnomADe_AFR_AF gnomADe_AMR_AF gnomADe_EAS_AF gnomADe_NFE_AF gnomADe_SAS_AF \
-                  gnomADg_AFR_AF gnomADg_AMR_AF gnomADg_EAS_AF gnomADg_NFE_AF gnomADg_SAS_AF"
-SPLICEAI_FIELDS="SpliceAI_pred_DS_AG SpliceAI_pred_DS_AL SpliceAI_pred_DS_DG SpliceAI_pred_DS_DL \
-                 SpliceAI_pred_DP_AG SpliceAI_pred_DP_AL SpliceAI_pred_DP_DG SpliceAI_pred_DP_DL \
-                 SpliceAI_pred_SYMBOL"
-# NB `am_pathogenicity`/`am_class` are the AlphaMissense PLUGIN's key names. dbNSFP calls the same
-# quantity `AlphaMissense_score`; using that name here would lift nothing, silently.
-want="Consequence IMPACT SYMBOL Gene Feature BIOTYPE HGVSc HGVSp MANE_SELECT \
-      CADD_PHRED CLIN_SIG gnomADe_AF gnomADg_AF MAX_AF MAX_AF_POPS $GRPMAX_AF_FIELDS $SPLICEAI_FIELDS \
-      REVEL am_pathogenicity am_class"
+# (GRPMAX_AF_FIELDS, SPLICEAI_FIELDS and the `want` lift list are defined at the top, beside the
+#  VEP recipe, because both are part of the cache keys.)
 have_fields=""
 for w in $want; do
     [[ "|$csq_fmt|" == *"|$w|"* ]] && have_fields+="${have_fields:+,}$w"
@@ -457,6 +477,11 @@ produced no scores (wrong build/filenames, un-indexed .tbi, or a VEP/plugin mism
 keep-path is inactive; verify the raw snv/indel VCFs are GRCh38, bgzipped and tabix-indexed."
 fi
 if ! _have CLIN_SIG; then warn "no vep_CLIN_SIG lifted — the ClinVar P/LP override is inactive (re-run VEP with --check_existing)"; fi
+# NMD is a stock plugin with no data file, so a missing column means it did not load (no NMD.pm under
+# --dir_plugins, or an ingested VEP VCF made without it): every pLoF then reads
+# nmd_status=not_assessed and stays V4. Warn, not die — the screen is untouched, only Step 9's V5
+# rung goes dark, and that is visible in the column.
+if ! _have NMD; then warn "no vep_NMD lifted — the NMD plugin did not run (is NMD.pm in --dir_plugins?); Step 9 cannot grade NMD escape and no pLoF reaches V5"; fi
 
 # CSQ selection. VEP --pick emits ONE block; --flag_pick emits ALL blocks with the chosen one
 # marked PICK=1. Under --flag_pick, `-s worst` would silently select the worst consequence ACROSS

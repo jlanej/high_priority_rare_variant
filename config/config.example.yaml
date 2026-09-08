@@ -144,6 +144,22 @@ resources:
       distance: 500         # SpliceAI -D window (bp). Wider than the precomputed -D 50 to catch
                             #   deep-intronic cryptic sites far from the variant — the class the
                             #   precomputed set misses. Larger = slower + more distal calls to review.
+    # Step 5b — wide-window SpliceAI over the CALLED set. ON by default. The screen gates on the
+    # PRECOMPUTED scores (-D 50), which cannot see a cryptic site or a pseudoexon partner further
+    # than 50 bp from the variant; this re-scores every variant in candidates.calls.tsv live at a
+    # wide window and appends spliceai_wide_* columns (the event and its position, a paired event,
+    # the exon-boundary shift and its frame, the effect class, a `distal` flag for an event beyond
+    # +/-50 bp, and the wide-minus-precomputed delta). The gate and the Step-9 tier keep reading the
+    # precomputed score, so results stay comparable run to run; the wide columns ADD evidence.
+    # Cost: ~1 variant/s/CPU, cached PER VARIANT in <work>/spliceai_rescore/scores.tsv (Step 5
+    # rewrites the calls table every run; the cache does not care). ~20k distinct variants is ~6 h
+    # serial or minutes as a SLURM array of chunks (pipeline/slurm/: the `calls` phase plans it and
+    # `rescore-scatter` scores one chunk per task). Needs the isolated `spliceai` env (image-only):
+    # enabled + missing env HALTS at preflight, like the backfill. Set false to run without it.
+    spliceai_rescore:
+      enabled: true
+      distance: 4999        # -D window (bp): the window Walker 2023 evaluated, and the model's max
+      chunk_size: 1000      # variants per chunk = per SLURM array task (~17 min at 1 variant/s)
     # Step 2 (the dominant cost) shards the VEP call BY CONTIG: each contig is an independent run
     # with its own .done, so a job killed at the scheduler walltime RESUMES on re-submit instead
     # of re-annotating from scratch — and the shards can be driven as a SLURM array (one contig
@@ -762,15 +778,16 @@ prioritization:
       # child carries any other sub-1e-2 functional het in the same gene — near-certain in TTN,
       # NEB, RYR1, DMD. No MOI-discordance penalty is applied to a comp-het call in a long gene.
       long_gene_cds_bp: 10000
-    # [reserved] NMD-escape sub-classification of pLoF. Abou Tayoun 2018 (PMID 30192042) grades
-    # PVS1 by whether the predicted truncation triggers NMD: a nonsense or frameshift in the LAST
-    # EXON or the last 50 nt of the penultimate exon escapes NMD and drops from Very Strong.
-    # variants.tsv carries NO exon number, CDS position or transcript length, so the test cannot
-    # be evaluated and NO pLoF CAN REACH V5 — every pLoF is capped at V4 with
-    # nmd_status = INDETERMINATE. This is the single highest-value addition to the whole step and
-    # it needs NO NEW RESOURCE, only three more VEP fields (EXON, CDS_position, transcript exon
-    # count / CDS length) carried through Step 2 into variants.tsv.
-    nmd_escape: {enabled: false, penultimate_exon_nt: 50}   # [reserved]
+    # NMD-escape grading of pLoF (Abou Tayoun 2018, PMID 30192042): a nonsense or frameshift in the
+    # LAST exon, within 50 nt of the penultimate exon's end, in the first 100 coding bases or in an
+    # intronless transcript escapes NMD and does not earn Very Strong. Step 2 runs Ensembl's stock
+    # NMD plugin (no data file; its rules are fixed, hence no knob for the 50 nt), Step 5 resolves
+    # nmd_status = escaping | triggering | not_assessed where the VCF header is, and with `enabled`
+    # a stop_gained/frameshift that TRIGGERS NMD reaches V5 (+8). Canonical-splice variants stay V4
+    # whatever the plugin says (there it judges the variant's position, not the aberrant
+    # transcript). Set false to cap every pLoF at V4 as before; nmd_status is still reported.
+    # not_assessed (an ingested VEP VCF made without the plugin) never reaches V5.
+    nmd_escape: {enabled: true}
   # --- The additive composite: priority_points ---------------------------------------------
   # An interpretable ADDITIVE-POINTS score in the spirit of Tavtigian 2020 (PMID 32720330), and
   # every term is emitted as its own column so a reviewer reads
@@ -795,7 +812,8 @@ prioritization:
   # scale and from which evidence classes are calibrated, and they need review against a real run.
   composite:
     weights:
-      # V5 is UNREACHABLE today (see variant_tier.nmd_escape), so every pLoF scores +4.
+      # V5 (+8) is a stop_gained/frameshift predicted to TRIGGER NMD (variant_tier.nmd_escape);
+      # every other pLoF, canonical splice included, scores V4 (+4).
       molecular: {V5: 8, V4: 4, V3: 2, V2: 1, V1: 0.5, V0: 0}
       rarity: {strong: 2, moderate: 1.5, supporting: 1, permissive: 0.5, unknown: 2, ba1: -8}
       gene_constraint: 1          # pLI >= 0.9 or LOEUF < 0.35 — MECHANISM-GATED (see below)

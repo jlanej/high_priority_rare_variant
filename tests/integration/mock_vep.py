@@ -35,7 +35,8 @@ from cyvcf2 import VCF, Writer
 # exercises Step 2's "lift only the fields that are present" intersection logic.
 CSQ_FIELDS = [
     "Allele", "Consequence", "IMPACT", "SYMBOL", "Gene", "Feature_type", "Feature", "BIOTYPE",
-    "HGVSc", "HGVSp", "CANONICAL", "MANE_SELECT", "PICK",
+    "EXON", "INTRON", "HGVSc", "HGVSp", "cDNA_position", "CDS_position", "Protein_position",
+    "CANONICAL", "MANE_SELECT", "NMD", "PICK",
     "CADD_PHRED", "CADD_RAW", "CLIN_SIG",
     "gnomADe_AF", "gnomADe_AFR_AF", "gnomADe_AMR_AF", "gnomADe_ASJ_AF", "gnomADe_EAS_AF",
     "gnomADe_FIN_AF", "gnomADe_MID_AF", "gnomADe_NFE_AF", "gnomADe_SAS_AF",
@@ -96,6 +97,18 @@ def annotate(inp, lookup, out) -> int:
             f["BIOTYPE"] = "protein_coding"
             f["CANONICAL"] = "YES"
             f["MANE_SELECT"] = f"NM_MOCK_{row['gene']}"
+            # Transcript geometry as VEP --numbers/--total_length write them ("k/n", "pos/len"),
+            # and the stock NMD plugin's verdict from the lookup: `escaping` -> NMD_escaping_variant;
+            # blank = the plugin ran and predicts NMD, exactly as the real plugin leaves it empty.
+            if row["csq"].startswith("intron") or "splice_region" in row["csq"]:
+                f["INTRON"] = f"{1 + v.POS % 6}/9"
+            else:
+                f["EXON"] = f"{1 + v.POS % 7}/10"
+            f["cDNA_position"] = f"{100 + v.POS % 2000}/3200"
+            f["CDS_position"] = f"{50 + v.POS % 2000}/3000"
+            f["Protein_position"] = f"{(50 + v.POS % 2000) // 3}/1000"
+            if row.get("nmd") == "escaping":
+                f["NMD"] = "NMD_escaping_variant"
             # HGVS on the picked transcript, so the pass-through into candidates.calls.tsv and
             # variants.tsv can be asserted end-to-end (Step 5 silently dropped them once).
             f["HGVSc"] = f"ENST_MOCK_{row['gene']}:c.{v.POS}{v.REF}>{f['Allele']}"
@@ -108,6 +121,7 @@ def annotate(inp, lookup, out) -> int:
                 f["CLIN_SIG"] = row["clnsig"]
             if row.get("spliceai"):
                 f["SpliceAI_pred_DS_AL"] = row["spliceai"]   # one event; spliceai_ds() takes the max
+                f["SpliceAI_pred_SYMBOL"] = row["gene"]
             if row.get("revel"):
                 f["REVEL"] = row["revel"]
             if row.get("alphamissense"):

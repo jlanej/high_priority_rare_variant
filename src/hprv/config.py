@@ -107,7 +107,9 @@ def keep_impacts(cfg: dict) -> set:
 _BOOL_KNOBS = ("filters.genotype_qc.require_pass", "filters.denovo.use_hiconf_tag",
                "filters.denovo.crosscheck_prerefinement_pl", "inheritance.emit_denovo",
                "inheritance.emit_dominant", "burden.rank_by_mutational_target",
-               "prioritization.composite.gene_list_prior.enabled")
+               "prioritization.composite.gene_list_prior.enabled",
+               "prioritization.variant_tier.nmd_escape.enabled",
+               "resources.vep.spliceai_rescore.enabled")
 
 
 def validate_filters(cfg: dict):

@@ -1088,14 +1088,14 @@ def test_prioritize_variant_tier_and_mechanism_gating():
     how constrained the gene is."""
     from hprv import prioritize as PR
     V = lambda **kw: PR.assign_variant_tier(kw)["variant_tier"]          # noqa: E731
-    # V4: strong splice, or an NMD-indeterminate pLoF (= every pLoF today)
+    # V4: strong splice, or a pLoF with no NMD verdict (no nmd_status column -> not_assessed)
     assert V(spliceai_ds="0.55", impact="MODIFIER", consequence="intron_variant") == "V4"
     assert V(impact="HIGH", consequence="stop_gained") == "V4"
     assert V(impact="HIGH", consequence="splice_donor_variant") == "V4"
     assert V(impact="HIGH", consequence="frameshift_variant") == "V4"
-    # V5 is UNREACHABLE — no variants.tsv column supports the NMD-escape test
+    # V5 needs a verdict: without one a pLoF stays V4 and says why (see test_prioritize_v5_via_nmd)
     info = PR.assign_variant_tier({"impact": "HIGH", "consequence": "stop_gained"})
-    assert info["nmd_status"] == "INDETERMINATE" and "V5_unreachable" in info["variant_tier_reason"]
+    assert info["nmd_status"] == "not_assessed" and "V5_needs_the_VEP_NMD_plugin" in info["variant_tier_reason"]
     assert info["plof_confidence"] == "UNAVAILABLE"          # no LOFTEE at any price
     # V3: supporting splice, or a high-CADD missense (a DISCOVERY RANK, labelled as such)
     assert V(spliceai_ds="0.25", impact="MODIFIER", consequence="intron_variant") == "V3"
@@ -2452,7 +2452,11 @@ def test_prioritize_config_matches_canonical_defaults():
                       ("outputs.igv.nonhuman_screen.min_reads", 5),
                       ("qc.max_sites", 200000), ("burden.rank_by_mutational_target", True),
                       ("burden.absent_af_floor", 1e-6), ("burden.min_carriers", 2),
-                      ("filters.constraint_weighting.phaplo_min", 0.86)):
+                      ("filters.constraint_weighting.phaplo_min", 0.86),
+                      ("prioritization.variant_tier.nmd_escape.enabled", True),
+                      ("resources.vep.spliceai_rescore.enabled", True),
+                      ("resources.vep.spliceai_rescore.distance", 4999),
+                      ("resources.vep.spliceai_rescore.chunk_size", 1000)):
         got = get(cfg, key, "__MISSING__")
         assert got != "__MISSING__", f"{key} is absent from config.example.yaml"
         assert got == want, f"{key}: config {got} != code default {want}"
@@ -2461,7 +2465,8 @@ def test_prioritize_config_matches_canonical_defaults():
                  "prioritization.composite.gene_list_prior.combine_gene_and_set",
                  "prioritization.signals.segdup.min_identity",
                  "prioritization.excess.offset.covariate_adjust",
-                 "prioritization.composite.emit_both_rankings", "scope.snv_indel_only"):
+                 "prioritization.composite.emit_both_rankings", "scope.snv_indel_only",
+                 "prioritization.variant_tier.nmd_escape.penultimate_exon_nt"):
         assert get(cfg, dead, "__MISSING__") == "__MISSING__", f"dead key {dead} still in config"
 
     # THE OTHER DIRECTION: the CODE's own fallback defaults must reproduce the config. Every probe
@@ -3468,6 +3473,223 @@ def test_igv_variants_tsv_passes_unmapped_calls_columns_through():
             ("info_vep_HGVSc", "info_vep_HGVSc"), ("info_hprv_keep_reason", "info_hprv_keep_reason"),
             ("frequency", "calls_frequency")]
         assert igv.passthrough_columns(None) == []
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_splice_decompose_events_frame_and_parse():
+    """The four SpliceAI components -> WHICH event, WHERE, and the effect. A same-site gain+loss
+    pair is a cryptic shift whose frame follows from |dp_gain - dp_loss| % 3 with no exon structure;
+    a lone loss is site_loss (frame needs the exon length); a missing position never guesses a
+    frame; a max below the floor names no event. `SpliceAI=` parsing keeps ONE gene's entry whole."""
+    from hprv import splice as S
+    # nothing above the floor -> no event (the max still rides along as spliceai_ds elsewhere)
+    d = S.decompose({"acceptor_gain": 0.05, "donor_loss": 0.1}, {}, pos=100)
+    assert d["event"] is None and d["effect"] is None and d["pos"] is None
+    # a single loss -> site_loss, positioned at pos + dp
+    d = S.decompose({"acceptor_loss": 0.6, "donor_gain": 0.1}, {"acceptor_loss": -120}, pos=1000)
+    assert (d["event"], d["pos"], d["effect"], d["event2"]) == ("acceptor_loss", 880, "site_loss", None)
+    assert S.decompose({"donor_gain": 0.3}, {"donor_gain": 7}, pos=1)["effect"] == "site_gain"
+    # gain + loss of the SAME site type -> the exon boundary moves by dp_gain - dp_loss
+    d = S.decompose({"donor_loss": 0.7, "donor_gain": 0.4}, {"donor_loss": 2, "donor_gain": 14}, pos=1000)
+    assert d["event"] == "donor_loss" and d["event2"] == "donor_gain" and d["event2_ds"] == 0.4
+    assert d["shift_nt"] == 12 and d["shift_frame"] == "in_frame" and d["effect"] == "cryptic_shift_in_frame"
+    assert d["pos"] == 1002 and d["event2_pos"] == 1014
+    d = S.decompose({"acceptor_gain": 0.5, "acceptor_loss": 0.45},
+                    {"acceptor_gain": -7, "acceptor_loss": -3}, pos=50)
+    assert d["shift_nt"] == -4 and d["shift_frame"] == "frameshift" and d["effect"] == "cryptic_shift_frameshift"
+    # ...but a missing position leaves the frame UNKNOWN rather than guessed
+    assert S.decompose({"donor_loss": 0.7, "donor_gain": 0.4}, {}, pos=1)["effect"] == "cryptic_shift"
+    # two gains = pseudoexon candidate; two losses = whole-exon loss; mixed site types = complex
+    assert S.decompose({"acceptor_gain": 0.5, "donor_gain": 0.3}, {}, 1)["effect"] == "paired_gains"
+    assert S.decompose({"acceptor_loss": 0.5, "donor_loss": 0.3}, {}, 1)["effect"] == "paired_losses"
+    assert S.decompose({"donor_gain": 0.5, "acceptor_loss": 0.3}, {}, 1)["effect"] == "complex"
+    # a secondary component BELOW the floor is not an event
+    d = S.decompose({"donor_loss": 0.7, "donor_gain": 0.1}, {"donor_loss": 2, "donor_gain": 14}, 1)
+    assert d["effect"] == "site_loss" and d["event2"] is None
+    # the floor is a parameter (the screen's spliceai_ds_min), and ties break in EVENTS order
+    assert S.decompose({"donor_gain": 0.15}, {}, 1, floor=0.1)["event"] == "donor_gain"
+    assert S.decompose({"donor_loss": 0.5, "acceptor_loss": 0.5}, {}, 1)["event"] == "acceptor_loss"
+    # SpliceAI= parsing keeps the STRONGEST gene's entry whole (scores and offsets from ONE gene)
+    ent = S.parse_spliceai_info("T|GENEB|0.05|0.00|0.00|0.10|1|1|1|1,T|GENEA|0.00|0.00|0.40|0.70|-3|-2|14|2")
+    assert ent["symbol"] == "GENEA" and ent["n_genes"] == 2
+    assert ent["ds"]["donor_loss"] == 0.7 and ent["dp"]["donor_loss"] == 2 and ent["dp"]["donor_gain"] == 14
+    assert S.parse_spliceai_info("") is None and S.parse_spliceai_info("T|G|.|.|.|.|.|.|.|.") is None
+    assert S.max_ds(ent["ds"]) == 0.7 and S.max_ds({}) is None
+
+
+def test_step5_splice_event_geometry_and_nmd_columns():
+    """Step 5 decomposes the precomputed SpliceAI event into curated columns, flags a SpliceAI/VEP
+    gene mismatch, carries the transcript geometry (EXON, CDS_position, MANE), and resolves the NMD
+    verdict WHERE THE HEADER IS: a blank plugin value is `triggering` only when the plugin ran AND
+    the consequence is one it grades; otherwise `not_assessed` — never a promotion by absence."""
+    hdr = '##INFO=<ID=vep_NMD,Number=.,Type=String,Description="x">\n'
+    info = {"vep_SpliceAI_pred_DS_DL": "0.7", "vep_SpliceAI_pred_DP_DL": "2",
+            "vep_SpliceAI_pred_DS_DG": "0.4", "vep_SpliceAI_pred_DP_DG": "14",
+            "vep_SpliceAI_pred_SYMBOL": "OTHERGENE", "vep_EXON": "3/10",
+            "vep_CDS_position": "120/3000", "vep_MANE_SELECT": "NM_000001.1"}
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, info=info,
+                           impact="HIGH", csq="stop_gained")], header=hdr)
+    assert _calls(rows) == [("dominant", 100, "origin=mat")], _calls(rows)
+    r = rows[0]
+    assert r["spliceai_ds"] == "0.7"
+    assert r["spliceai_event"] == "donor_loss" and r["spliceai_event_pos"] == "102"
+    assert r["spliceai_event2"] == "donor_gain" and r["spliceai_event2_ds"] == "0.4"
+    assert r["spliceai_event2_pos"] == "114" and r["spliceai_shift_nt"] == "12"
+    assert r["spliceai_shift_frame"] == "in_frame" and r["spliceai_effect"] == "cryptic_shift_in_frame"
+    assert r["spliceai_symbol_mismatch"] == "1", "SpliceAI scored OTHERGENE while VEP picked G1"
+    assert r["exon"] == "3/10" and r["intron"] == "" and r["cds_position"] == "120/3000"
+    assert r["mane_select"] == "NM_000001.1"
+    # the plugin ran (header) and stop_gained is a graded consequence with no flag -> triggering
+    assert r["nmd_status"] == "triggering"
+    # ...flagged -> escaping
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, impact="HIGH",
+                           csq="stop_gained", info={"vep_NMD": "NMD_escaping_variant"})], header=hdr)
+    assert rows[0]["nmd_status"] == "escaping"
+    # ...no plugin in the header -> not_assessed, even for a graded consequence
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5, impact="HIGH",
+                           csq="stop_gained")])
+    assert rows[0]["nmd_status"] == "not_assessed"
+    # ...a consequence the plugin never grades -> not_assessed even with the plugin present
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5)], header=hdr)   # missense
+    assert rows[0]["nmd_status"] == "not_assessed"
+    # no SpliceAI score at all -> no event named, blank mismatch flag (not 0)
+    assert rows[0]["spliceai_event"] == "" and rows[0]["spliceai_effect"] == ""
+    assert rows[0]["spliceai_symbol_mismatch"] == ""
+    # a max BELOW the screen's floor names no event either; the max itself still rides along
+    rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
+                           info={"vep_SpliceAI_pred_DS_AG": "0.15", "vep_SpliceAI_pred_DP_AG": "5",
+                                 "vep_SpliceAI_pred_SYMBOL": "G1"})])
+    assert rows[0]["spliceai_ds"] == "0.15" and rows[0]["spliceai_event"] == ""
+    assert rows[0]["spliceai_symbol_mismatch"] == "0"
+    # the curated header carries the new columns in the documented places
+    s5 = _load_step5()
+    i = s5.COLS.index("hgvsp")
+    assert s5.COLS[i + 1:i + 6] == ["exon", "intron", "cds_position", "mane_select", "nmd_status"]
+    j = s5.COLS.index("spliceai_ds")
+    assert s5.COLS[j + 1:j + 4] == ["spliceai_event", "spliceai_event_pos", "spliceai_event2"]
+
+
+def test_prioritize_v5_via_nmd_triggering_only():
+    """V5 is reached ONLY by a stop_gained/frameshift whose Step-5 nmd_status is `triggering`.
+    Escaping and not_assessed pLoF stay V4 (absence of a verdict is never a promotion), canonical
+    splice stays V4 whatever the plugin said (a position proxy), start_lost is not graded, the knob
+    caps at V4 with the verdict still reported, and the splice rungs name the decomposed event."""
+    from hprv import prioritize as PR
+    T = lambda **kw: PR.assign_variant_tier(kw)              # noqa: E731
+    i = T(impact="HIGH", consequence="stop_gained", nmd_status="triggering")
+    assert i["variant_tier"] == "V5" and i["nmd_status"] == "triggering"
+    assert "VEP_NMD_plugin" in i["variant_tier_reason"], i["variant_tier_reason"]
+    assert T(impact="HIGH", consequence="frameshift_variant", nmd_status="triggering")["variant_tier"] == "V5"
+    assert T(impact="HIGH", consequence="stop_gained", nmd_status="escaping")["variant_tier"] == "V4"
+    assert T(impact="HIGH", consequence="stop_gained", nmd_status="not_assessed")["variant_tier"] == "V4"
+    # a legacy / foreign token is not a verdict
+    assert T(impact="HIGH", consequence="stop_gained", nmd_status="INDETERMINATE")["nmd_status"] == "not_assessed"
+    c = T(impact="HIGH", consequence="splice_donor_variant", nmd_status="triggering")
+    assert c["variant_tier"] == "V4" and "position_proxy" in c["variant_tier_reason"]
+    assert T(impact="HIGH", consequence="start_lost", nmd_status="not_assessed")["variant_tier"] == "V4"
+    off = PR.assign_variant_tier(
+        {"impact": "HIGH", "consequence": "stop_gained", "nmd_status": "triggering"},
+        {"prioritization": {"variant_tier": {"nmd_escape": {"enabled": False}}}})
+    assert off["variant_tier"] == "V4" and off["nmd_status"] == "triggering"
+    assert "V5_off" in off["variant_tier_reason"]
+    # V5 earns the full molecular weight and the full mechanism gate
+    assert PR.default_weights()["molecular"]["V5"] == 8.0 and PR.constraint_gate("V5", "dominant") == 1.0
+    # ...and the composite honours it end to end
+    sc = PR.score_variant({"impact": "HIGH", "consequence": "stop_gained", "nmd_status": "triggering",
+                           "rarity_af": "", "rarity_oracle": "faf95", "inheritance": "dominant"})
+    assert sc["variant_tier"] == "V5" and sc["pts_molecular"] == 8.0
+    # the splice rungs carry the decomposed event in their reason; the tier is unchanged
+    s = T(spliceai_ds="0.55", impact="MODIFIER", consequence="intron_variant",
+          spliceai_event="acceptor_loss", spliceai_effect="site_loss")
+    assert s["variant_tier"] == "V4" and "[acceptor_loss;site_loss]" in s["variant_tier_reason"]
+    s3 = T(spliceai_ds="0.25", impact="MODIFIER", consequence="intron_variant", spliceai_event="donor_gain")
+    assert s3["variant_tier"] == "V3" and "[donor_gain]" in s3["variant_tier_reason"]
+
+
+def test_spliceai_rescore_plan_cache_and_merge():
+    """Step 5b's file logic without the model: distinct non-symbolic variants are planned into
+    chunks minus the per-variant cache; gather refuses a PARTIAL merge; the merged block lands after
+    the curated spliceai_* columns with the event decomposed, the distal flag and the delta against
+    the precomputed score; a re-merge never duplicates the block; a changed window invalidates."""
+    import contextlib
+    import csv as _csv
+    import io
+    from hprv import spliceai_rescore as R
+    d = tempfile.mkdtemp(prefix="_hprv_rescore_")
+    try:
+        calls = os.path.join(d, "candidates.calls.tsv")
+        cols = ["trio_id", "mode", "chrom", "pos", "ref", "alt", "cadd", "spliceai_ds",
+                "spliceai_event", "info_vep_HGVSc"]
+        base = {"trio_id": "T1", "mode": "dominant", "cadd": "", "spliceai_ds": "", "spliceai_event": "",
+                "info_vep_HGVSc": "x"}
+        _write_tsv(calls, cols, [
+            dict(base, chrom="chr1", pos="1000", ref="A", alt="T", cadd="3", spliceai_ds="0.55",
+                 spliceai_event="donor_loss"),
+            dict(base, chrom="chr1", pos="1001", ref="C", alt="G"),
+            dict(base, trio_id="T2", chrom="chr1", pos="1000", ref="A", alt="T", cadd="3",
+                 spliceai_ds="0.55", spliceai_event="donor_loss"),
+            dict(base, mode="compound_het", chrom="chr2", pos="2003", ref="G", alt="*"),
+        ])
+        header, body = R.read_tsv(calls)
+        assert R.variant_keys(header, body) == [("chr1", "1000", "A", "T"), ("chr1", "1001", "C", "G")]
+        out = os.path.join(d, "rescore")
+        quiet = io.StringIO()
+
+        def run(*argv):
+            with contextlib.redirect_stdout(quiet):
+                return R._main(list(argv))
+
+        assert run("plan", "--calls", calls, "--outdir", out, "--distance", "4999", "--chunk-size", "1") == 0
+        manifest = open(os.path.join(out, "manifest.txt")).read().split()
+        assert len(manifest) == 2 and all(os.path.exists(p) for p in manifest)
+        lines = open(manifest[0]).read().splitlines()
+        assert lines[0] == "##fileformat=VCFv4.2" and lines[-1].startswith("chr1\t1000\t.\tA\tT")
+
+        def scored(chunk, records):
+            with open(R.scored_path(chunk), "w") as fh:
+                fh.write("##fileformat=VCFv4.2\n##INFO=<ID=SpliceAI,Number=.,Type=String,"
+                         "Description=\"x\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+                fh.write("".join(r + "\n" for r in records))
+        scored(manifest[0], ["chr1\t1000\t.\tA\tT\t.\t.\tSpliceAI=T|GENEB|0.05|0.00|0.00|0.10|1|1|1|1,"
+                             "T|GENEA|0.00|0.00|0.40|0.70|-3|-2|14|2"])
+        # gather refuses a PARTIAL merge while chunk 2 is unscored
+        assert run("gather", "--calls", calls, "--outdir", out, "--distance", "4999") == 1
+        scored(manifest[1], ["chr1\t1001\t.\tC\tG\t.\t.\tSpliceAI=G|GENEA|0.00|0.60|0.00|0.00|10|-120|3|4"])
+        assert run("gather", "--calls", calls, "--outdir", out, "--distance", "4999") == 0
+        with open(calls) as fh:
+            rd = _csv.DictReader(fh, delimiter="\t")
+            hdr, got = list(rd.fieldnames), list(rd)
+        assert hdr.index("spliceai_wide_ds") == hdr.index("spliceai_event") + 1, hdr
+        assert hdr.index("info_vep_HGVSc") == hdr.index("spliceai_wide_minus_precomputed") + 1
+        a, b, a2, sym = got
+        assert a["spliceai_wide_ds"] == "0.7" and a["spliceai_wide_event"] == "donor_loss"
+        assert a["spliceai_wide_event_pos"] == "1002" and a["spliceai_wide_event2"] == "donor_gain"
+        assert a["spliceai_wide_shift_nt"] == "12" and a["spliceai_wide_shift_frame"] == "in_frame"
+        assert a["spliceai_wide_effect"] == "cryptic_shift_in_frame" and a["spliceai_wide_symbol"] == "GENEA"
+        assert a["spliceai_wide_distal"] == "0" and a["spliceai_wide_minus_precomputed"] == "0.15"
+        assert all(a2[c] == a[c] for c in R.WIDE_COLUMNS), "the same variant in another trio: same cells"
+        assert b["spliceai_wide_ds"] == "0.6" and b["spliceai_wide_event"] == "acceptor_loss"
+        assert b["spliceai_wide_event_pos"] == "881" and b["spliceai_wide_effect"] == "site_loss"
+        assert b["spliceai_wide_distal"] == "1", "an event beyond +/-50 bp is what the screen could not see"
+        assert b["spliceai_wide_minus_precomputed"] == "", "no precomputed score -> no delta, never 0"
+        assert all(sym[c] == "" for c in R.WIDE_COLUMNS), "a symbolic ALT is never scored: blank, not 0"
+        # the cache holds both variants, the chunks are gone, and a re-plan finds nothing pending
+        scores, status = R.load_scores(os.path.join(out, "scores.tsv"), 4999)
+        assert status == "ok" and len(scores) == 2
+        assert not os.path.exists(os.path.join(out, "manifest.txt"))
+        assert run("plan", "--calls", calls, "--outdir", out, "--distance", "4999", "--chunk-size", "1") == 0
+        assert open(os.path.join(out, "manifest.txt")).read() == ""
+        # a gather on the ALREADY-augmented table replaces the block, never duplicates it
+        assert run("gather", "--calls", calls, "--outdir", out, "--distance", "4999") == 0
+        with open(calls) as fh:
+            hdr2 = fh.readline().rstrip("\n").split("\t")
+        assert hdr2 == hdr and len(hdr2) == len(set(hdr2))
+        # a different window is a different quantity: the cache is not reused
+        assert R.load_scores(os.path.join(out, "scores.tsv"), 500)[1] == "distance_mismatch"
+        assert run("plan", "--calls", calls, "--outdir", out, "--distance", "500", "--chunk-size", "10") == 0
+        assert len(open(os.path.join(out, "manifest.txt")).read().split()) == 1
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)

@@ -48,9 +48,19 @@ COLS = [
     # projection: the VCF->TSV column list is the one place an annotation can vanish, which is
     # also why the `info_*` block exists (INFO_PREFIX below).
     "hgvsc", "hgvsp",
+    # Transcript geometry (VEP --numbers/--total_length) and the NMD verdict, resolved HERE where
+    # the VCF header is (annotations.nmd_status): `not_assessed` is not `triggering`.
+    "exon", "intron", "cds_position", "mane_select", "nmd_status",
     "rarity_af", "rarity_oracle", "rarity_basis",
     "grpmax_af", "faf95", "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
+    # The SpliceAI EVENT behind spliceai_ds (src/hprv/splice.py): which of the four components,
+    # the genomic position of the affected site, a paired second event, the exon-boundary shift
+    # and its frame for a gain+loss pair, the effect class, and whether SpliceAI scored a
+    # different gene than VEP picked. The max alone is a gate; this is what a reviewer reads.
+    "spliceai_event", "spliceai_event_pos", "spliceai_event2", "spliceai_event2_ds",
+    "spliceai_event2_pos", "spliceai_shift_nt", "spliceai_shift_frame", "spliceai_effect",
+    "spliceai_symbol_mismatch",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
     # IMPACT=MODERATE and selection.py returns at the impact rung), carried here purely so
     # Step 9's missense tier can be calibrated rather than an off-label CADD rank.
@@ -140,6 +150,7 @@ class Trio:
         # sex must be positively known (1/2) to apply ploidy-aware X/Y logic; unknown != female
         self.sex_known = str(ped.get("sex")) in ("1", "2")
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
+        self.has_nmd = "ID=vep_NMD" in vcf.raw_header    # the NMD plugin ran (annotations.nmd_status)
         # Every INFO field this candidate VCF declares, for the dropless `info_*` pass-through
         # (INFO_PREFIX). Read from the header ONCE per trio; main() unions the blocks over trios.
         self.info_ids = info_ids_from_header(vcf.raw_header)
@@ -147,12 +158,17 @@ class Trio:
 
 
 def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
+    ev = A.spliceai_event(v, floor=float(get(cfg or {}, "filters.functional.spliceai_ds_min", 0.2)))
+    sai_sym, vep_sym = A.spliceai_symbol(v), A.symbol(v)
     row = {
         "trio_id": trio_id, "mode": mode, "pair_id": pair_id,
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
         "hgvsc": A._str(v, "hgvsc") or "", "hgvsp": A._str(v, "hgvsp") or "",
+        "exon": A.exon(v) or "", "intron": A.intron(v) or "",
+        "cds_position": A.cds_position(v) or "", "mane_select": A.mane_select(v) or "",
+        "nmd_status": A.nmd_status(v, gt.has_nmd),
         "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(cfg),
         "rarity_basis": A.rarity_basis(v, cfg),
         "grpmax_af": fmt(A.grpmax_af(v)), "faf95": fmt(A.faf95(v)),
@@ -160,6 +176,13 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         "max_af": fmt(A._max_float(v, "max_af")),
         "max_af_pops": A._str(v, "max_af_pops") or "", "cadd": fmt(A.cadd(v)),
         "spliceai_ds": fmt(A.spliceai_ds(v)),   # max SpliceAI delta score, for reviewer tiering
+        "spliceai_event": ev["event"] or "", "spliceai_event_pos": fmt(ev["pos"]),
+        "spliceai_event2": ev["event2"] or "", "spliceai_event2_ds": fmt(ev["event2_ds"]),
+        "spliceai_event2_pos": fmt(ev["event2_pos"]), "spliceai_shift_nt": fmt(ev["shift_nt"]),
+        "spliceai_shift_frame": ev["shift_frame"] or "", "spliceai_effect": ev["effect"] or "",
+        # blank when either symbol is absent; 1 when SpliceAI scored a different gene than VEP picked
+        "spliceai_symbol_mismatch": ("" if not (sai_sym and vep_sym)
+                                     else ("1" if sai_sym.upper() != vep_sym.upper() else "0")),
         "revel": fmt(A.revel(v)), "alphamissense": fmt(A.alphamissense(v)),
         "alphamissense_class": A.alphamissense_class(v) or "",
         "clnsig": A.clnsig(v) or "",
