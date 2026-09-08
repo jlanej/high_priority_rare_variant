@@ -6,7 +6,9 @@ becomes a filterable annotation. Per-member alignment tracks come from
 track from `*_vcf`/`*_vcf_index`/`*_vcf_id`. All track paths are RELATIVE to the
 server's --data-dir. We emit our inheritance mode + rich annotations as extra
 (filterable) columns, and point the track columns at the mini-CRAMs / VCFs that the
-export step places under the data-dir (only when they exist).
+export step places under the data-dir (only when they exist). Every calls column not
+represented by a curated column is appended verbatim after the track columns
+(`passthrough_columns`), so the review table is dropless with respect to candidates.calls.tsv.
 
 Step-8b non-human fraction (NHF): when nonhuman-screen has classified a member's
 ALT-supporting reads, its per-(trio, sample) table lands at
@@ -35,7 +37,8 @@ COLUMNS = [
     # first, and it must not be a different quantity from the one that did the filtering.
     # `rarity_oracle` / `rarity_basis` say which quantity that was and how it arose; `grpmax_af`
     # and `faf95` ride further right as the raw inputs.
-    "trio_id", "gene", "consequence", "impact", "frequency", "inheritance", "origin", "pair_id",
+    "trio_id", "gene", "consequence", "impact", "hgvsc", "hgvsp", "frequency", "inheritance",
+    "origin", "pair_id",
     "child_gt", "mother_gt", "father_gt", "child_GQ", "child_DP", "child_AB",
     # max_af/max_af_pops are shown next to grpmax_af so a reviewer can spot a call whose
     # frequency is driven by a founder group grpmax excludes (see annotations.GRPMAX_POPS).
@@ -62,6 +65,42 @@ COLUMNS = [
     "mother_vcf", "mother_vcf_index", "mother_vcf_id",
     "father_vcf", "father_vcf_index", "father_vcf_id",
 ]
+
+# --- dropless pass-through of the calls table ----------------------------------------------------
+# build_variants_tsv used to write ONLY the fixed COLUMNS above (DictWriter extrasaction="ignore"),
+# which made the review table a second silent projection on top of Step 5's: `flags` beyond
+# origin (origin_unverified, transmitting_parent_qc_fail, unphased_denovo_partner...),
+# hiConfDeNovo, review_prior_crosscheck and the Ensembl `gene` never reached igv.js. Now every
+# calls column this module does not already represent (verbatim or renamed — the set below) is
+# appended AFTER the track columns under its own name, in calls-header order. Step 9's
+# igv/variants.prioritized.tsv copies every input column verbatim, so it inherits all of it.
+CONSUMED_CALLS_COLUMNS = frozenset({
+    "chrom", "pos", "ref", "alt", "trio_id", "symbol", "consequence", "impact", "hgvsc", "hgvsp",
+    "rarity_af", "mode", "pair_id", "child_gt", "mother_gt", "father_gt",
+    "child_gq", "child_dp", "child_ab", "grpmax_af", "max_af", "rarity_oracle", "rarity_basis",
+    "faf95", "faf95_group", "nhomalt", "max_af_pops", "cadd", "spliceai_ds",
+    "revel", "alphamissense", "alphamissense_class", "clnsig", "clinvar_stars",
+})
+# candidates.calls.tsv `gene` is the Ensembl gene ID; variants.tsv `gene` is the SYMBOL (the
+# igv.js server's gene column), so the ID rides along under a name that says what it is.
+RENAMED_CALLS_COLUMNS = {"gene": "gene_id"}
+
+
+def passthrough_columns(calls_fieldnames):
+    """-> [(calls_column, variants_column), ...] for every calls column not already represented.
+
+    Calls-header order. A name that would collide with a curated COLUMNS entry is prefixed
+    `calls_` rather than dropped or allowed to overwrite the curated value."""
+    out, taken = [], set(COLUMNS)
+    for c in calls_fieldnames or ():
+        if not c or c in CONSUMED_CALLS_COLUMNS:
+            continue
+        name = RENAMED_CALLS_COLUMNS.get(c, c)
+        if name in taken:
+            name = "calls_" + name
+        taken.add(name)
+        out.append((c, name))
+    return out
 
 
 def _origin(flags):
@@ -148,10 +187,14 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
 
     n = 0
     with open(calls_tsv) as fh, open(out_tsv, "w", newline="") as out:
-        w = csv.DictWriter(out, fieldnames=COLUMNS, delimiter="\t", extrasaction="ignore",
-                           lineterminator="\n")
+        reader = csv.DictReader(fh, delimiter="\t")
+        # Dropless: every calls column not represented below rides through verbatim after the
+        # track columns (passthrough_columns). The curated COLUMNS keep their positions.
+        extra = passthrough_columns(reader.fieldnames)
+        w = csv.DictWriter(out, fieldnames=COLUMNS + [name for _, name in extra], delimiter="\t",
+                           extrasaction="ignore", lineterminator="\n")
         w.writeheader()
-        for r in csv.DictReader(fh, delimiter="\t"):
+        for r in reader:
             trio = r.get("trio_id", "")
             kid, dad, mom = samples.get(trio, ("", "", ""))
             cf, mf, ff = rel_cram(trio, kid), rel_cram(trio, mom), rel_cram(trio, dad)
@@ -180,6 +223,7 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "chrom": chrom, "pos": pos, "ref": ref, "alt": alt,
                 "trio_id": trio, "gene": r.get("symbol") or r.get("gene"),
                 "consequence": r.get("consequence"), "impact": r.get("impact"),
+                "hgvsc": r.get("hgvsc"), "hgvsp": r.get("hgvsp"),
                 # THE ORACLE'S value — the same number as `rarity_af`, shown early because it
                 # is the frequency a reviewer reads first. It was hardwired to `grpmax_af`, so
                 # under the default faf95 oracle the headline column disagreed with the value
@@ -217,6 +261,8 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
                 "mother_vcf": vcf, "mother_vcf_index": (vcf + ".tbi") if vcf else "", "mother_vcf_id": mom,
                 "father_vcf": vcf, "father_vcf_index": (vcf + ".tbi") if vcf else "", "father_vcf_id": dad,
             }
+            for src, name in extra:
+                row[name] = r.get(src, "")
             w.writerow(row)
             n += 1
     return n
