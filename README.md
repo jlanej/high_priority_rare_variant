@@ -61,6 +61,11 @@ source-cited in **[docs/](docs/README.md)**. Every default lives in one place:
 
 ## Methods summary
 
+> **Publication-quality Methods:** [docs/methods.md](docs/methods.md) (rendered as
+> [docs/methods.pdf](docs/methods.pdf)) is the full, code-derived description of every
+> filter, model and default — written as a Methods section, with the thresholds, resource
+> versions and per-step outputs tabulated. The paragraphs below are the short form.
+
 What the pipeline actually does, in enough detail to follow it. Every threshold named here is a
 configurable default from the **[Canonical defaults](docs/README.md#canonical-defaults)** table;
 the evidence behind each choice is in **[docs/](docs/README.md)**.
