@@ -16,6 +16,7 @@ the single source of truth; if a document ever disagrees with it, the table wins
 
 | Document | Covers |
 |----------|--------|
+| **[methods.md](methods.md)** | **Publication-quality Methods, derived from the code and shipped config** — every filter, model, default and resource version in traditional prose, with tables (PDF: [methods.pdf](methods.pdf)) |
 | **[limitations.md](limitations.md)** | **What the first pass cannot see, why, and the cost to fix each. Read before interpreting a negative result.** |
 | [pipeline_design.md](pipeline_design.md) | Vetted end-to-end flow; critique of the original 5-step proposal; data artifacts; scope limits |
 | [ROADMAP.md](ROADMAP.md) | Prioritized high-priority gaps vs state of the art (from a SOTA review); dependency-ordered |
