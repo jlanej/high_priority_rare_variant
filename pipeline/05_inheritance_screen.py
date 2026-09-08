@@ -11,13 +11,15 @@ inheritance mode with the refined-GQ genotype-QC gates and per-mode rarity gates
   * X-linked recessive (male hemizygous);
   * compound heterozygous in TRANS (parent-of-origin: mat + pat, or inherited + de novo).
 
-Emits one TSV of candidate calls across all trios. See
-docs/inheritance_and_genotype_qc.md and docs/pipeline_design.md (Step 5).
+Emits one TSV of candidate calls across all trios: the curated columns (COLS) first, then a
+DROPLESS `info_<ID>` block carrying every INFO field of the per-trio candidate VCF verbatim (see
+INFO_PREFIX). See docs/inheritance_and_genotype_qc.md and docs/pipeline_design.md (Step 5).
 """
 from __future__ import annotations
 
 import argparse
 from collections import Counter
+import re
 import sys
 
 from cyvcf2 import VCF
@@ -40,7 +42,13 @@ COLS = [
     # rarity_af is THE value every gate used (annotations.frequency()) and rarity_oracle is its
     # provenance — resolved ONCE here so Step 9 ranks on exactly what the screen gated on instead
     # of re-deriving it from the raw columns and risking divergence. Both raw inputs ride along.
-    "consequence", "impact", "rarity_af", "rarity_oracle", "rarity_basis",
+    "consequence", "impact",
+    # HGVS on the transcript split-vep selected (VEP --hgvs; CSQ HGVSc/HGVSp lifted in Step 2).
+    # These sat in the per-trio VCF INFO from Step 2 onward and were dropped ONLY by this
+    # projection: the VCF->TSV column list is the one place an annotation can vanish, which is
+    # also why the `info_*` block exists (INFO_PREFIX below).
+    "hgvsc", "hgvsp",
+    "rarity_af", "rarity_oracle", "rarity_basis",
     "grpmax_af", "faf95", "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "cadd", "spliceai_ds",
     # Calibrated missense predictors. Inert at the SCREEN by construction (missense is
@@ -52,6 +60,66 @@ COLS = [
     "clnsig", "clinvar_stars", "child_gt", "child_gq", "child_dp", "child_ab",
     "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck", "flags",
 ]
+
+# --- dropless pass-through of the per-trio VCF's INFO -------------------------------------------
+# candidates.calls.tsv used to be the ONE place in the pipeline where an annotation could vanish
+# without a trace: Step 2 lifts ~45 INFO fields, Steps 3-4 carry every one of them into the per-trio
+# candidate VCF, and this step then projected each record onto the fixed COLS list above — so
+# vep_HGVSc / vep_HGVSp / vep_Feature / vep_MANE_SELECT / hprv_keep_reason and the rest never reached
+# a TSV, the workbook or the igv.js review table. The curated columns stay exactly where they are
+# (downstream readers are name-keyed); AFTER them, every INFO field declared in the candidate VCF
+# header is emitted VERBATIM under `info_<ID>` — the union over trios, in header order. The prefix
+# is load-bearing: the raw `hiConfDeNovo` (a comma list of children) would otherwise collide with
+# the curated `hiConfDeNovo` column (this child: 1/blank). A VCF `.` reads blank, matching every
+# other missing value in the table, and a Flag reads `1`; nothing else is transformed.
+INFO_PREFIX = "info_"
+_INFO_ID_RE = re.compile(r"^##INFO=<ID=([^,>]+)", re.MULTILINE)
+
+
+def info_ids_from_header(raw_header: str):
+    """Every INFO ID the VCF header declares, in header order."""
+    return _INFO_ID_RE.findall(raw_header or "")
+
+
+def _typed_info(x):
+    """Fallback rendering of a cyvcf2-typed INFO value when the raw VCF line is unavailable."""
+    if x is None:
+        return ""
+    if isinstance(x, bool):
+        return "1" if x else ""
+    if isinstance(x, (tuple, list)):
+        return ",".join("" if e is None else str(e) for e in x)
+    s = str(x)
+    return "" if s == "." else s
+
+
+def info_values(v, ids):
+    """`{info_<ID>: verbatim value}` for every ID in `ids`, read from the record's own INFO column.
+
+    The VCF LINE (`str(v)`) is parsed rather than the typed `v.INFO`, because htslib stores Float
+    as float32 and cyvcf2 hands back the widened double — `0.000162583` would come out as
+    `0.00016258300165`, which is not what the VCF says. A record that cannot render itself as a
+    VCF line (the unit-test harness) falls back to the typed values. Percent-encoded characters
+    (`%3B`, `%3D`) stay encoded: verbatim means verbatim.
+    """
+    if not ids:
+        return {}
+    raw = None
+    try:
+        cols = str(v).rstrip("\n").split("\t")
+        if len(cols) >= 8:
+            raw = {}
+            for kv in cols[7].split(";"):
+                if not kv or kv == ".":
+                    continue
+                k, sep, val = kv.partition("=")
+                raw[k] = ("" if val == "." else val) if sep else "1"   # a Flag: present = 1
+    except Exception:  # noqa: BLE001 — a record that cannot render falls back to typed values
+        raw = None
+    out = {}
+    for i in ids:
+        out[INFO_PREFIX + i] = raw.get(i, "") if raw is not None else _typed_info(v.INFO.get(i))
+    return out
 
 
 def fmt(x):
@@ -72,14 +140,19 @@ class Trio:
         # sex must be positively known (1/2) to apply ploidy-aware X/Y logic; unknown != female
         self.sex_known = str(ped.get("sex")) in ("1", "2")
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
+        # Every INFO field this candidate VCF declares, for the dropless `info_*` pass-through
+        # (INFO_PREFIX). Read from the header ONCE per trio; main() unions the blocks over trios.
+        self.info_ids = info_ids_from_header(vcf.raw_header)
+        self.info_cols = [INFO_PREFIX + i for i in self.info_ids]
 
 
 def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
-    return {
+    row = {
         "trio_id": trio_id, "mode": mode, "pair_id": pair_id,
         "chrom": v.CHROM, "pos": v.POS, "ref": v.REF, "alt": ",".join(v.ALT),
         "gene": A._str(v, "gene") or "", "symbol": A.symbol(v) or "",
         "consequence": A.consequence(v) or "", "impact": A.impact(v) or "",
+        "hgvsc": A._str(v, "hgvsc") or "", "hgvsp": A._str(v, "hgvsp") or "",
         "rarity_af": fmt(A.frequency(v, cfg)), "rarity_oracle": A.rarity_oracle(cfg),
         "rarity_basis": A.rarity_basis(v, cfg),
         "grpmax_af": fmt(A.grpmax_af(v)), "faf95": fmt(A.faf95(v)),
@@ -101,6 +174,10 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         "hiConfDeNovo": ("1" if A.is_hiconf_denovo_for(v, gt.child_name) else ""),
         "review_prior_crosscheck": "", "flags": "",
     }
+    # The dropless block: every INFO field the candidate VCF carries, verbatim, AFTER the curated
+    # columns (INFO_PREFIX). Never shortened, never re-derived.
+    row.update(info_values(v, gt.info_ids))
+    return row
 
 
 def screen_trio(trio_id, vcf, gt: Trio, cfg):
@@ -588,6 +665,9 @@ def main(argv=None) -> int:
 
     n_trios = 0
     all_rows = []
+    # The dropless info_* block is the UNION over trios (a trio whose source VCF lacked, say,
+    # hiConfDeNovo contributes no column for it), kept in first-seen = header order.
+    info_cols, _info_seen = [], set()
     n_plp_inert_total = 0
     tot = {"examined": 0, "with_call": 0, "annotated": 0, "clinvar_plp_no_row": 0,
            "skipped": Counter(), "no_row": Counter()}
@@ -638,6 +718,10 @@ def main(argv=None) -> int:
             sys.stderr.write(f"WARN: {trio_id}: {e}; skipping\n")
             vcf.close()
             continue
+        for _c in gt.info_cols:
+            if _c not in _info_seen:
+                _info_seen.add(_c)
+                info_cols.append(_c)
         trio_rows, st = screen_trio(trio_id, vcf, gt, cfg)
         vcf.close()
         if st["examined"] and not st["annotated"]:
@@ -682,10 +766,12 @@ def main(argv=None) -> int:
             + (f"; skipped {dict(st['skipped'])}" if st["skipped"] else "") + "\n")
         all_rows.extend(trio_rows)
 
+    out_cols = COLS + info_cols     # the curated columns first, then the dropless info_* block
     with open(args.out, "w") as out:
-        out.write("\t".join(COLS) + "\n")
+        out.write("\t".join(out_cols) + "\n")
         for r in all_rows:
-            out.write("\t".join(str(r.get(c, "")) for c in COLS) + "\n")
+            out.write("\t".join(str(r.get(c, "")) for c in out_cols) + "\n")
+    audit.record("05_inheritance", "info_passthrough_columns", len(info_cols))
 
     by_mode = {}
     for r in all_rows:

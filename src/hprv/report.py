@@ -170,8 +170,9 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
                                "biallelic / X-linked), weighted by constraint. The headline result."),
         ("Candidate calls", "One row per candidate per trio: inheritance mode, genotypes, and "
                             "annotations (gnomAD rarity — rarity_af, with rarity_oracle / "
-                            "rarity_basis saying which quantity and how it arose — CADD, "
-                            "SpliceAI, ClinVar)."),
+                            "rarity_basis saying which quantity and how it arose — HGVS, CADD, "
+                            "SpliceAI, ClinVar), then every INFO field of the per-trio VCF verbatim "
+                            "as info_<ID> (dropless)."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
         ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex, and contamination "
                "(verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),

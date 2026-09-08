@@ -90,7 +90,7 @@ VARIANT_COLUMNS = [
     "variant_tier", "variant_tier_reason", "molecular_effect_class",
     "nmd_status", "plof_confidence", "spliceai_status", "spliceai_ds",
     "missense_evidence_source", "revel", "alphamissense", "alphamissense_class",
-    "cadd", "consequence", "impact",
+    "cadd", "consequence", "impact", "hgvsc", "hgvsp",
     "rarity_strength", "rarity_oracle", "rarity_basis", "rarity_af", "grpmax_af", "faf95",
     "faf95_group", "nhomalt",
     "max_af", "max_af_pops", "rarity_driven_by_single_group",
@@ -912,7 +912,7 @@ def main(argv=None) -> int:
         # clinvar_stars IS re-emitted by score_variant (normalised to int or ''), so it comes
         # from `sc` below and must NOT be listed here or the raw value would win.
         row = {c: norm.get(c) for c in ("chrom", "pos", "ref", "alt", "trio_id", "origin",
-                                        "pair_id", "consequence", "impact", "spliceai_ds",
+                                        "pair_id", "consequence", "impact", "hgvsc", "hgvsp", "spliceai_ds",
                                         "cadd", "revel", "alphamissense", "alphamissense_class",
                                         "faf95", "faf95_group", "nhomalt", "rarity_af",
                                         "rarity_basis",
