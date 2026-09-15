@@ -132,16 +132,29 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
 - **User input** (git-ignored): a `trios_file` (TSV, header names kid/dad/mom in any order —
   matched by NAME, an `_id` suffix tolerated, and STRICTLY: a header naming some roles but not
   all is an error, never a positional guess, because a transposed mother/father inverts every
-  parent-of-origin call and the MIE gate is blind to it; IDs match VCF samples) + a `vcf_dir`/`vcf_list`. `pipeline/resolve_trios.py` maps each trio to
+  parent-of-origin call and the MIE gate is blind to it; IDs match VCF samples; OPTIONAL
+  `kid_sex` (aliases `sex`/`child_sex`/`proband_sex`) + `dad_sex`/`mom_sex` columns, values
+  1/2/0 or male/female/unknown — a parent sex contradicting its role is an error, the
+  signature of a transposed pair) + a `vcf_dir`/`vcf_list`. `pipeline/resolve_trios.py` maps each trio to
   the VCF containing all three members (exact match; picks the fewest-sample VCF on a tie; extras
   OK), generates PEDs, and writes the **internal manifest** `trios.resolved.tsv`
   (`trio_id  vcf  ped  samples`) that Steps 0/1/4 consume. Unresolved/ambiguous trios are reported
   in `trio_resolution.tsv`, never guessed. Steps 1 and 4 subset each VCF to its 3 members
   (`bcftools view -s`), so extra members and inconsistent sample order don't matter.
-- **PED sex**: the generated PED leaves kid sex unknown (`0`); Step 5 reads Step 0's inferred sex
-  (`qc_report.tsv`) so X-linked/hemizygous logic fires correctly. Step 0 also infers BOTH
-  PARENTS' sex from their own chrX (`parent_sex_flag` — the only reachable sex check, and the
-  only direct detector of transposed parents) and each member's no-call rate (`nocall_flag`,
+- **PED sex — the trios file is CANONICAL, the chrX inference only checks it.** The generated
+  PED carries the trios file's stated proband sex (`0` when the file has no sex column).
+  `ped.resolve_child_sex(ped_sex, inferred_sex)` is the ONE precedence rule every consumer reads:
+  a stated 1/2 wins; Step 0's chrX inference (`qc_report.tsv`) fills in only an unknown. Step 5
+  judges every chrX/chrY decision under that sex and writes `child_sex`/`child_sex_source`
+  (`ped`|`inferred`|`none`) on every row; a stated sex the inference disagrees with is KEPT and
+  every row of the trio carries `sex_discordant_inference` in `flags` (+ a WARN, + audit) —
+  never a silent replacement. Step 0 reports `sex_source` and a THREE-state `sex_match` (1 agree
+  / 0 disagree / blank = not compared). Step 6's `--n-male-trios` default counts males from
+  `qc_report.tsv` under the same rule. Step 0 also infers BOTH PARENTS' sex from their own chrX
+  (`parent_sex_flag` — the one direct detector of transposed parents; its WARN says
+  "transposed" ONLY for the father=2/mother=1 pattern a transposition actually produces) and
+  reports their raw ratios (`dad_x_het_ratio`/`mom_x_het_ratio`) — the calibration set for
+  `qc.x_het_male_max` — and each member's no-call rate (`nocall_flag`,
   `qc.max_nocall_rate` 0.10 — a merge-shaped trio VCF reads `./.` for every non-carrier parent
   and Step 5 would silently lose every de novo).
 - **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
@@ -240,8 +253,9 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
   (`p_recurrence`/`q_recurrence`/`*_exome_wide_sig` — a RANK, never a calibrated test: 2 carriers
   of private variants at N=200 give p≈3e-7 and 3 carriers at N=1000 give 4e-8, i.e. essentially
-  "≥3 carriers of private hets"; `p_recurrence_xlinked` uses `--n-male-trios`, which
-  `run_pipeline.sh` counts from Step 0's `inferred_sex == 1` among resolved trios, else N_trios;
+  "≥3 carriers of private hets"; `p_recurrence_xlinked` uses `--n-male-trios`, which Step 6
+  counts from `qc_report.tsv` under the PED-first rule (`ped_sex` 1, else `inferred_sex` 1)
+  when `run_pipeline.sh` passes `--qc-report`, else N_trios;
   `recurrence_kind` for biallelic carriers compares the per-trio SET of variant keys, so two trios
   sharing one comp-het pair read `same_variant`), constraint columns, and — when `--mutrate`
   carries `mu_mis`/`mu_syn`/`mu_lof` — `mu_tot`, `exp_carriers_mu` (= C·μ_g, with C = Σ n_carriers
@@ -674,6 +688,20 @@ two things that look identical in the output are not the same fact:
   ref, alt) per gene; `n_rows` is the raw row count, kept beside it so the inflation is visible.
   `max_downweight_fraction` is measured over distinct observations. Counting rows inflated the
   excess statistic exactly where comp-het pairing is most active (long genes).
+- **`qc.x_het_male_max` (0.10) is WRONG for a diploid-called cohort, and the sex it infers is a
+  fallback, never the authority.** GATK genotypes chrX as diploid in males, so a hemizygous
+  male's residual het calls put his non-PAR het ratio at 0.10–0.35, not ~0.02: on a 221-trio
+  GRCh38 WGS cohort the default inferred 0/221 fathers and 1/221 probands male — and before the
+  trios-file sex column existed that heuristic alone decided every chrX call (X-linked recessive,
+  hemizygous de novo, the male-X-het rule). Now the trios file's `kid_sex` is canonical and the
+  inference only checks it (`ped.resolve_child_sex`); calibrate the cutoff on the run's own
+  known sexes — fathers vs mothers, `dad_x_het_ratio`/`mom_x_het_ratio` in `qc_report.tsv`,
+  medians in the audit — and put it in the gap between the two modes. Step 0 WARNs when more
+  fathers read female than male; that pattern is a miscalibrated cutoff, NOT mass transposition
+  (a transposition produces exactly father=2 AND mother=1, and the parent WARN now says so).
+  `scan_sex` counts only FILTER-passing, fully-called sites (`strict_gt=True`): filtered chrX
+  records and half-calls are enriched for exactly the artifacts that push a male across the
+  cutoff.
 - **Step 0's Mendelian-error rate is measured on a CAPPED scan, not genome-wide.** `qc.max_sites`
   (default 200000) caps the MIE/CHARR scan at the first `max_sites` QC-passing autosomal biallelic
   sites, and the chrX sex scan is capped the same way. Quote `mie_rate` as a rate over `n_sites`,

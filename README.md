@@ -41,8 +41,8 @@ for the vetted design and the artifact each step produces):
 
 | Step | What | Output |
 |------|------|--------|
-| resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
-| 0 | Per-trio QC gate (Mendelian error on the first `qc.max_sites` QC-passing autosomal biallelic sites + chrX sex + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
+| resolve | Map each `kid/dad/mom` trio to the VCF containing all three members (exact sample-ID match; extras OK); generate PEDs carrying the file's optional `kid_sex` (the canonical proband sex) | `trios.resolved.tsv`, `trio_resolution.tsv`, `peds/` |
+| 0 | Per-trio QC gate (Mendelian error on the first `qc.max_sites` QC-passing autosomal biallelic sites + chrX sex for all three members — checked against the pedigree's stated sex, filling in only an unknown one — + contamination: verifyBamID FREEMIX, else VCF-only CHARR) | `qc_report.tsv` |
 | 1 | Subset to trio members, normalize, build a **site-only union** of loci (never a genotype merge) | `cohort.sites.vcf.gz` |
 | 2 | Annotate the union **once** (VEP 115 cache + CADD/SpliceAI/REVEL/AlphaMissense plugins; gnomAD v4.1 AFs and ClinVar `CLIN_SIG` ride in the cache), then two `bcftools annotate` transfers: ClinVar review status, and the gnomAD joint slim for `faf95`/`nhomalt` (required under the default `faf95` oracle) — **VEP is never run per trio** | `cohort.sites.annotated.vcf.gz` |
 | 3 | Select biologically-plausible sites (rarity + function; ClinVar P/LP override); tag each with *why* it was kept | `plausible.sites.vcf.gz` |
@@ -272,9 +272,12 @@ export HPRV_WORK=/path/to/work
 #     as the VEP SpliceAI plugin, and spliceai_required (default true) HALTS preflight if missing.)
 
 # 4. Provide inputs (git-ignored):
-#    - a trios file: TSV with a header naming kid/dad/mom (any order); IDs match the VCFs:
-#          #kid   dad    mom
-#          CH1    FA1    MO1
+#    - a trios file: TSV with a header naming kid/dad/mom (any order); IDs match the VCFs.
+#      Add a kid_sex column (1/2/0 or male/female/unknown; also dad_sex/mom_sex) whenever you
+#      know the probands' sex: it is the CANONICAL sex for every chrX call, and Step 0's chrX
+#      inference (qc.x_het_male_max, which must be calibrated per callset) then only checks it:
+#          #kid   dad    mom    kid_sex
+#          CH1    FA1    MO1    male
 #      export TRIOS_FILE=/path/to/trios.tsv
 #    - the VCF source (a directory and/or a list file):
 #          export VCF_DIR=/path/to/vcfs        # globbed for *.vcf.gz/*.vcf/*.bcf
