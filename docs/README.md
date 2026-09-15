@@ -222,7 +222,10 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 - **X-linked recessive**: affected male = hemizygous + carrier mother (the **father's chrX is not
   required** — he transmits Y to a son; flagged `father_carries_x_allele` if he carries); affected
   female = `1/1` + carrier mother + hemizygous-affected father. Sex-aware ploidy, drop male non-PAR
-  het calls; kid sex inferred from chrX heterozygosity when the PED is unknown. **X-dominant is not
+  het calls; kid sex is the trios file's stated `kid_sex` (canonical; every call carries
+  `child_sex`/`child_sex_source`), inferred from chrX heterozygosity only when the PED leaves it
+  unknown, and a stated sex the inference disagrees with is kept and flagged
+  `sex_discordant_inference`. **X-dominant is not
   a separate mode** (a female's X het is emitted as `dominant`, a male hemizygote as
   `x_linked_recessive`); **chrY yields no inherited call** — the hemizygous models are keyed on the
   mother, which is meaningless on Y.
@@ -232,12 +235,21 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   runs **peddy**; this pipeline does not invoke peddy, slivar, WhatsHap or UPDhmm); Step 0 guards
   the less-curated trios via a **Mendelian-error rate < 2%** (`qc.mie_max`) measured on the first
   `qc.max_sites` (**200000**) QC-passing autosomal biallelic sites — a capped scan, not genome-wide —
-  chrX-inferred sex vs. PED (het-ratio **< 0.10 → male**, `qc.x_het_male_max`; needs **≥ 20**
-  informative chrX calls, `qc.sex_min_sites`, else sex is left unknown — a dedicated indexed chrX
-  pass, capped by the same `max_sites`, so the autosomal MIE cap can't starve it) **for all three
-  members** — a father reading female or a mother reading male sets `parent_sex_flag`, the one
+  chrX-inferred sex vs. PED (het-ratio **< 0.10 → male**, `qc.x_het_male_max`, over FILTER-passing
+  fully-called non-PAR sites; needs **≥ 20** informative chrX calls, `qc.sex_min_sites`, else sex
+  is left unknown — a dedicated indexed chrX pass, capped by the same `max_sites`, so the
+  autosomal MIE cap can't starve it) **for all three members**. The proband's PED sex (the trios
+  file's `kid_sex`) is CANONICAL: the inference fills in only an unknown one (`sex_source`), and a
+  disagreement is a three-state `sex_match=0` (1 agree, blank = not compared) that fails
+  `overall_pass` and is flagged downstream, never an override. **The 0.10 cutoff is
+  callset-dependent and wrong for a diploid-called cohort** (a GATK-diploid male's chrX het
+  ratio sits at 0.10–0.35): calibrate it on the parents — every father is a known male, every
+  mother a known female, and the report carries their raw `dad_x_het_ratio`/`mom_x_het_ratio` —
+  and set it in the gap between the two modes; Step 0 WARNs when more fathers read female than
+  male. A father reading female or a mother reading male sets `parent_sex_flag`, the one
   direct detector of transposed parents (the MIE rule is symmetric under a parent swap and cannot
-  see one) — a per-member **genotype no-call rate > 0.10** (`qc.max_nocall_rate`) flag, which
+  see one; the WARN says "transposed" only for the father=2/mother=1 pattern a transposition
+  produces) — a per-member **genotype no-call rate > 0.10** (`qc.max_nocall_rate`) flag, which
   separates a jointly genotyped trio (affirmative parental `0/0`, ~1–2% no-calls) from a merge of
   single-sample callsets (`./.` at every singleton site), and a
   **contamination** gate — verifyBamID **FREEMIX > 0.05**
@@ -269,7 +281,8 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   **`rarity_af`** — the run's oracle value (faf95 by default; a `zero_ci` allele is floored like an
   absent one): **dominant het** `p = 1 − Π_v (1 − q_v)²` (the headline, FDR-corrected); **biallelic**
   `p = (Σ_v q_v)²`; **X-linked male** `p = 1 − Π_v (1 − q_v)` (hemizygous), tested against
-  `--n-male-trios` (`run_pipeline.sh` counts Step-0 `inferred_sex == 1` among resolved trios) when
+  `--n-male-trios` (Step 6 counts male probands in Step-0's `qc_report.tsv` under the PED-first
+  rule: `ped_sex == 1`, else `inferred_sex == 1` where the PED is unknown) when
   available, else N_trios. A recessive/hemizygous carrier is **not** a ≥1-of-two-alleles event, so
   it is never charged the dominant probability. → per-gene `p_recurrence` (+ `p_recurrence_biallelic`,
   `p_recurrence_xlinked`), BH `q`, and an exome-wide flag (`p < burden.exome_wide_p`, default 2.5e-6).

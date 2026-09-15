@@ -150,7 +150,7 @@ flowchart TD
 
 | Step | Produces | Authoritative for |
 |------|----------|-------------------|
-| resolve | `trios.resolved.tsv` (trio_id, vcf, ped, samples) + `trio_resolution.tsv` + PEDs | which VCF each trio maps to, generated from a `kid/dad/mom` file by exact sample-ID match |
+| resolve | `trios.resolved.tsv` (trio_id, vcf, ped, samples) + `trio_resolution.tsv` + PEDs | which VCF each trio maps to, generated from a `kid/dad/mom` file by exact sample-ID match; the file's optional `kid_sex` is the canonical proband sex in the PED |
 | 0 | QC report per trio (MIE on the first `qc.max_sites` QC-passing autosomal biallelic sites, chrX sex, contamination); **advisory** pass/flag list (surfaced in the xlsx QC sheet + IGV `sample_qc.tsv`) | flags suspect trios for human review — flagged trios are **NOT** auto-excluded; they still contribute calls + recurrence pending review |
 | 1 | `cohort.sites.vcf.gz` (site-only, normalized, de-duplicated union) | the set of loci seen anywhere in the cohort — **not** a frequency |
 | 2 | `cohort.sites.annotated.vcf.gz` | every annotation the pipeline reads, computed once: VEP CSQ lifted to `INFO/vep_*` — consequence/IMPACT/SYMBOL/MANE, gnomAD v4.1 per-population point AFs, ClinVar `CLIN_SIG`, CADD, SpliceAI delta scores (`vep_SpliceAI_pred_DS_*`), `vep_REVEL`, `vep_am_pathogenicity`/`vep_am_class` — plus the two transfers: `clinvar_CLNREVSTAT`/`clinvar_CLNSIG` (ClinVar VCF) and `gnomad_faf95`/`gnomad_faf95_group`/`gnomad_nhomalt`/`gnomad_AF_joint`/`gnomad_AF_grpmax` (gnomAD joint slim). Constraint is **not** here; it joins by gene symbol at Step 6 |
@@ -201,8 +201,12 @@ synthesized genotype matrix.
   members** — matched exactly by sample ID, never by column order, extra members allowed. Ties
   (a trio present in >1 VCF) resolve to the most trio-specific (fewest-sample) VCF; a trio present
   in **no** VCF is reported as unresolved (which member was missing), never guessed. PEDs are
-  generated automatically. Steps 1 and 4 subset each VCF to its 3 members (`bcftools view -s`), so
-  additional members and inconsistent ordering are harmless.
+  generated automatically, carrying the file's optional `kid_sex`/`dad_sex`/`mom_sex` (1/2/0 or
+  male/female/unknown): a stated proband sex is CANONICAL — Step 5 judges chrX ploidy under it and
+  Step 6 counts males by it — and Step 0's chrX inference only checks it (a disagreement is flagged
+  `sex_discordant_inference`, never silently overridden); without a sex column the proband is `0`
+  and the inference fills in. Steps 1 and 4 subset each VCF to its 3 members (`bcftools view -s`),
+  so additional members and inconsistent ordering are harmless.
 - **VEP runs exactly once**, on the cohort union (Step 2). Step 4 transfers those annotations with
   `bcftools annotate`; VEP is never invoked per trio — the single most expensive operation scales
   with distinct sites, not samples.

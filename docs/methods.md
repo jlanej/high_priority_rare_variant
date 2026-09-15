@@ -90,13 +90,24 @@ guess, because a transposed mother and father would invert every parent-of-origi
 leaving the Mendelian-error rate unchanged. A file with no header is read positionally with a
 warning. Duplicate proband rows are skipped.
 
+The trios file may also carry sex columns (`kid_sex`, with `sex`, `child_sex` and `proband_sex`
+accepted; `dad_sex`; `mom_sex`), whose values are 1/2/0 or male/female/unknown (m/f; a blank, `.`
+or NA cell is unknown). A stated proband sex is the canonical sex for that trio: it is written to
+the PED, Step 5 judges every chrX and chrY decision under it, Step 6 counts male probands by it,
+and Step 0's chrX inference only checks it. A parent value that contradicts the role (a female
+father, a male mother) is an error, since it is the signature of a transposed pair and the
+pipeline does not guess which column is wrong; an unknown parent value defaults to the role. Any
+other spelling is an error rather than a silent unknown.
+
 Sample membership is read from each VCF header only. For each trio, the candidate VCFs are those
 containing all three sample identifiers by exact match; a VCF may contain additional samples. When
 more than one VCF qualifies, the one with the fewest samples is chosen, with a lexical tie-break on
 path, and the multiplicity is recorded. A trio with no qualifying VCF is reported as unresolved in
 `trio_resolution.tsv` (naming the missing members) and skipped; the run fails only when no trio
-resolves. For each resolved trio a PED file is generated with the proband's sex unknown (`0`; it is
-inferred in Step 0), the father coded male, the mother female, and the proband marked affected. The
+resolves. For each resolved trio a PED file is generated with the proband's sex as stated in the
+trios file (or unknown, `0`, when no sex column was supplied, in which case Step 0's chrX inference
+fills it in downstream), the father coded male, the mother female, and the proband marked affected.
+`trio_resolution.tsv` records the sex written for each proband. The
 resolved manifest (`trios.resolved.tsv`: trio identifier, VCF, PED, comma-separated samples) is the
 input to Steps 0, 1 and 4, and the number of resolved trios is the screened-cohort size *N* used in
 Steps 6 and 9.
@@ -120,12 +131,30 @@ rather than homozygous reference and would otherwise pass the Mendelian test wit
 rate while defeating every parental test in Step 5.
 
 Sex is inferred for all three members from chrX outside the pseudoautosomal regions (GRCh38 PAR1
-chrX:10,001–2,781,479; PAR2 chrX:155,701,383–156,030,895). Among that individual's biallelic chrX
-calls with GQ ≥ 20 and depth ≥ 10, a heterozygous fraction het/(het + hom-alt) below 0.10 is called
-male and otherwise female, provided at least 20 informative sites are available (else unknown).
-A father inferred female or a mother inferred male raises `parent_sex_flag`, the one direct
-detector of transposed parental columns. The proband's inferred sex is compared with the PED only
-when the PED states one.
+chrX:10,001–2,781,479; PAR2 chrX:155,701,383–156,030,895). Among that individual's FILTER-passing
+(PASS or `.`), fully called biallelic chrX calls with GQ ≥ 20 and depth ≥ 10, a heterozygous
+fraction het/(het + hom-alt) below `qc.x_het_male_max` (default 0.10) is called male and otherwise
+female, provided at least 20 informative sites are available (else unknown). Filtered records and
+half-called genotypes are excluded because both are enriched for the artifacts that render a
+hemizygous male as heterozygous. A father inferred female or a mother inferred male raises
+`parent_sex_flag`; the accompanying warning distinguishes the pattern a transposition produces
+(father female and mother male) from a single mis-reading parent, which indicates a sample swap or
+a miscalibrated cutoff rather than transposed columns.
+
+The cutoff is callset-dependent and the default is not appropriate for a diploid-called cohort:
+GATK genotypes chrX as diploid in males, so a hemizygous male's residual heterozygous calls place
+his fraction well above 0.10 (on one 221-trio GRCh38 WGS cohort the default inferred no father
+and one proband male). The report therefore carries each parent's raw fraction and site count
+(`dad_x_het_ratio`, `mom_x_het_ratio`), fathers being known males and mothers known females, and
+the audit records the median of each; the cutoff belongs in the gap between the two distributions.
+When more fathers read female than male, Step 0 warns that the cutoff, not the pedigree, is wrong.
+
+The proband's sex is resolved by one precedence rule shared by Steps 0, 5 and 6: a sex stated in
+the trios file is canonical, and the inference fills in only when the pedigree leaves it unknown.
+`sex_source` records which applied (`ped`, `inferred` or `none`). `sex_match` compares the two
+when both exist: 1 when they agree, 0 when they disagree, blank when no comparison was possible.
+A disagreement is reported (the trio fails `overall_pass`, a warning is issued, and Step 5 flags
+every call of the trio `sex_discordant_inference`) but never resolved by overriding the pedigree.
 
 Contamination is assessed from verifyBamID `FREEMIX` when a directory of `.selfSM` files is
 configured (flag above 0.05). Otherwise a VCF-only proxy is used: for each member, the summed
@@ -319,9 +348,13 @@ other than PASS or `.` are skipped.
 
 ## 11. Inheritance-mode classification (Step 5)
 
-Each trio's candidate VCF is screened with the proband's sex taken from the PED or, when unknown
-there, from Step 0's inference; if the sex remains unknown, non-pseudoautosomal X and Y records are
-skipped for that trio with a warning and autosomal modes still run. Non-PAR chrY records in a female
+Each trio's candidate VCF is screened with the proband's sex taken from the PED (the trios file's
+stated sex) or, only when unknown there, from Step 0's inference; a stated sex that the inference
+disagrees with is kept, and every call of the trio carries the flag `sex_discordant_inference`.
+Each call records the sex it was judged under (`child_sex`) and its provenance
+(`child_sex_source`: `ped`, `inferred` or `none`). If the sex remains unknown, non-pseudoautosomal
+X and Y records are skipped for that trio with a warning and autosomal modes still run. Non-PAR chrY
+records in a female
 proband are skipped. A "rare" test at limit *L* passes when the oracle value is missing or below
 *L*; the limits are 1 × 10⁻⁴ for the dominant and de novo models (`dominant_max`) and 1 × 10⁻² for
 the recessive and X-linked models (`recessive_max`), with recessive and X-linked calls below
@@ -457,7 +490,8 @@ zero frequency floored at 1 × 10⁻⁶ (`burden.absent_af_floor`): for the domi
 *p* = 1 − Πᵥ(1 − *q*ᵥ)²; for the biallelic model *p* = (Σᵥ *q*ᵥ)²; for the X-linked model
 *p* = 1 − Πᵥ(1 − *q*ᵥ). The recurrence *p*-value is the binomial upper tail P(X ≥ *n*) with
 X ~ Binomial(*N*, *p*), where *N* is the number of resolved trios, or for the X-linked model the
-number of male probands by Step 0 inference. Benjamini–Hochberg *q*-values are computed within each
+number of male probands, decided per trio by the same rule Step 5 applies (the trios file's stated
+sex, else Step 0's inference). Benjamini–Hochberg *q*-values are computed within each
 model family over the nominated genes, and an exome-wide flag is set at *p* < 2.5 × 10⁻⁶. Because
 the null is built only from variants observed in the cohort, it saturates on private variants and
 is monotone in gene size; it is reported as a rank, not as a calibrated test.
@@ -718,7 +752,7 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 | QC sites cap | 200,000 | Step 0 |
 | Mendelian-error rate flag | > 0.02 | Step 0 |
 | No-call rate flag | > 0.10 | Step 0 |
-| chrX het fraction for male | < 0.10 over ≥ 20 sites | Step 0 |
+| chrX het fraction for male | < 0.10 over ≥ 20 sites (callset-dependent; calibrate on the parents) | Step 0 |
 | FREEMIX / VCF-proxy contamination flag | > 0.05 / > 0.02 | Step 0 |
 | Frequency oracle | faf95 (gnomAD v4.1 joint) | Steps 3, 5, 6, 9 |
 | BA1 (drop, never rescued) | ≥ 0.05 | Steps 3, 9 |

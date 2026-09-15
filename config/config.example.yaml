@@ -285,9 +285,17 @@ resources:
 inputs:
   # Trio pedigree (git-ignored, user-supplied): tab-separated with a HEADER naming the
   # kid/dad/mom columns (any order, alias-matched); values are sample IDs that match the
-  # VCFs. Example:
-  #     #kid   dad    mom
-  #     CH1    FA1    MO1
+  # VCFs. OPTIONAL sex columns — kid_sex (aliases sex / child_sex / proband_sex), dad_sex,
+  # mom_sex; values 1/2/0 or male/female/unknown — make the pedigree the CANONICAL source of
+  # sex: a stated proband sex is what Step 5 judges chrX ploidy under (X-linked recessive,
+  # hemizygous de novo, the male-X-het rule) and what Step 6 counts male probands by; Step 0's
+  # chrX-heterozygosity inference then only CHECKS it (sex_match=0 + a WARN + the
+  # sex_discordant_inference flag on every call of that trio — never a silent override). With no
+  # sex column the proband is written as unknown (0) and that inference fills in — which is only
+  # as good as qc.x_het_male_max is calibrated (see qc: below). Parents default to their role;
+  # a parent value contradicting its role (a female father) is an error, never a guess. Example:
+  #     #kid   dad    mom    kid_sex
+  #     CH1    FA1    MO1    male
   trios_file: ${TRIOS_FILE}
   # Where the VCFs live. Provide a directory (globbed recursively for *.vcf.gz/*.vcf/*.bcf)
   # and/or a file listing VCF paths (one per line). The resolver locates, for each trio,
@@ -389,11 +397,25 @@ qc:
   freemix_threshold: 0.05         # flag a trio if any member's verifyBamID FREEMIX exceeds this
   charr_threshold: 0.02           # VCF-only fallback: ref-read fraction at hom-alt SNV sites
   mie_max: 0.02                   # flag a trio if its genome-wide Mendelian-error rate exceeds this
-  x_het_male_max: 0.10            # chrX non-PAR het-ratio below this -> inferred male
+  # chrX non-PAR het ratio, het/(het+hom-alt) over FILTER-passing fully-called biallelic sites,
+  # below this -> inferred male. THIS CUTOFF IS CALLSET-DEPENDENT AND THE DEFAULT IS NOT SAFE FOR
+  # A DIPLOID-CALLED COHORT: GATK genotypes chrX as diploid in males, so a hemizygous male's
+  # residual het calls (mapping artifacts, X-transposed/PAR-adjacent regions, low-depth noise)
+  # routinely put his ratio at 0.10-0.35 rather than ~0.02, and 0.10 then reads EVERY male as
+  # female (on one 221-trio GRCh38 WGS cohort it inferred 0/221 fathers male). Calibrate it on
+  # the run's own KNOWN males and females: Step 0 reports every father's and mother's ratio
+  # (dad_x_het_ratio / mom_x_het_ratio in qc_report.tsv, medians in the audit) — fathers and
+  # mothers form two separated modes; put the cutoff in the gap (typically 0.3-0.5 on diploid
+  # WGS) and rm qc_report.tsv.done. Step 0 WARNs when more fathers read female than male. A
+  # sex stated in the trios file is unaffected by this knob (it is canonical; the inference only
+  # checks it); a proband WITHOUT one has its chrX ploidy judged on this inference in Step 5.
+  x_het_male_max: 0.10
   sex_min_sites: 20               # need >= this many informative chrX calls to infer sex (else unknown)
                                   # (inferred for all THREE members: a father reading female or a
                                   #  mother reading male sets parent_sex_flag — the one direct
-                                  #  detector of transposed parents, which the MIE rate cannot see)
+                                  #  detector of transposed parents, which the MIE rate cannot see;
+                                  #  the proband's is checked against the trios-file sex when stated,
+                                  #  sex_match, and fills in when it is not, sex_source)
   # Per-member genotype no-call rate on the scanned sites above which the trio is flagged. A trio
   # jointly genotyped by GATK carries an affirmative 0/0 for a non-carrier parent (~1-2% no-calls
   # from low coverage); a merge of single-sample callsets carries ./. at every singleton site
