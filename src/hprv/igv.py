@@ -299,22 +299,28 @@ def write_sample_qc(qc_report, manifest, out_tsv):
                 kid, dad, mom = samples[tid]
                 mie = r.get("mie_rate", "")            # trio-level metric
                 cflag = r.get("contam_flag", "")       # trio-level flag
-                # inferred_sex is the PROBAND's chrX inference — it does not apply to the
-                # parents; contamination is per-member (kid/mom/dad columns).
+                # Per-member chrX inference (Step 0 scans all three) beside the PED sex it was
+                # checked against: the proband's PED sex is the trios file's (canonical when
+                # stated; `sex_source` says whether Step 5 judged chrX ploidy on it or on the
+                # inference), the parents' is their role. Contamination is per-member.
                 per_role = (
-                    ("proband", kid, r.get("inferred_sex", ""), r.get("kid_contam", "")),
-                    ("mother", mom, "", r.get("mom_contam", "")),
-                    ("father", dad, "", r.get("dad_contam", "")),
+                    ("proband", kid, r.get("inferred_sex", ""), r.get("ped_sex", ""),
+                     r.get("sex_source", ""), r.get("kid_contam", "")),
+                    ("mother", mom, r.get("mom_inferred_sex", ""), "2", "role",
+                     r.get("mom_contam", "")),
+                    ("father", dad, r.get("dad_inferred_sex", ""), "1", "role",
+                     r.get("dad_contam", "")),
                 )
-                for role, sid, sex, contam in per_role:
+                for role, sid, sex, ped_sex, src, contam in per_role:
                     rows.append({
                         "trio_id": tid, "role": role, "sample_id": sid, "mie_rate": mie,
-                        "inferred_sex": sex, "contam": contam, "contam_flag": cflag,
+                        "inferred_sex": sex, "ped_sex": ped_sex, "sex_source": src,
+                        "contam": contam, "contam_flag": cflag,
                     })
     with open(out_tsv, "w", newline="") as out:
         w = csv.DictWriter(
-            out, fieldnames=["trio_id", "role", "sample_id", "mie_rate", "inferred_sex",
-                             "contam", "contam_flag"], delimiter="\t", lineterminator="\n")
+            out, fieldnames=["trio_id", "role", "sample_id", "mie_rate", "inferred_sex", "ped_sex",
+                             "sex_source", "contam", "contam_flag"], delimiter="\t", lineterminator="\n")
         w.writeheader()
         for r in rows:
             w.writerow(r)

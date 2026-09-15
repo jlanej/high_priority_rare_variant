@@ -46,6 +46,7 @@ import sys
 from hprv import annotations as A
 from hprv import audit
 from hprv.config import get, get_bool, load_config
+from hprv.ped import resolve_child_sex
 
 try:
     from scipy.stats import binom, poisson
@@ -158,7 +159,9 @@ def main(argv=None) -> int:
     ap.add_argument("--n-trios", type=int, default=0)
     ap.add_argument("--n-male-trios", type=int, default=0,
                     help="MALE proband count for the X-linked (hemizygous) null; defaults to the "
-                         "count of inferred_sex==1 rows in --qc-report, else --n-trios")
+                         "count of male probands in --qc-report under the same precedence Step 5 "
+                         "applies (a stated PED sex first, Step 0's inferred_sex only when the PED "
+                         "is unknown), else --n-trios")
     ap.add_argument("--qc-report", default="", help="Step 0 qc_report.tsv (male proband count)")
     ap.add_argument("--mutrate", default="",
                     help="Samocha per-gene rate table for the SECONDARY de novo enrichment")
@@ -251,12 +254,15 @@ def main(argv=None) -> int:
                          "SKIPPED (counts only). Pass the resolved-trio count for calibrated p-values.\n")
     # The X-linked (hemizygous-male) family is tested against the MALE proband count: a female
     # proband cannot be a hemizygous carrier, so N_trios overstates that denominator and the
-    # p-value was conservative by the sex ratio. Read Step 0's inferred sex when available.
+    # p-value was conservative by the sex ratio. "Male" here is decided by the SAME precedence
+    # Step 5 judged each trio's chrX calls under (ped.resolve_child_sex: the trios file's stated
+    # sex is canonical; Step 0's chrX inference fills in only an unknown) — counting inferred_sex
+    # alone would size this denominator on a heuristic the calls themselves did not follow.
     n_male = args.n_male_trios or 0
     if not n_male and args.qc_report and __import__("os").path.exists(args.qc_report):
         with open(args.qc_report) as fh:
             n_male = sum(1 for r in csv.DictReader(fh, delimiter="\t")
-                         if (r.get("inferred_sex") or "").strip() == "1")
+                         if resolve_child_sex(r.get("ped_sex"), r.get("inferred_sex"))[0] == "1")
     n_x = n_male if n_male > 0 else n_trios
     if n_trios and not n_male:
         sys.stderr.write("WARN: no male proband count (--n-male-trios / --qc-report); the X-linked "

@@ -19,7 +19,7 @@ from hprv import audit  # noqa: E402
 from hprv import genotype as G  # noqa: E402
 from hprv import igv  # noqa: E402
 from hprv.config import get  # noqa: E402
-from hprv.ped import parse_ped, read_trios_file, write_ped  # noqa: E402
+from hprv.ped import parse_ped, parse_sex, read_trios_file, resolve_child_sex, write_ped  # noqa: E402
 from hprv.selection import build_classifier  # noqa: E402
 
 
@@ -368,13 +368,16 @@ def test_par_x():
 def test_read_trios_file(tmp=None):
     tmp = tmp or _tmp_path(".tsv")
 
-    def read(text):
+    def read_rows(text):
         with open(tmp, "w") as fh:
             fh.write(text)
         try:
             return read_trios_file(tmp)
         finally:
             os.remove(tmp)
+
+    def read(text):
+        return [tuple(t[:3]) for t in read_rows(text)]     # the ID triple, sexes aside
 
     # header order must NOT matter: dad/mom located by name, not position
     assert read("#kid\tmom\tdad\nCH1\tMO1\tFA1\n") == [("CH1", "FA1", "MO1")]
@@ -390,20 +393,76 @@ def test_read_trios_file(tmp=None):
     # a header that names only SOME roles is an error, never a positional guess
     for bad in ("#kid\tparent1\tparent2\nCH1\tFA1\tMO1\n",
                 "#kid\tdad\tmum\nCH1\tFA1\tMO1\n",
-                "#kid\tdad\tmom\tfather\nCH1\tFA1\tMO1\tFA1\n"):   # two columns name the dad
+                "#kid\tdad\tmom\tfather\nCH1\tFA1\tMO1\tFA1\n",   # two columns name the dad
+                "#kid\tsex\nCH1\t1\n"):                            # a sex column with no parents
         try:
             read(bad)
             raise AssertionError(f"accepted an ambiguous header: {bad!r}")
         except ValueError as e:
             assert "trios file" in str(e)
 
+    # --- the OPTIONAL sex columns: the pedigree is the canonical source of sex ---
+    # absent: proband unknown (0), parents at their role — the historical PED exactly
+    assert read_rows("#kid\tdad\tmom\nCH1\tFA1\tMO1\n") == [("CH1", "FA1", "MO1", "0", "1", "2")]
+    assert read_rows("CH1\tFA1\tMO1\n") == [("CH1", "FA1", "MO1", "0", "1", "2")]   # headerless too
+    # present, in every accepted spelling; a blank cell is unknown, not an error
+    rows = read_rows("#kid\tdad\tmom\tkid_sex\nCH1\tFA1\tMO1\tmale\nCH2\tFA2\tMO2\tF\n"
+                     "CH3\tFA3\tMO3\t\nCH4\tFA4\tMO4\t2\nCH5\tFA5\tMO5\tunknown\n")
+    assert [t.kid_sex for t in rows] == ["1", "2", "0", "2", "0"], rows
+    # the aliases: a bare `sex` (or `gender`, or a sample_/proband_ spelling) is the PROBAND's;
+    # the parents' are role-prefixed — and located by NAME, in any order
+    rows = read_rows("#mother_id\tsex\tproband_id\tfather_gender\tfather_id\tmom_sex\n"
+                     "MO1\tm\tCH1\tmale\tFA1\tfemale\n")
+    assert rows == [("CH1", "FA1", "MO1", "1", "1", "2")], rows
+    assert read_rows("#kid\tdad\tmom\tproband_sex\nCH1\tFA1\tMO1\t1\n")[0].kid_sex == "1"
+    assert read_rows("#kid\tdad\tmom\tsample_sex\nCH1\tFA1\tMO1\t2\n")[0].kid_sex == "2"
+    # an unknown parent value defaults to the role; a CONTRADICTING one is an error (it is the
+    # signature of a transposed father/mother, and which column is wrong cannot be guessed)
+    assert read_rows("#kid\tdad\tmom\tdad_sex\tmom_sex\nCH1\tFA1\tMO1\t0\t\n")[0][3:] == ("0", "1", "2")
+    for bad, why in (("#kid\tdad\tmom\tdad_sex\nCH1\tFA1\tMO1\t2\n", "contradicts the father"),
+                     ("#kid\tdad\tmom\tmother_sex\nCH1\tFA1\tMO1\tmale\n", "contradicts the mother"),
+                     # a mis-typed value must fail the file, never read as unknown and hand the
+                     # trio to the chrX inference
+                     ("#kid\tdad\tmom\tsex\nCH1\tFA1\tMO1\tboy\n", "unrecognised sex value"),
+                     ("#kid\tdad\tmom\tsex\tkid_sex\nCH1\tFA1\tMO1\t1\t1\n", "two columns name")):
+        try:
+            read_rows(bad)
+            raise AssertionError(f"accepted a bad sex column: {bad!r}")
+        except ValueError as e:
+            assert why in str(e) and "trios file" in str(e), (bad, str(e))
+    assert parse_sex("Female") == "2" and parse_sex(None) == "0" and parse_sex("NA") == "0"
+
+
+def test_resolve_child_sex_precedence():
+    """THE precedence rule every consumer reads (Step 0 sex_match/sex_source, Step 5's chrX
+    ploidy, Step 6's male count): a stated PED sex is canonical and a disagreeing inference is
+    REPORTED (discordant=True) rather than applied; the inference fills in only an unknown."""
+    assert resolve_child_sex("1", "1") == ("1", "ped", False)
+    assert resolve_child_sex("2", "1") == ("2", "ped", True)       # kept + flagged, never replaced
+    assert resolve_child_sex("1", "2") == ("1", "ped", True)
+    assert resolve_child_sex("1", None) == ("1", "ped", False)      # no inference: nothing to contest
+    assert resolve_child_sex("2", "") == ("2", "ped", False)
+    assert resolve_child_sex("0", "1") == ("1", "inferred", False)  # unknown PED: inference fills in
+    assert resolve_child_sex("", "2") == ("2", "inferred", False)
+    assert resolve_child_sex(None, "1") == ("1", "inferred", False)
+    assert resolve_child_sex("0", None) == ("0", "none", False)
+    assert resolve_child_sex("None", "") == ("0", "none", False)     # parse_ped's str(None)
+    assert resolve_child_sex("3", "1") == ("1", "inferred", False)   # garbage PED sex is unknown
+
 
 def test_write_ped_roundtrip(tmp=None):
     tmp = tmp or _tmp_path(".ped")
     write_ped(tmp, "CH1", "FA1", "MO1", kid_sex="2")
     ped = parse_ped(tmp)
+    with open(tmp) as fh:
+        lines = [ln.split("\t") for ln in fh.read().splitlines()]
     os.remove(tmp)
     assert ped == {"child": "CH1", "father": "FA1", "mother": "MO1", "sex": "2"}
+    # the parents' sex is their role's unless told otherwise (read_trios_file refuses a contradiction)
+    assert [(ln[1], ln[4]) for ln in lines] == [("CH1", "2"), ("FA1", "1"), ("MO1", "2")], lines
+    write_ped(tmp, "CH1", "FA1", "MO1", kid_sex="0", dad_sex="1", mom_sex="2")
+    assert parse_ped(tmp)["sex"] == "0"
+    os.remove(tmp)
 
 
 def test_audit_record_and_summarize(tmpdir=None):
@@ -2940,6 +2999,109 @@ def test_step5_sex_chromosomes_and_gates():
     assert rows[0]["child_gt"] == "T/T" and rows[0]["mother_gt"] == "A/T"
 
 
+def test_step5_pedigree_sex_is_kept_and_a_disagreeing_inference_is_flagged():
+    """The PED (trios-file) sex is what every chrX decision is judged under, and main() resolves
+    it through ped.resolve_child_sex: a known PED sex that Step 0's inference disagrees with is
+    KEPT, every row of the trio carries `sex_discordant_inference`, and `child_sex` /
+    `child_sex_source` say which sex was used and who said so — the fallback is never silent in
+    either direction. The flag survives the dominant branch, which ASSIGNS flags."""
+    s5 = _load_step5()
+    X = 10_000_000
+    cfg = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+
+    def run(ped, variants):
+        vcf = _FakeVCF(variants)
+        trio = s5.Trio(vcf, ped, G.GtThresholds())
+        rows, st = s5.screen_trio("T1", vcf, trio, cfg)
+        return trio, rows, st
+    variants = [_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-4),          # male: x_linked_recessive
+                _v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5),        # dominant (flags ASSIGNED)
+                _v5("chr1", 200, "G2", (_HET, _HR, _HET), af=5e-5),        # comp-het pair in G2
+                _v5("chr1", 300, "G2", (_HET, _HET, _HR), af=5e-5)]
+    # what main() hands in after resolve_child_sex("1", "2"): the PED's male is KEPT
+    ped = {"child": "C", "father": "D", "mother": "M", "sex": "1", "sex_source": "ped",
+           "sex_discordant": True}
+    trio, rows, _ = run(ped, variants)
+    assert trio.child_male and trio.child_sex == "1" and trio.child_sex_source == "ped"
+    modes = sorted(r["mode"] for r in rows)
+    assert modes == ["compound_het", "compound_het", "dominant", "x_linked_recessive"], modes
+    assert all(r["child_sex"] == "1" and r["child_sex_source"] == "ped" for r in rows)
+    assert all("sex_discordant_inference" in r["flags"].split(";") for r in rows), _calls(rows)
+    dom = [r for r in rows if r["mode"] == "dominant"][0]
+    assert dom["flags"] == "origin=mat;sex_discordant_inference", dom["flags"]   # after, not instead
+    # the same PED sex with NO disagreement: identical calls, no flag anywhere
+    ped_ok = dict(ped, sex_discordant=False)
+    _, rows_ok, _ = run(ped_ok, variants)
+    assert sorted(r["mode"] for r in rows_ok) == modes
+    assert all("sex_discordant" not in r["flags"] for r in rows_ok)
+    assert [r for r in rows_ok if r["mode"] == "dominant"][0]["flags"] == "origin=mat"
+    # the inference filled in an UNKNOWN PED sex: the source says so on every row
+    ped_inf = {"child": "C", "father": "D", "mother": "M", "sex": "2", "sex_source": "inferred",
+               "sex_discordant": False}
+    _, rows_inf, _ = run(ped_inf, variants)
+    assert rows_inf and all(r["child_sex"] == "2" and r["child_sex_source"] == "inferred" for r in rows_inf)
+    assert "x_linked_recessive" not in {r["mode"] for r in rows_inf}      # judged as female
+    # a bare PED handed straight to Trio (no main()): a stated sex reads `ped`, unknown reads `none`
+    assert s5.Trio(_FakeVCF([]), {"child": "C", "father": "D", "mother": "M", "sex": "2"},
+                   G.GtThresholds()).child_sex_source == "ped"
+    t0 = s5.Trio(_FakeVCF([]), {"child": "C", "father": "D", "mother": "M", "sex": "0"}, G.GtThresholds())
+    assert t0.child_sex == "0" and t0.child_sex_source == "none" and not t0.sex_discordant
+    # the columns sit in the curated header, ahead of the info_* block
+    assert s5.COLS.index("child_sex") + 1 == s5.COLS.index("child_sex_source") < s5.COLS.index("flags")
+
+
+def test_step6_male_count_follows_the_pedigree_first_precedence():
+    """Step 6 sizes the X-linked null on the male probands. Read from qc_report.tsv, "male" must
+    be decided by the SAME rule Step 5 judged the chrX calls by (ped_sex first, inferred_sex only
+    where the PED is unknown) — counting inferred_sex alone would size the denominator on a
+    heuristic the calls did not follow (0/221 fathers read male on one diploid-called cohort)."""
+    import csv as _csv
+    import shutil
+    import types
+    _requires("yaml")
+    spec = importlib.util.spec_from_file_location(
+        "s6b", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.binom = types.SimpleNamespace(sf=lambda k, n, p: 0.5)
+    m.poisson = types.SimpleNamespace(sf=lambda k, mu: 0.5)
+    d = tempfile.mkdtemp(prefix="_hprv_s6sex_")
+    old_adir = os.environ.get("HPRV_AUDIT_DIR")
+    try:
+        calls = os.path.join(d, "calls.tsv")
+        cols = ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
+                "consequence", "rarity_af", "rarity_oracle"]
+        with open(calls, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=cols, delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerow({"trio_id": "T1", "mode": "x_linked_recessive", "pair_id": "", "chrom": "chrX",
+                        "pos": 500, "ref": "A", "alt": "T", "gene": "ENSG_GENEX", "symbol": "GENEX",
+                        "consequence": "missense_variant", "rarity_af": "", "rarity_oracle": "faf95"})
+        qc = os.path.join(d, "qc_report.tsv")
+        with open(qc, "w") as fh:
+            fh.write("trio_id\tped_sex\tinferred_sex\n"
+                     "T1\t1\t2\n"        # PED male, inference female: male (PED wins)
+                     "T2\t2\t1\n"        # PED female, inference male: NOT male
+                     "T3\t0\t1\n"        # PED unknown, inferred male: male
+                     "T4\t0\t\n"         # nothing: not male
+                     "T5\t1\t\n")        # PED male, no inference: male
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("burden: {min_carriers: 2}\n")
+        os.environ["HPRV_AUDIT_DIR"] = os.path.join(d, "audit")
+        out = os.path.join(d, "genes.ranked.tsv")
+        assert m.main(["--calls", calls, "--out", out, "--config", cfgp, "--n-trios", "5",
+                       "--qc-report", qc]) == 0
+        got = audit._read(os.environ["HPRV_AUDIT_DIR"]).get(("06_burden", "global", "n_male_trios"))
+        assert got == "3", f"expected 3 male probands under PED-first precedence, got {got!r}"
+    finally:
+        if old_adir is None:
+            os.environ.pop("HPRV_AUDIT_DIR", None)
+        else:
+            os.environ["HPRV_AUDIT_DIR"] = old_adir
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_step5_accounts_for_every_examined_variant():
     """Step 5 used to record only what it emitted. Now every examined variant is skipped, called,
     or classified by the FIRST condition that left it with no row — and the identity
@@ -3073,6 +3235,55 @@ def test_step0_sex_inference_and_the_parent_swap_blind_spot():
         for gd in (HR, HET, HA):
             for gm in (HR, HET, HA):
                 assert s0.mendelian_violation(gc, gd, gm) == s0.mendelian_violation(gc, gm, gd)
+
+
+def test_step0_parent_mismatch_diagnosis_and_pass_only_sex_scan():
+    """A transposed father/mother produces EXACTLY father=2 AND mother=1; the old WARN asserted
+    'roles transposed' for father=2/mother=2 as well, a pattern a transposition cannot produce
+    (it is a swap, or — on a diploid-called callset — a cutoff below where males sit). And the
+    chrX scan counts only FILTER-passing, fully-called sites: filtered chrX records are enriched
+    for the artifacts that render a hemizygous male het."""
+    s0 = _load_step0()
+    d = s0.parent_sex_diagnosis
+    assert "transposed" in d("2", "1", 0.10) and "inverted" in d("2", "1", 0.10)
+    for dad, mom in (("2", "2"), ("2", None)):
+        msg = d(dad, mom, 0.10)
+        assert "not a transposition" in msg and "x_het_male_max" in msg and "0.1" in msg, msg
+    for dad, mom in (("1", "1"), (None, "1")):
+        msg = d(dad, mom, 0.10)
+        assert "not a transposition" in msg and "mom_x_het_ratio" in msg, msg
+
+    class _X:
+        def __init__(self, pos, gt, filt=None):
+            self.CHROM, self.POS, self.ALT, self.FILTER = "chrX", pos, ["T"], filt
+            self.gt_types = [gt]
+            self.gt_quals, self.gt_depths = [99], [40]
+
+    class _FakeX:
+        """A cyvcf2.VCF stand-in: one sample, an indexed chrX jump, records as given."""
+        samples, seqnames = ["S"], ["chr1", "chrX"]
+        records = []
+
+        def __init__(self, path, strict_gt=False):
+            assert strict_gt is True, "scan_sex must open with strict_gt=True (a 1/. is not HET)"
+
+        def __call__(self, region):
+            return iter(self.records)
+
+        def __iter__(self):
+            return iter(self.records)
+
+        def close(self):
+            pass
+    x0 = 3_000_000                                    # non-PAR
+    _FakeX.records = [_X(x0, G.HET), _X(x0 + 1, G.HOM_ALT), _X(x0 + 2, G.HOM_ALT),
+                      _X(x0 + 3, G.HET, filt="LowQual"), _X(x0 + 4, G.HET, filt="VQSRTrancheSNP99.90to100.00"),
+                      _X(20_000, G.HET),              # PAR1: never counted
+                      _X(x0 + 5, G.UNKNOWN)]          # strict_gt renders a half-call UNKNOWN
+    s0.VCF = _FakeX
+    assert s0.scan_sex("any.vcf", "S", G.GtThresholds(), max_x=0) == (1, 2), \
+        "only the PASS/'.' non-PAR fully-called sites count (the two filtered hets are skipped)"
+    assert s0.scan_sex("any.vcf", "NOT_A_SAMPLE", G.GtThresholds(), max_x=0) == (0, 0)
 
 
 def test_config_validation_refuses_the_knobs_that_silently_kill_a_rung():

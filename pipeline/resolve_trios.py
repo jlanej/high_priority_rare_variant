@@ -6,9 +6,14 @@ plus a VCF source (directory and/or list). For each trio this:
   1. locates the VCF(s) containing ALL THREE members (matched EXACTLY by sample ID,
      never by column order; additional members in the VCF are fine),
   2. picks the most trio-specific VCF (fewest samples; lexical tie-break),
-  3. validates membership and generates a standard PED,
+  3. validates membership and generates a standard PED — carrying the trios file's stated
+     sexes when it has the optional kid_sex/dad_sex/mom_sex columns (hprv.ped): the PROBAND's
+     stated sex is canonical for Step 5's chrX ploidy (Step 0's chrX inference only checks it),
+     an absent one is written as 0 and Step 0's inference fills in downstream, and the parents
+     default to their role,
   4. emits a resolved manifest (trio_id, vcf, ped, samples) for the rest of the
-     pipeline, plus a resolution audit (what mapped where, and why anything didn't).
+     pipeline, plus a resolution audit (what mapped where, and why anything didn't, and which
+     probands carried a stated sex).
 
 Trios with NO VCF containing all three members are reported loudly and skipped (never
 guessed) — mirroring the group's pedigree.py. A trio that matches MORE THAN ONE VCF is
@@ -103,13 +108,14 @@ def main(argv=None) -> int:
     manifest = os.path.join(args.outdir, "trios.resolved.tsv")
     res_audit = os.path.join(args.outdir, "trio_resolution.tsv")
 
-    n_res = n_unres = n_ambig = 0
+    n_res = n_unres = n_ambig = n_sex = 0
     seen_kids = set()
     with open(manifest, "w") as mf, open(res_audit, "w") as af:
         mf.write("trio_id\tvcf\tped\tsamples\n")
         af.write("kid\tdad\tmom\tstatus\tchosen_vcf\tn_candidate_vcfs\t"
-                 "missing_members\tn_samples_in_chosen\n")
-        for kid, dad, mom in trios:
+                 "missing_members\tn_samples_in_chosen\tkid_sex\n")
+        for t in trios:
+            kid, dad, mom = t.kid, t.dad, t.mom
             # trio_id (= proband) must be unique — a duplicate would write two manifest rows and
             # overwrite the PED, silently losing one intended analysis. Keep the first, skip + warn.
             if kid in seen_kids:
@@ -123,7 +129,7 @@ def main(argv=None) -> int:
             if not candidates:
                 n_unres += 1
                 miss = ",".join(missing) if missing else "no VCF has all three together"
-                af.write(f"{kid}\t{dad}\t{mom}\tunresolved\t\t0\t{miss}\t\n")
+                af.write(f"{kid}\t{dad}\t{mom}\tunresolved\t\t0\t{miss}\t\t{t.kid_sex}\n")
                 sys.stderr.write(f"WARN: {kid}: unresolved — {miss}\n")
                 continue
             # most trio-specific: fewest samples, then lexical path
@@ -133,10 +139,15 @@ def main(argv=None) -> int:
                 n_ambig += 1
             n_res += 1
             ped = os.path.join(ped_dir, f"{kid}.ped")
-            write_ped(ped, kid, dad, mom, kid_sex="0")  # sex unknown; Step 5 infers X-ploidy
+            # The trios file's sex is CANONICAL: a stated proband sex (1/2) is what Step 5 judges
+            # chrX ploidy under and what Step 0 checks its chrX inference AGAINST; only an
+            # unknown (0) is filled in from that inference downstream (ped.resolve_child_sex).
+            # The parents are at their role's sex (read_trios_file refused any contradiction).
+            write_ped(ped, kid, dad, mom, kid_sex=t.kid_sex, dad_sex=t.dad_sex, mom_sex=t.mom_sex)
+            n_sex += t.kid_sex in ("1", "2")
             mf.write(f"{kid}\t{chosen}\t{ped}\t{kid},{dad},{mom}\n")
             af.write(f"{kid}\t{dad}\t{mom}\t{status}\t{chosen}\t{len(candidates)}\t"
-                     f"\t{len(v2s[chosen])}\n")
+                     f"\t{len(v2s[chosen])}\t{t.kid_sex}\n")
 
     audit.record("resolve", "trios_input", len(trios))
     audit.record("resolve", "vcfs_scanned", len(v2s))
@@ -144,11 +155,16 @@ def main(argv=None) -> int:
     audit.record("resolve", "trios_resolved", n_res)
     audit.record("resolve", "trios_unresolved", n_unres)
     audit.record("resolve", "trios_multi_vcf", n_ambig)
+    # how many probands the pedigree SPEAKS for; the rest ride on Step 0's chrX inference
+    audit.record("resolve", "trios_kid_sex_stated", n_sex)
 
     sys.stderr.write(
         f"Resolve complete: {n_res}/{len(trios)} trios resolved "
         f"({n_unres} unresolved, {n_ambig} matched >1 VCF) over {len(v2s)} VCFs.\n"
-        f"  manifest: {manifest}\n  resolution audit: {res_audit}\n"
+        f"  proband sex stated in the trios file for {n_sex}/{n_res} resolved trios"
+        + ("" if n_sex == n_res else
+           f"; the other {n_res - n_sex} fall back to Step 0's chrX inference (qc.x_het_male_max)")
+        + f"\n  manifest: {manifest}\n  resolution audit: {res_audit}\n"
     )
     if n_res == 0:
         sys.stderr.write("ERROR: no trios resolved to a VCF — check IDs and VCF source\n")

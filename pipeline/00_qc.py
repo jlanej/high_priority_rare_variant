@@ -11,9 +11,16 @@ flags trios that fail any of them:
   * Mendelian-error rate — a proxy for sample swaps / contamination. NOT for a father/mother
     label swap: the rule is symmetric under exchanging the parents, so that swap is invisible
     to it by construction — which is what the next gate is for.
-  * chrX-heterozygosity sex inference: the child's vs. the PED sex (when the PED states one),
-    and BOTH PARENTS' vs. their roles (the PED always states those). A male in the mother slot
-    is the one direct detector of transposed parents.
+  * chrX-heterozygosity sex inference for all three members. The PROBAND's is checked against
+    the PED sex when the trios file stated one (`sex_match`; the PED is canonical — Step 5 keeps
+    it and flags the disagreement, this step never overrides it) and is the fallback when it did
+    not (`sex_source`, via ped.resolve_child_sex). BOTH PARENTS' are checked against their roles
+    (the PED always states those): a male in the mother slot is the one direct detector of
+    transposed parents. The inference is a HEURISTIC with a callset-dependent cutoff
+    (`qc.x_het_male_max`): a diploid-called male's non-PAR chrX het ratio often sits well above
+    the 0.10 default, so the report carries every member's raw ratio (`x_het_ratio`,
+    `dad_x_het_ratio`, `mom_x_het_ratio`) for calibration, and a cohort where most fathers read
+    female is reported as a miscalibrated cutoff, not as mass transposition.
   * Per-member genotype no-call rate on the scanned sites. A jointly genotyped trio carries an
     affirmative `0/0` for a non-carrier parent; a merge of single-sample callsets carries `./.`
     there instead, and Step 5 then loses every de novo and marks every inherited call
@@ -39,6 +46,7 @@ from __future__ import annotations
 import argparse
 import csv
 import itertools
+import statistics
 import sys
 
 from cyvcf2 import VCF
@@ -47,7 +55,7 @@ from hprv import audit
 from hprv import contamination as C
 from hprv import genotype as G
 from hprv.config import get, load_config
-from hprv.ped import parse_ped
+from hprv.ped import parse_ped, resolve_child_sex
 
 HOM_REF, HET, HOM_ALT = G.HOM_REF, G.HET, G.HOM_ALT
 
@@ -78,15 +86,20 @@ def _pick_x_contig(seqnames):
     return None
 
 
-def scan_sex(vcf_path, child_id, thr, max_x):
-    """chrX non-PAR het/hom counts in the child, as a DEDICATED pass.
+def scan_sex(vcf_path, sample_id, thr, max_x):
+    """chrX non-PAR het/hom counts for one member, as a DEDICATED pass.
 
     chrX sorts after all autosomes, so an autosomal MIE cap in the main pass would
     otherwise starve sex inference on WGS trios. Uses the index to jump straight to
     chrX; falls back to a full scan (filtered to chrX) when the VCF is unindexed.
+
+    Only FILTER-passing records (PASS or `.`, the same convention as Step 1 and Step 5) with a
+    fully called genotype count: a filtered chrX record is enriched for exactly the mapping
+    artifacts that render a hemizygous male as het, and cyvcf2's default reads a half-called
+    `1/.` as HET — both inflate the male het ratio toward the female side of the cutoff.
     """
-    vcf = VCF(vcf_path)
-    ci = {s: i for i, s in enumerate(vcf.samples)}.get(child_id)
+    vcf = VCF(vcf_path, strict_gt=True)      # a half-called 1/. is UNKNOWN, never HET
+    ci = {s: i for i, s in enumerate(vcf.samples)}.get(sample_id)
     x = _pick_x_contig(vcf.seqnames)
     if ci is None or x is None:
         vcf.close()
@@ -107,6 +120,8 @@ def scan_sex(vcf_path, child_id, thr, max_x):
     x_het = x_hom = 0
     for v in it:
         if v.CHROM.replace("chr", "") != "X" or G.in_par_x(v) or len(v.ALT) != 1:
+            continue
+        if v.FILTER:                  # cyvcf2: None for PASS and '.'; anything else is filtered
             continue
         gq, dp = G.gq(v, ci), G.dp(v, ci)
         if gq is None or gq < thr.min_gq or dp is None or dp < thr.min_dp:
@@ -134,10 +149,11 @@ def qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff=0.10, sex_min_sites=20):
     # sex inference runs as its own chrX pass so the autosomal MIE cap can't disable it
     x_het, x_hom = scan_sex(vcf_path, ped["child"], thr, max_x=(max_sites or 0))
     # ...and for the PARENTS. Their sex is the one thing the PED asserts with certainty
-    # (father = 1, mother = 2), so this is the only sex check that is reachable in the shipped
-    # flow — the generated PED leaves the child's sex unknown, which made `sex_match` a constant
-    # 1 — and it is the one direct detector of a transposed mother/father, which the Mendelian-
-    # error rate cannot see (mendelian_violation is symmetric in gd/gm).
+    # (father = 1, mother = 2), so this check is reachable even when the trios file states no
+    # proband sex, and it is the one direct detector of a transposed mother/father, which the
+    # Mendelian-error rate cannot see (mendelian_violation is symmetric in gd/gm). Their raw
+    # het ratios are also the CALIBRATION set for qc.x_het_male_max: every father is a known
+    # male and every mother a known female, so the cutoff belongs in the gap between the two.
     px = {role: scan_sex(vcf_path, ped[role], thr, max_x=(max_sites or 0))
           for role in ("father", "mother")}
 
@@ -185,15 +201,48 @@ def qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff=0.10, sex_min_sites=20):
     x_het_ratio = (x_het / x_total) if x_total else None
     # only call sex with enough informative chrX sites, else leave it unknown (fail-soft)
     inferred = infer_sex(x_het, x_hom, sex_cutoff, sex_min_sites)
+
+    def _ratio(h, a):
+        return (h / (h + a)) if (h + a) else None
+
     return {
         "n_sites": considered, "mie_errors": errors, "mie_rate": mie_rate,
         "x_sites": x_total, "x_het_ratio": x_het_ratio, "inferred_sex": inferred,
         "dad_sex": infer_sex(*px["father"], sex_cutoff, sex_min_sites),
         "mom_sex": infer_sex(*px["mother"], sex_cutoff, sex_min_sites),
+        "dad_x_sites": sum(px["father"]), "dad_x_het_ratio": _ratio(*px["father"]),
+        "mom_x_sites": sum(px["mother"]), "mom_x_het_ratio": _ratio(*px["mother"]),
         "n_records": n_records,
         "nocall_rate": {r: ((nocall[r] / n_records) if n_records else None) for r in ("kid", "dad", "mom")},
         "charr": {r: C.charr(cref[r], cdp[r]) for r in ("kid", "dad", "mom")},
     }
+
+
+def parent_sex_diagnosis(dad_sex, mom_sex, cutoff) -> str:
+    """What a parent-sex mismatch pattern can and cannot mean (the WARN text).
+
+    A transposed father/mother produces EXACTLY father=2 AND mother=1 (each parent reads as the
+    other's sex). A father reading female while the mother does NOT read male (2/2, 2/None) is
+    not that pattern — it is a sample swap/mislabel, OR the far more common case on a
+    diploid-called callset: `qc.x_het_male_max` set below where genuine males' chrX het ratios
+    sit, so a known male reads female. A mother reading male while the father does not read
+    female (1/1, None/1) is a swap or a genuinely het-poor chrX (LOH, low coverage). Naming
+    "transposed" for a pattern a transposition cannot produce sent reviewers to check the wrong
+    thing.
+    """
+    if dad_sex == "2" and mom_sex == "1":
+        return ("both parents read as the OTHER sex: the trios-file father/mother roles for this "
+                "trio are probably transposed, and every parent-of-origin call would be inverted")
+    if dad_sex == "2":
+        return ("the father's chrX reads female but the mother's does NOT read male, so this is "
+                "not a transposition (that gives 2/1): either a sample swap/mislabel, or — the "
+                f"common case on a diploid-called callset — qc.x_het_male_max ({cutoff}) is below "
+                "where genuine males' chrX het ratios sit (compare dad_x_het_ratio with "
+                "mom_x_het_ratio across the cohort; see docs/inheritance_and_genotype_qc.md)")
+    return ("the mother's chrX reads male but the father's does NOT read female, so this is not "
+            "a transposition (that gives 2/1): a sample swap/mislabel, or a mother whose chrX is "
+            "genuinely het-poor (loss of heterozygosity, low coverage) — check mom_x_het_ratio "
+            "and mom_x_sites")
 
 
 def main(argv=None) -> int:
@@ -223,13 +272,29 @@ def main(argv=None) -> int:
     with open(args.manifest) as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
 
+    # sex_source: which sex Step 5 will judge the proband's chrX ploidy under — `ped` (the trios
+    # file stated it; canonical), `inferred` (it did not; Step 0's chrX call fills in) or `none`
+    # (neither; Step 5 skips the sex chromosomes). sex_match is THREE-state: 1 = the PED sex and a
+    # positive inference agree, 0 = they disagree (reported, never resolved here), blank = no
+    # comparison was possible (no stated sex, or too few chrX sites). The parents' raw het ratios
+    # (dad_/mom_x_het_ratio) are the calibration set for qc.x_het_male_max.
     cols = ["trio_id", "n_sites", "mie_errors", "mie_rate", "x_sites", "x_het_ratio", "inferred_sex",
-            "ped_sex", "sex_match", "dad_inferred_sex", "mom_inferred_sex", "parent_sex_flag",
+            "ped_sex", "sex_source", "sex_match", "dad_inferred_sex", "dad_x_sites", "dad_x_het_ratio",
+            "mom_inferred_sex", "mom_x_sites", "mom_x_het_ratio", "parent_sex_flag",
             "mie_flag", "kid_contam", "dad_contam", "mom_contam", "contam_source", "contam_flag",
             "n_records", "kid_nocall_rate", "dad_nocall_rate", "mom_nocall_rate", "nocall_flag",
             "overall_pass"]
     n_fail = n_done = 0
-    n_flag = {"parent_sex": 0, "nocall": 0}
+    n_flag = {"parent_sex": 0, "nocall": 0, "sex_discordant": 0}
+    n_source = {"ped": 0, "inferred": 0, "none": 0}
+    # calibration evidence for qc.x_het_male_max: fathers are known males, mothers known females
+    n_father = {"1": 0, "2": 0}
+    n_mother = {"1": 0, "2": 0}
+    father_ratios, mother_ratios = [], []
+    # fathers reading female OUTSIDE the transposition signature (father=2 AND mother=1): a
+    # transposed trio's "father" is a real female and reads so under any cutoff, so it is
+    # evidence about the roles, not about the cutoff — the calibration guard must not count it
+    n_father_female_uncalibrated = 0
 
     def member_contam(sample, role, charr_map):
         """Return (value, source, flagged) for one member — verifyBamID freemix if present,
@@ -252,12 +317,15 @@ def main(argv=None) -> int:
                 sys.stderr.write(f"WARN: {tid}: PED samples not in VCF; skipping\n")
                 continue
             ped_sex = str(ped["sex"])
-            # Sex-swap gate: only a MISMATCH against a KNOWN expected sex is a failure. The generated
-            # PED leaves kid sex unknown ('0'), so an unknown/absent ped_sex = "no expectation" = pass
-            # (mirrors the un-inferable branch); otherwise every inferable trio would be flagged.
-            sex_known = ped_sex not in ("0", "", "None")
-            sex_match = "0" if (sex_known and res["inferred_sex"] is not None
-                                and res["inferred_sex"] != ped_sex) else "1"
+            # Sex-swap gate, through the ONE precedence rule (ped.resolve_child_sex) so this column
+            # says exactly what Step 5 will do: a stated PED sex is canonical and only a positive
+            # inference that DISAGREES is a failure (0); agreement is 1; no stated sex or no
+            # inference is blank — "no comparison", not "matched".
+            _sex, sex_source, discordant = resolve_child_sex(ped_sex, res["inferred_sex"])
+            sex_match = ("0" if discordant else
+                         "1" if (sex_source == "ped" and res["inferred_sex"] is not None) else "")
+            n_source[sex_source] += 1
+            n_flag["sex_discordant"] += discordant
             mie_flag = "1" if (res["mie_rate"] is not None and res["mie_rate"] > mie_thr) else "0"
 
             contam, flags, src = {}, False, "charr"
@@ -275,6 +343,15 @@ def main(argv=None) -> int:
             # are wrong for this trio (or a sample is), and every parent-of-origin call would be
             # inverted. Only a positive inference counts — too few X sites is "no expectation".
             parent_sex_flag = "1" if (res["dad_sex"] == "2" or res["mom_sex"] == "1") else "0"
+            for sx, tally in ((res["dad_sex"], n_father), (res["mom_sex"], n_mother)):
+                if sx in tally:
+                    tally[sx] += 1
+            if res["dad_sex"] == "2" and res["mom_sex"] != "1":
+                n_father_female_uncalibrated += 1
+            if res["dad_x_het_ratio"] is not None:
+                father_ratios.append(res["dad_x_het_ratio"])
+            if res["mom_x_het_ratio"] is not None:
+                mother_ratios.append(res["mom_x_het_ratio"])
             nc = res["nocall_rate"]
             nocall_flag = "1" if any(nc[r] is not None and nc[r] > max_nocall for r in nc) else "0"
             n_flag["parent_sex"] += parent_sex_flag == "1"
@@ -286,7 +363,7 @@ def main(argv=None) -> int:
             # it, so a flagged trio still contributes calls and recurrence pending human review.
             # Automated gating is deliberately deferred (never-drop ethos + the contamination proxy's
             # limited sensitivity, see contamination.py); it would be a config-gated policy change.
-            overall = "1" if (mie_flag == "0" and sex_match == "1" and contam_flag == "0"
+            overall = "1" if (mie_flag == "0" and sex_match != "0" and contam_flag == "0"
                               and parent_sex_flag == "0" and nocall_flag == "0") else "0"
             if overall == "0":
                 n_fail += 1
@@ -297,8 +374,12 @@ def main(argv=None) -> int:
                 "x_sites": res["x_sites"],
                 "x_het_ratio": ("" if res["x_het_ratio"] is None else f"{res['x_het_ratio']:.3g}"),
                 "inferred_sex": res["inferred_sex"] or "", "ped_sex": ped_sex,
-                "sex_match": sex_match, "dad_inferred_sex": res["dad_sex"] or "",
-                "mom_inferred_sex": res["mom_sex"] or "", "parent_sex_flag": parent_sex_flag,
+                "sex_source": sex_source, "sex_match": sex_match,
+                "dad_inferred_sex": res["dad_sex"] or "", "dad_x_sites": res["dad_x_sites"],
+                "dad_x_het_ratio": ("" if res["dad_x_het_ratio"] is None else f"{res['dad_x_het_ratio']:.3g}"),
+                "mom_inferred_sex": res["mom_sex"] or "", "mom_x_sites": res["mom_x_sites"],
+                "mom_x_het_ratio": ("" if res["mom_x_het_ratio"] is None else f"{res['mom_x_het_ratio']:.3g}"),
+                "parent_sex_flag": parent_sex_flag,
                 "mie_flag": mie_flag,
                 "kid_contam": ("" if contam["kid"] is None else f"{contam['kid']:.4g}"),
                 "dad_contam": ("" if contam["dad"] is None else f"{contam['dad']:.4g}"),
@@ -315,11 +396,22 @@ def main(argv=None) -> int:
             for metric in ("overall_pass", "mie_flag", "sex_match", "parent_sex_flag",
                            "contam_flag", "nocall_flag"):
                 audit.record("00_qc", metric, row[metric], scope=tid)
+            audit.record("00_qc", f"sex_source.{sex_source}", 1, scope=tid)
+            if discordant:
+                sys.stderr.write(
+                    f"WARN: {tid}: PROBAND SEX MISMATCH — the trios file says {ped_sex}, the chrX "
+                    f"inference reads {res['inferred_sex']} (1=male, 2=female; het ratio "
+                    f"{row['x_het_ratio']} over {res['x_sites']} sites, cutoff {sex_cutoff}). The "
+                    "PED sex is canonical: Step 5 keeps it and flags every call for this trio "
+                    "sex_discordant_inference. If the pedigree is wrong, fix the trios file; if the "
+                    "inference is wrong for this callset, calibrate qc.x_het_male_max against the "
+                    "parents' dad_x_het_ratio / mom_x_het_ratio (docs/inheritance_and_genotype_qc.md). "
+                    "A genuine mismatch is a sample-swap tell for the whole trio.\n")
             if parent_sex_flag == "1":
                 sys.stderr.write(f"WARN: {tid}: PARENT SEX MISMATCH — father's chrX reads "
                                  f"{res['dad_sex'] or '?'}, mother's reads {res['mom_sex'] or '?'} "
-                                 "(1=male, 2=female). The trios-file roles for this trio are probably "
-                                 "transposed; every parent-of-origin call would be inverted.\n")
+                                 "(1=male, 2=female): "
+                                 f"{parent_sex_diagnosis(res['dad_sex'], res['mom_sex'], sex_cutoff)}.\n")
             if nocall_flag == "1":
                 sys.stderr.write(f"WARN: {tid}: no-call rate above qc.max_nocall_rate ({max_nocall}) "
                                  f"— kid {row['kid_nocall_rate']} dad {row['dad_nocall_rate']} mom "
@@ -329,9 +421,44 @@ def main(argv=None) -> int:
     audit.record("00_qc", "trios_qc", n_done)
     audit.record("00_qc", "trios_flagged", n_fail)
     audit.record("00_qc", "trios_parent_sex_flag", n_flag["parent_sex"])
+    audit.record("00_qc", "trios_sex_discordant_inference", n_flag["sex_discordant"])
     audit.record("00_qc", "trios_nocall_flag", n_flag["nocall"])
+    for src, n in sorted(n_source.items()):
+        audit.record("00_qc", f"trios_sex_source.{src}", n)
+    # The calibration evidence, in the audit so a methods section can quote it: how the KNOWN
+    # males (fathers) and KNOWN females (mothers) read under the configured cutoff.
+    audit.record("00_qc", "fathers_inferred_male", n_father["1"])
+    audit.record("00_qc", "fathers_inferred_female", n_father["2"])
+    audit.record("00_qc", "mothers_inferred_female", n_mother["2"])
+    audit.record("00_qc", "mothers_inferred_male", n_mother["1"])
+    if father_ratios:
+        audit.record("00_qc", "father_x_het_ratio_median", f"{statistics.median(father_ratios):.3g}")
+    if mother_ratios:
+        audit.record("00_qc", "mother_x_het_ratio_median", f"{statistics.median(mother_ratios):.3g}")
     sys.stderr.write(f"Step 0 complete: QC report -> {args.out} ({n_fail} trio(s) flagged; "
-                     f"parent-sex {n_flag['parent_sex']}, no-call {n_flag['nocall']})\n")
+                     f"parent-sex {n_flag['parent_sex']}, proband sex discordant "
+                     f"{n_flag['sex_discordant']}, no-call {n_flag['nocall']}); proband sex from "
+                     f"the trios file for {n_source['ped']}, from the chrX inference for "
+                     f"{n_source['inferred']}, unresolved for {n_source['none']}\n")
+    # CALIBRATION GUARD. Fathers are known males, so more fathers reading female than male is
+    # not mass transposition — it is the cutoff sitting below where this callset's males lie
+    # (a GATK diploid-called male's non-PAR chrX het ratio routinely exceeds 0.10). Parameter-
+    # free on purpose: a majority of known males mis-read needs no threshold to be wrong. Trios
+    # showing the transposition signature (father=2 AND mother=1) are excluded from the count.
+    if n_father_female_uncalibrated > n_father["1"]:
+        sys.stderr.write(
+            f"WARN: qc.x_het_male_max ({sex_cutoff}) looks MISCALIBRATED for this callset: "
+            f"{n_father_female_uncalibrated} of {n_father['1'] + n_father_female_uncalibrated} "
+            f"fathers with a chrX inference (transposition-pattern trios excluded) read "
+            f"FEMALE (median father het ratio "
+            f"{statistics.median(father_ratios) if father_ratios else float('nan'):.3g}, median "
+            f"mother {statistics.median(mother_ratios) if mother_ratios else float('nan'):.3g}). "
+            "Set the cutoff in the gap between the father and mother distributions "
+            "(dad_x_het_ratio / mom_x_het_ratio in the report; docs/inheritance_and_genotype_qc.md) "
+            "and rm qc_report.tsv.done. Until then: the parent_sex_flag rows above are NOT evidence "
+            f"of transposition, a stated trios-file sex is unaffected ({n_source['ped']} trio(s)), "
+            f"but {n_source['inferred']} trio(s) with NO stated sex have their chrX ploidy judged "
+            "on this inference in Step 5.\n")
     return 0
 
 

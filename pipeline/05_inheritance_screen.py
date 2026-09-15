@@ -29,7 +29,7 @@ from hprv import audit
 from hprv import genotype as G
 from hprv import splice as _splice
 from hprv.config import get, get_bool, load_config, validate_filters
-from hprv.ped import parse_ped
+from hprv.ped import parse_ped, resolve_child_sex
 
 COLS = [
     "trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
@@ -77,7 +77,13 @@ COLS = [
     # clnsig is the VEP cache's CLIN_SIG; clinvar_stars comes from the ClinVar VCF transfer and
     # is BLANK when that transfer did not run. Blank != 0 stars — see annotations.clinvar_stars.
     "clnsig", "clinvar_stars", "child_gt", "child_gq", "child_dp", "child_ab",
-    "mother_gt", "father_gt", "hiConfDeNovo", "review_prior_crosscheck", "flags",
+    "mother_gt", "father_gt",
+    # The sex this trio's chrX/chrY calls were judged under and WHO said so: `ped` (the trios
+    # file stated it — canonical), `inferred` (it did not; Step 0's chrX heuristic filled in) or
+    # `none`. A PED sex the inference disagrees with is KEPT and every row of the trio carries
+    # `sex_discordant_inference` in `flags` — a replacement in either direction is never silent.
+    "child_sex", "child_sex_source",
+    "hiConfDeNovo", "review_prior_crosscheck", "flags",
 ]
 
 # --- dropless pass-through of the per-trio VCF's INFO -------------------------------------------
@@ -158,6 +164,11 @@ class Trio:
         self.child_male = str(ped["sex"]) == "1"
         # sex must be positively known (1/2) to apply ploidy-aware X/Y logic; unknown != female
         self.sex_known = str(ped.get("sex")) in ("1", "2")
+        self.child_sex = str(ped.get("sex")) if self.sex_known else "0"
+        # provenance of that sex (main() resolves it through ped.resolve_child_sex and stores the
+        # result on the ped dict): a bare PED handed in directly is `ped` when it states a sex
+        self.child_sex_source = ped.get("sex_source") or ("ped" if self.sex_known else "none")
+        self.sex_discordant = bool(ped.get("sex_discordant", False))
         self.has_hiconf = "ID=hiConfDeNovo" in vcf.raw_header
         self.has_nmd = "ID=vep_NMD" in vcf.raw_header    # the NMD plugin ran (annotations.nmd_status)
         # Every INFO field this candidate VCF declares, for the dropless `info_*` pass-through
@@ -212,6 +223,7 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         "child_ab": fmt(G.allele_balance(v, gt.c)),
         "mother_gt": (v.gt_bases[gt.m] if v.gt_bases is not None else ""),
         "father_gt": (v.gt_bases[gt.d] if v.gt_bases is not None else ""),
+        "child_sex": gt.child_sex, "child_sex_source": gt.child_sex_source,
         "hiConfDeNovo": ("1" if A.is_hiconf_denovo_for(v, gt.child_name) else ""),
         "review_prior_crosscheck": "", "flags": "",
     }
@@ -648,6 +660,15 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                         r["flags"] += ";transmitting_parent_qc_fail"
                     rows.append(r)
 
+    # ---- trio-level integrity flag, on EVERY row (after the per-row flags, which assign) ----
+    # The trios file's sex disagrees with Step 0's chrX inference. The PED sex was KEPT for every
+    # X/Y decision above; the disagreement is either a miscalibrated heuristic (harmless to the
+    # calls) or a sample swap (which taints the whole trio, autosomes included) — a reviewer must
+    # be able to see it on every call, not only on the chrX ones.
+    if gt.sex_discordant:
+        for r in rows:
+            r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "sex_discordant_inference"
+
     # ---- accounting: every examined variant is now either skipped, called, or classified ----
     emitted = {f"{r['chrom']}:{r['pos']}:{r['ref']}:{r['alt']}" for r in rows}
     stats["with_call"] = len(emitted)
@@ -680,7 +701,9 @@ def main(argv=None) -> int:
     ap.add_argument("--manifest", required=True, help="trios.candidates.tsv from Step 4")
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True, help="candidate calls TSV")
-    ap.add_argument("--qc-report", default="", help="Step 0 qc_report.tsv (for inferred kid sex)")
+    ap.add_argument("--qc-report", default="",
+                    help="Step 0 qc_report.tsv: its inferred_sex fills in a proband whose PED sex is "
+                         "unknown, and is checked against a PED sex that is known (never overrides it)")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -691,7 +714,8 @@ def main(argv=None) -> int:
         return 1
     thr = G.GtThresholds.from_config(cfg, get)
 
-    # inferred sex per trio from Step 0 QC (used when the generated PED has sex unknown)
+    # Step 0's chrX-inferred sex per trio: the FALLBACK for a proband whose PED (trios-file) sex
+    # is unknown, and a CHECK on one that is known (ped.resolve_child_sex — the PED wins)
     sex_map = {}
     if args.qc_report and __import__("os").path.exists(args.qc_report):
         import csv as _csv
@@ -706,6 +730,8 @@ def main(argv=None) -> int:
 
     n_trios = 0
     all_rows = []
+    n_sex_source = Counter()
+    n_sex_discordant = 0
     # The dropless info_* block is the UNION over trios (a trio whose source VCF lacked, say,
     # hiConfDeNovo contributes no column for it), kept in first-seen = header order.
     info_cols, _info_seen = [], set()
@@ -718,15 +744,29 @@ def main(argv=None) -> int:
         if not ped:
             sys.stderr.write(f"WARN: no usable PED for {trio_id} ({ped_path!r}); skipping\n")
             continue
-        # If the generated PED has kid sex unknown, use Step 0's inferred sex so
-        # X-linked / hemizygous logic can fire correctly. If still unresolved, warn — Step 5
-        # will skip X/Y modes for this trio rather than silently assume female.
-        if str(ped.get("sex")) in ("0", "", "None"):
-            if trio_id in sex_map:
-                ped["sex"] = sex_map[trio_id]
-            else:
-                sys.stderr.write(f"WARN: {trio_id}: child sex unresolved (no Step-0 inference); "
-                                 f"X/Y-linked modes skipped for this trio (autosomal modes still run)\n")
+        # The proband's sex, through the ONE precedence rule (ped.resolve_child_sex): a PED sex
+        # the trios file stated is CANONICAL and is what every X/Y decision below is judged under;
+        # Step 0's chrX inference fills in only when the PED says unknown. A known PED sex the
+        # inference disagrees with is KEPT — the trio is flagged (sex_discordant_inference on every
+        # row, audited) and warned about, never silently replaced by a heuristic whose cutoff is
+        # callset-dependent (qc.x_het_male_max). Unresolved either way: warn — Step 5 skips the
+        # X/Y modes for this trio rather than silently assume female (autosomal modes still run).
+        ped_sex_stated = str(ped.get("sex") or "")
+        inferred = sex_map.get(trio_id)
+        ped["sex"], ped["sex_source"], ped["sex_discordant"] = resolve_child_sex(ped_sex_stated, inferred)
+        if ped["sex_discordant"]:
+            sys.stderr.write(
+                f"WARN: {trio_id}: the trios file says the proband is sex {ped['sex']} but Step 0's "
+                f"chrX inference reads {inferred} — KEEPING the pedigree's {ped['sex']} for every "
+                "chrX/chrY decision and flagging every call of this trio sex_discordant_inference. "
+                "Check qc_report.tsv (sex_match=0): a miscalibrated qc.x_het_male_max explains a "
+                "cohort-wide pattern; an isolated one is a sample-swap tell.\n")
+        elif ped["sex_source"] == "none":
+            sys.stderr.write(f"WARN: {trio_id}: child sex unresolved (no trios-file sex, no Step-0 "
+                             "inference); X/Y-linked modes skipped for this trio (autosomal modes "
+                             "still run)\n")
+        n_sex_source[ped["sex_source"]] += 1
+        n_sex_discordant += ped["sex_discordant"]
         # strict_gt=True is LOAD-BEARING for every "is this parent a no-call?" test below. With
         # cyvcf2's default (strict_gt=False) a HALF-called genotype like `0/.` is reported as
         # HOM_REF, not UNKNOWN — see cyvcf2 helpers.c as_gts(): "if a single allele is missing
@@ -786,6 +826,9 @@ def main(argv=None) -> int:
         audit.record("05_inheritance", "variants_examined", st["examined"], scope=trio_id)
         audit.record("05_inheritance", "variants_with_call", st["with_call"], scope=trio_id)
         audit.record("05_inheritance", "variants_no_row", n_no_row, scope=trio_id)
+        # which sex the trio's X/Y calls were judged under, and whether the inference contested it
+        audit.record("05_inheritance", f"child_sex_source.{ped['sex_source']}", 1, scope=trio_id)
+        audit.record("05_inheritance", "sex_discordant_inference", int(ped["sex_discordant"]), scope=trio_id)
         for k, n in sorted(st["skipped"].items()):
             audit.record("05_inheritance", f"skipped.{k}", n, scope=trio_id)
         for k, n in sorted(st["no_row"].items()):
@@ -843,6 +886,9 @@ def main(argv=None) -> int:
         if _b:
             audit.record("05_inheritance", f"rarity_basis.{_b}", _n)
     audit.record("05_inheritance", "trios_screened", n_trios)
+    for src in ("ped", "inferred", "none"):
+        audit.record("05_inheritance", f"trios_child_sex_source.{src}", n_sex_source.get(src, 0))
+    audit.record("05_inheritance", "trios_sex_discordant_inference", n_sex_discordant)
     audit.record("05_inheritance", "variants_examined", tot["examined"])
     audit.record("05_inheritance", "variants_with_call", tot["with_call"])
     audit.record("05_inheritance", "variants_no_row", sum(tot["no_row"].values()))
@@ -858,6 +904,9 @@ def main(argv=None) -> int:
     sys.stderr.write(
         f"Step 5 complete: {len(all_rows)} candidate calls across {n_trios} trios "
         f"-> {args.out}\n  by mode: {by_mode}\n"
+        f"  proband sex: from the trios file for {n_sex_source.get('ped', 0)}, from Step 0's chrX "
+        f"inference for {n_sex_source.get('inferred', 0)}, unresolved for "
+        f"{n_sex_source.get('none', 0)}; pedigree-vs-inference discordant: {n_sex_discordant}\n"
         f"  examined {tot['examined']} variants: {tot['with_call']} with a call, "
         f"{sum(tot['no_row'].values())} no row {dict(sorted(tot['no_row'].items()))}, "
         f"skipped {dict(sorted(tot['skipped'].items()))}\n"

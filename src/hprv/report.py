@@ -174,8 +174,12 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
                             "SpliceAI, ClinVar), then every INFO field of the per-trio VCF verbatim "
                             "as info_<ID> (dropless)."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
-        ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex, and contamination "
-               "(verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),
+        ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex for all three members (the "
+               "proband's checked against the trios file's stated sex, which is canonical: "
+               "sex_source says which one Step 5 used, sex_match 1/0/blank = agree/disagree/not "
+               "compared; the parents' raw dad_/mom_x_het_ratio are the calibration set for "
+               "qc.x_het_male_max), and contamination (verifyBamID FREEMIX or VCF-only CHARR) "
+               "— the garbage-in guard."),
         ("Audit counts", "Per-step input/output counts and funnel tallies (what went where, and why)."),
     ]:
         line(nm, desc)
