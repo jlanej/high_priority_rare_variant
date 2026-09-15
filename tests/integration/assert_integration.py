@@ -39,9 +39,33 @@ def main(argv=None) -> int:
     manifest = rows(os.path.join(W, "trios.resolved.tsv"))
     check(len(manifest) == 2, f"2 trios in resolved manifest (got {len(manifest)})")
 
+    # the trios file's stated sex reaches the PED and the resolution audit
+    check(res.get("CH_A", {}).get("kid_sex") == "2" and res.get("CH_B", {}).get("kid_sex") == "1",
+          "trio_resolution.tsv carries the stated proband sex (CH_A female, CH_B male)")
+    check(res.get("CH_C", {}).get("kid_sex") == "0", "CH_C: a blank sex cell reads unknown (0)")
+    peds = {r["trio_id"]: r["ped"] for r in manifest}
+    for t, want in (("CH_A", "2"), ("CH_B", "1")):
+        with open(peds[t]) as fh:
+            kid_line = [ln.split("\t") for ln in fh.read().splitlines()][0]
+        check(kid_line[1] == t and kid_line[4] == want, f"{t}: PED proband sex is the trios file's ({want})")
+
     # --- Step 0: CH_B inferred male + contamination gate ---
     qc = {r["trio_id"]: r for r in rows(os.path.join(W, "qc_report.tsv"))}
     check(qc.get("CH_B", {}).get("inferred_sex") == "1", "CH_B inferred male (chrX)")
+    # the pedigree is the canonical sex; the inference only CHECKS it. CH_B: stated male, reads
+    # male -> compared and agreed. CH_A: stated female, no chrX sites -> the PED is the only
+    # source and sex_match is BLANK (no comparison), never a fabricated 1.
+    check(qc.get("CH_B", {}).get("ped_sex") == "1" and qc.get("CH_B", {}).get("sex_source") == "ped"
+          and qc.get("CH_B", {}).get("sex_match") == "1",
+          "CH_B: PED sex canonical (sex_source=ped), chrX inference agrees (sex_match=1)")
+    check(qc.get("CH_A", {}).get("ped_sex") == "2" and qc.get("CH_A", {}).get("sex_source") == "ped"
+          and qc.get("CH_A", {}).get("inferred_sex") == "" and qc.get("CH_A", {}).get("sex_match") == "",
+          "CH_A: stated female, no chrX inference -> sex_source=ped, sex_match blank (not compared)")
+    check(qc.get("CH_A", {}).get("overall_pass") != "" and
+          all(c in qc.get("CH_B", {}) for c in ("dad_x_het_ratio", "mom_x_het_ratio", "dad_x_sites", "mom_x_sites")),
+          "qc_report carries the parents' raw chrX het ratios (the calibration set for qc.x_het_male_max)")
+    check(qc.get("CH_B", {}).get("dad_x_het_ratio") == "0" and float(qc.get("CH_B", {}).get("mom_x_het_ratio") or 0) > 0.5,
+          "CH_B: father's chrX het ratio 0 (all hemizygous 1/1), mother's > 0.5")
     # no selfSM configured -> VCF-only CHARR fallback; mock hom-alt AD is 0 ref -> ~0, unflagged
     check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
     check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated (clean)")
@@ -65,6 +89,17 @@ def main(argv=None) -> int:
           "CH_B: father inferred male and mother female from their own chrX genotypes")
     check(qc.get("CH_A", {}).get("dad_inferred_sex") == "" and qc.get("CH_A", {}).get("parent_sex_flag") == "0",
           "CH_A: no chrX sites -> no parental sex inference and NO flag (absence is not a mismatch)")
+
+    # --- Step 5 provenance: the sex each trio's calls were judged under, and who said so ---
+    calls_all = rows(os.path.join(W, "candidates.calls.tsv"))
+    check(bool(calls_all) and all(r.get("child_sex") == "1" and r.get("child_sex_source") == "ped"
+                                  for r in calls_all if r["trio_id"] == "CH_B"),
+          "CH_B calls: child_sex=1 from the pedigree (child_sex_source=ped)")
+    check(all(r.get("child_sex") == "2" and r.get("child_sex_source") == "ped"
+              for r in calls_all if r["trio_id"] == "CH_A"),
+          "CH_A calls: child_sex=2 from the pedigree even with no chrX inference")
+    check(all("sex_discordant_inference" not in (r.get("flags") or "") for r in calls_all),
+          "no trio is flagged sex_discordant_inference (pedigree and inference agree or no inference)")
 
     # --- Step 3: plausible sites keep/drop ---
     plaus = {}
@@ -752,6 +787,11 @@ def main(argv=None) -> int:
     check(am("06_burden", "calls_in") == str(len(calls)) and am("06_burden", "calls_no_gene") == "0",
           "Step 6 counts its input calls and the gene-less ones it skips")
     check(am("09_prioritize", "variants_no_gene") == "0", "Step 9 counts the gene-less rows it cannot join")
+    check(am("00_qc", "trios_sex_source.ped") == "2" and am("00_qc", "trios_sex_discordant_inference") == "0"
+          and am("00_qc", "fathers_inferred_male") == "1" and am("00_qc", "fathers_inferred_female") == "0",
+          "Step 0 audits the sex provenance and the father/mother calibration counts")
+    check(am("05_inheritance", "trios_child_sex_source.ped") == "2" and am("06_burden", "n_male_trios") == "1",
+          "Step 5 audits child_sex_source; Step 6 counts 1 male proband (CH_B) under the PED-first rule")
     check(am("00_qc", "trios_qc") == "2" and am("00_qc", "parent_sex_flag", "CH_B") == "0",
           "Step 0 records its flags in the audit (it recorded nothing before)")
     # ...and the summary renders the input side
