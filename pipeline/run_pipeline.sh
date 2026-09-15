@@ -224,7 +224,8 @@ if run_step 0; then
     # Re-run it by removing the sentinel: rm "$W/qc_report.tsv.done"  (do that after changing the
     # trio set or any filters.genotype_qc / qc.* threshold, which this cache cannot detect).
     # Keyed on the resolved manifest (like Step 1's union): adding a trio must re-run QC, or the
-    # new proband has no inferred sex and Step 5 silently skips its X/Y modes.
+    # new proband has no inferred sex and — unless the trios file stated its sex, which is the
+    # canonical source (ped.resolve_child_sex) — Step 5 silently skips its X/Y modes.
     _qkey="$(cksum < "$RESOLVED" | awk '{print $1"-"$2}')"
     if is_done "$W/qc_report.tsv" && [[ "$(cat "$W/qc_report.tsv.done" 2>/dev/null)" == "$_qkey" ]]; then
         log "== Step 0: per-trio QC — cached, skipping (rm $W/qc_report.tsv.done to force) =="
@@ -350,7 +351,9 @@ if run_step 6; then
     # (the same file Step 9 reads). Without it recurrent genes are ordered by the case-only p,
     # which is a gene-size ranking (Step 6 warns).
     is_set "$mtg" && [[ -e "$mtg" ]] && extra+=(--mutational-target "$mtg")
-    # Step 0's inferred sex gives the MALE proband count for the X-linked (hemizygous) null.
+    # The MALE proband count for the X-linked (hemizygous) null: Step 6 reads qc_report.tsv under
+    # the same precedence Step 5 judged each trio's chrX calls by — the trios file's stated sex
+    # (ped_sex) first, Step 0's chrX inference only where the PED is unknown.
     [[ -s "$W/qc_report.tsv" ]] && extra+=(--qc-report "$W/qc_report.tsv")
     python3 "$HERE/06_gene_burden.py" --calls "$W/candidates.calls.tsv" \
         --out "$W/genes.ranked.tsv" --config "$CFG" --n-trios "$n_trios" "${extra[@]}"
