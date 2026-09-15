@@ -7,7 +7,7 @@ Writes under --out:
   vcfs/fileB.vcf              FAMILY VCF: [MO_B, SIB_B, CH_B, FA_B] (extra sibling,
                               shuffled order) — de novo (recurrent gene) + X-linked
   vcfs/fileC.vcf              duo CH_C/FA_C (mom absent) — resolver "unresolved" case
-  trios.tsv                   #kid dad mom (A, B resolvable; C unresolvable)
+  trios.tsv                   #kid dad mom kid_sex (A, B resolvable; C unresolvable)
   annot.tsv                   per-site lookup mock_vep.py turns into a VEP CSQ (frequency +
                               CLIN_SIG + CADD included — there is no external sites VCF)
   mutrate.tsv, constraint.tsv gene tables for Step 6
@@ -619,9 +619,14 @@ def main(argv=None) -> int:
             "members": ["GENERC", "GENEDD"], "n_members": 2,
             "prior_weight": 0.6, "source_pmid": "40906985"}}}, fh, indent=1)
 
-    # trios file (#kid dad mom); C is unresolvable (MO_C absent everywhere)
+    # trios file (#kid dad mom + the OPTIONAL kid_sex); C is unresolvable (MO_C absent everywhere).
+    # CH_A is stated female with NO chrX sites in its VCF (the PED is the only source: sex_source
+    # = ped, sex_match blank = "not compared"); CH_B is stated male AND infers male from chrX
+    # (sex_match = 1); CH_C leaves it blank (unknown). The DISCORDANT path is exercised by the
+    # pure tests (a mock proband that disagreed with its own chrX would change its calls).
     with open(os.path.join(W, "trios.tsv"), "w") as fh:
-        fh.write("#kid\tdad\tmom\nCH_A\tFA_A\tMO_A\nCH_B\tFA_B\tMO_B\nCH_C\tFA_C\tMO_C\n")
+        fh.write("#kid\tdad\tmom\tkid_sex\nCH_A\tFA_A\tMO_A\tfemale\nCH_B\tFA_B\tMO_B\t1\n"
+                 "CH_C\tFA_C\tMO_C\t\n")
 
     # minimal config (defaults fill in thresholds); concrete ephemeral paths
     # A REAL (tiny) gnomAD joint slim, so Step 2 exercises the actual `bcftools annotate`
