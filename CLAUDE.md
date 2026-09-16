@@ -13,8 +13,9 @@ individuals**, targeting **rare disease and germline pediatric cancer**. Runs un
 
 **Scope / focus (important):** the emphasis is **inherited** germline variation —
 **dominant** (a rare functional inherited het that recurs across individuals), **recessive**
-(hom / compound-het-in-trans), and **X-linked**. **De novo** filtering/review and **mtDNA
-heteroplasmy** are handled by **separate dedicated machinery** (the shared `.sh` orchestration and
+(hom / compound-het-in-trans), **X-linked**, and **Y-linked** (a father-to-son hemizygous variant on
+non-PAR chrY, judged on the pre-refinement likelihoods — SNV/indel only). **De novo**
+filtering/review and **mtDNA heteroplasmy** are handled by **separate dedicated machinery** (the shared `.sh` orchestration and
 a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cross-reference
 (`inheritance.emit_denovo`, default on but secondary); chrM is out of scope.
 
@@ -156,7 +157,18 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   reports their raw ratios (`dad_x_het_ratio`/`mom_x_het_ratio`) — the calibration set for
   `qc.x_het_male_max` — and each member's no-call rate (`nocall_flag`,
   `qc.max_nocall_rate` 0.10 — a merge-shaped trio VCF reads `./.` for every non-carrier parent
-  and Step 5 would silently lose every de novo).
+  and Step 5 would silently lose every de novo). Step 0 also reports an **AUDIT-ONLY chrY
+  coverage sex check**: the proband's median depth at the FATHER's own hemizygous chrY sites
+  (anchors = father `hemi_call`=alt passing the hemizygous QC on the pre-refinement PL),
+  autosome-normalised, as a fraction of the father's — a son reads ~1, a daughter ~0 — with the
+  MOTHER as the in-trio female control (`y_inferred_sex`, `y_cov_ratio`, `y_covered_frac`,
+  `mom_y_cov_ratio`, `sex_match_y` vs the PED, `xy_agree` vs the chrX inference, `y_flag`;
+  `qc.y_reads_min_dp` 3, `y_min_anchor_sites` 50, `y_cov_male_min` 0.30, `y_cov_female_max`
+  0.10). It decides NOTHING (the PED is canonical and the chrX inference fills in an unknown) and
+  never fails `overall_pass`; the statistic is a median, and a mother above `y_cov_female_max`
+  refuses the call (`mother_y_coverage`), so a few mismapped reads cannot read a female as male.
+  Genotypes are never read for the proband or mother there — on chrY the refined GT is the
+  diploid prior's opinion.
 - **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
   (timestamp, step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
   `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.
@@ -220,9 +232,21 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   a leg whose transmitting parent failed its own GQ/DP/AB QC carries
   `transmitting_parent_qc_fail` — emitted, never deleted — and none of those three pairs
   consumes its legs, only a confirmed trans pair does),
-  `x_linked_recessive`, `denovo`/`denovo_x_hemi` (secondary)). A `1/1` parent transmits obligately,
-  so parent-of-origin there is deterministic (`both` is reserved for HET×HET). chrY is routed away
-  from the mother-keyed hemizygous models (`male_x_chrx`) and yields no inherited call. Step 5 opens
+  `x_linked_recessive`, `y_linked` (male proband, non-PAR chrY: a hemizygous alt transmitted by the
+  father, `flags=origin=pat`; the mother has no Y and is never consulted, only MEASURED —
+  `y_female_reads` when she has ≥ `qc.y_reads_min_dp` reads at the site, the signature of X-derived
+  mismapping), `denovo`/`denovo_x_hemi`/`denovo_y_hemi` (secondary)). A `1/1` parent transmits
+  obligately, so parent-of-origin there is deterministic (`both` is reserved for HET×HET). **On
+  non-PAR chrY every zygosity is read from FORMAT/PL** (`genotype.hemi_call`), never from the
+  refined GT: GATK's CalculateGenotypePosteriors applies a DIPLOID pedigree prior that on a haploid
+  chromosome imputes the mother a `0/1` at father-son `1/1` sites and pushes a son's all-alt call
+  to `0/1`. Every row carries `child_gt_pl`/`mother_gt_pl`/`father_gt_pl` (the PL-favoured genotype
+  in base form; blank without PL) and `mother_dp`/`father_dp`; a Y row whose refined GT the
+  likelihoods overruled is flagged `child_gt_refined_discordant` / `father_gt_refined_discordant`;
+  a son with read support for both alleles is `no_row.male_y_het`, a father with both is emitted
+  with `transmitting_parent_qc_fail;y_site_mixed_reads`, a female proband's chrY records are
+  `skipped.chry_female`, and the `hiConfDeNovo` tag is reported but never gates `denovo_y_hemi`
+  (GATK computes it on the refined diploid genotypes, imputed mother included). Step 5 opens
   VCFs with `strict_gt=True` — cyvcf2's default reports a half-called `0/.` as hom-ref, which would
   defeat every "parent is a confident no-call" test. Modes are configured in
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. Every row carries `rarity_af` (the value
@@ -250,12 +274,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   annotation could vanish — HGVSc/HGVSp were lifted in Step 2 and never reached a TSV — so keep
   both blocks intact. **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
-  `n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
+  `n_ylinked`/`n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
   (`p_recurrence`/`q_recurrence`/`*_exome_wide_sig` — a RANK, never a calibrated test: 2 carriers
   of private variants at N=200 give p≈3e-7 and 3 carriers at N=1000 give 4e-8, i.e. essentially
-  "≥3 carriers of private hets"; `p_recurrence_xlinked` uses `--n-male-trios`, which Step 6
-  counts from `qc_report.tsv` under the PED-first rule (`ped_sex` 1, else `inferred_sex` 1)
-  when `run_pipeline.sh` passes `--qc-report`, else N_trios;
+  "≥3 carriers of private hets"; `p_recurrence_xlinked` and `p_recurrence_ylinked` (the single-
+  allele null; gnomAD's chrY frequency is already per haploid male allele) use `--n-male-trios`,
+  which Step 6 counts from `qc_report.tsv` under the PED-first rule (`ped_sex` 1, else
+  `inferred_sex` 1) when `run_pipeline.sh` passes `--qc-report`, else N_trios;
   `recurrence_kind` for biallelic carriers compares the per-trio SET of variant keys, so two trios
   sharing one comp-het pair read `same_variant`), constraint columns, and — when `--mutrate`
   carries `mu_mis`/`mu_syn`/`mu_lof` — `mu_tot`, `exp_carriers_mu` (= C·μ_g, with C = Σ n_carriers
@@ -335,7 +360,9 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   estimate) with `max_af`, never the oracle value. `gene_is_constrained` reads pLI / LOEUF / s_het
   / `phaplo` (≥ `filters.constraint_weighting.phaplo_min`), matching Step 6. MOI coherence: the
   hemizygous modes `x_linked_recessive` and `denovo_x_hemi` are `coherent` with any XL/XLR/XLD
-  curation and `unknown` otherwise — never charged the dominant/recessive discordance penalty.
+  curation, `y_linked`/`denovo_y_hemi` with a YL/Y-linked curation, and `unknown` otherwise — never
+  charged the dominant/recessive discordance penalty. A PL-rescued `y_linked` row carries a refined
+  het `child_gt` and is judged hemizygous by its mode.
   `sig_caf_low` flags only genes gnomAD looked at and reported no pLoF CAF, never genes ABSENT
   from the mutational-target table.
   **NEVER-DROP IS AN ASSERTED INVARIANT HERE**: `09_prioritize.py` checks row-count conservation
@@ -678,6 +705,20 @@ two things that look identical in the output are not the same fact:
   `${ENV}`-templated `"false"`, which `bool()` read as True. Read booleans through
   `config.get_bool` / `as_bool`, never `bool(get(...))`; read `keep_impacts` through
   `config.keep_impacts`.
+- **GATK's genotype refinement is DIPLOID, and on chrY that is a defect in the DATA, not a QC
+  signal.** `CalculateGenotypePosteriors` rewrites GT/GQ from a posterior with a diploid
+  Mendelian pedigree prior and leaves FORMAT/PL as the caller produced it. On a haploid chromosome
+  the prior imputes the mother a `0/1` she has no reads for (the `1/1, 0/1, 1/1` father-son
+  pattern a GMKF trio shows in the thousands), imputes a read-less daughter a `1/1`, and pushes a
+  son's all-alt `1/1` to `0/1` wherever the mother's mismapped reads say `0/0` (a `1/1` child of a
+  `0/0` mother is a de novo at 1e-8 under that prior — the son's PL margin, ~3 per all-alt read,
+  loses below ~26 reads). Every chrY decision therefore goes through `genotype.hemi_call`
+  (PL argmin, refined GT only as the fallback) and `hemi_qc` (GQ from PL); Step 0's chrY anchors
+  and coverage read DEPTH, never a genotype; and the `hiConfDeNovo` tag — computed on those
+  refined genotypes — never gates `denovo_y_hemi`. **The same distortion reaches male chrX and is
+  NOT yet corrected there**: a true hemizygous X alt in a son of a `0/0` father is pushed to
+  `0/1` and filed under `no_row.male_x_het`, and it inflates the chrX het ratio Step 0 infers sex
+  from. Adopting `hemi_call` for `male_x_chrx` is the documented follow-up.
 - **`child_gt`/`mother_gt`/`father_gt` are cyvcf2 `gt_bases`, never `0/1`.** Step 5 writes allele
   STRINGS (`A/T`, `T/T`, `./.`). Any consumer that tests `gt in ("1/1", "1|1")` never matches, so
   Step 9's `genotype_qc` used to judge every hom-alt call on the het AB band and fail it; zygosity
@@ -765,11 +806,13 @@ two things that look identical in the output are not the same fact:
   `python3 tests/test_pure.py` (pure-logic: config, ped, trios-file parsing, annotation getters,
   genotype QC incl. the AD fail-open asymmetry and the FORMAT/DP fallback, the selection funnel,
   **Step 5's whole inheritance model** (a stubbed-cyvcf2 `FakeVar` harness: origins, obligate
-  transmission, comp-het phasing, the trans-evidence flags, X/Y/PAR and the sex gates), Step-6
+  transmission, comp-het phasing, the trans-evidence flags, X/Y/PAR and the sex gates, the
+  Y-linked model on FORMAT/PL and its no-row taxonomy), the PL readers and hemizygous QC, Step 0's
+  chrY coverage evidence, Step-6
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **89 tests, no network and no VCF.**
+  **97 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
@@ -796,7 +839,12 @@ two things that look identical in the output are not the same fact:
   calls (`assert_integration.py`). The mock deliberately includes a **GATK ref-block parent**
   (`GT:DP:GQ`, no AD) and a **half-called `0/.` parent**, which is how the `parent_ad_unmeasured`
   flag, the AD fail-open asymmetry and the `strict_gt=True` contract are exercised end-to-end —
-  and how the `genotype.dp()` FORMAT/DP fallback was found. The Step-9 fixtures are engineered so the artifact locus and the
+  and how the `genotype.dp()` FORMAT/DP fallback was found. Every mock record carries FORMAT/PL,
+  and chrY carries the shapes a refined GMKF trio shows: an imputed maternal `0/1` (GENEY1), a son
+  whose refined `0/1` his PL overrules (GENEY2, the rescue), a Y de novo (GENEYDN), an all-het
+  mismapping site (GENEYMIX, `no_row.male_y_het`) and the female proband's trio (three
+  `skipped.chry_female`, plus Step 0's chrY anchors reading her female at the median despite stray
+  reads at one of them). The Step-9 fixtures are engineered so the artifact locus and the
   established-gene positive control have the **same** extreme excess shape — the only thing
   separating them is the control ceiling, which is exactly what the assertion tests. Two mock-scale
   config deviations are deliberate and commented in `make_mock_data.py`: `min_control_genes` 1000→3
@@ -813,6 +861,9 @@ two things that look identical in the output are not the same fact:
 
 - **De novo** filtering/review — bespoke machinery (the shared `.sh` orchestration). De novo is a
   secondary cross-reference here (`inheritance.emit_denovo`), never the driver.
+- **chrY copy-number and mosaic events.** chrY is IN scope as SNV/indel (`y_linked` /
+  `denovo_y_hemi`), but AZF deletions, 45,X/46,XY mosaicism and mosaic loss of Y are copy-number
+  / mosaic signals no genotype screen can see — the CNV blind spot, read-depth work on the CRAMs.
 - **mtDNA heteroplasmy** — a dedicated pipeline; chrM is not analyzed. **Enforced**, not merely
   declared: Step 1 drops `EXCLUDE_CONTIGS` (`chrM,chrMT,M,MT`) from the cohort union and dies if
   any survive. It has to be enforced there rather than left un-modelled, because every inheritance

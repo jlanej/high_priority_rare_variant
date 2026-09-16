@@ -249,7 +249,7 @@ synthesized genotype matrix.
   annotation transfer landed on every record — a shortfall halts); Step 5's `variants_examined`
   (== Step 4's `candidate_genotypes`), `variants_with_call`, `variants_no_row` and a `no_row.<reason>`
   tally for every examined variant that produced no row (`qc_child`, `qc_parent`, `parent_nocall`,
-  `mendelian_inconsistent`, `rarity`, `inert_band_het`, `no_gene`, `chry`, `male_x_het`,
+  `mendelian_inconsistent`, `rarity`, `inert_band_het`, `no_gene`, `male_y_het`, `male_x_het`,
   `hiconf_tag`, `mode_disabled`, `child_not_carrier`), with
   `variants_examined == skipped.* + variants_with_call + variants_no_row`; Step 6's `calls_in` /
   `calls_no_gene`; Step 0's flags. Call rows can exceed examined variants (a compound-het leg is

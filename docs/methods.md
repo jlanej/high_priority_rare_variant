@@ -35,7 +35,7 @@ transfer that matched nothing, and writes its input and output counts to a run a
 (Section 15).
 
 The scope is inherited germline single-nucleotide and small indel variation under dominant,
-recessive (homozygous and compound heterozygous in trans), and X-linked models. De novo variants
+recessive (homozygous and compound heterozygous in trans), X-linked and Y-linked models. De novo variants
 are detected only as a secondary cross-reference; mitochondrial contigs are excluded at the union
 step; copy-number and structural variants are not assessed.
 
@@ -148,6 +148,27 @@ and one proband male). The report therefore carries each parent's raw fraction a
 (`dad_x_het_ratio`, `mom_x_het_ratio`), fathers being known males and mothers known females, and
 the audit records the median of each; the cutoff belongs in the gap between the two distributions.
 When more fathers read female than male, Step 0 warns that the cutoff, not the pedigree, is wrong.
+
+A second, audit-only sex check reads chrY coverage rather than genotypes. Anchor sites are the
+FILTER-passing non-pseudoautosomal chrY records at which the father is a confident hemizygous
+alternate carrier on the pre-refinement likelihoods (FORMAT/PL; depth ≥ 10, likelihood-derived
+GQ ≥ 20, allele balance ≥ 0.90), the sites this callset demonstrably maps Y reads to in a male.
+At those sites the proband's and the mother's depth (missing read as zero) are recorded, and each
+member's median anchor depth, divided by that member's median autosomal depth, is expressed as a
+fraction of the father's (`y_cov_ratio`, `mom_y_cov_ratio`): a son reads close to one and a
+daughter close to zero. The proband is called male at a ratio ≥ 0.30 (`qc.y_cov_male_min`) and
+female at ≤ 0.10 (`qc.y_cov_female_max`), otherwise indeterminate, provided at least 50 anchors
+exist (`qc.y_min_anchor_sites`); the fraction of anchors at which the proband has ≥ 3 reads
+(`qc.y_reads_min_dp`) is reported as `y_covered_frac`. The mother serves as the in-trio female
+control: when her own ratio exceeds `qc.y_cov_female_max` no call is made for the trio
+(`y_flag=mother_y_coverage`). Because the statistic is a median over the anchors, a few mismapped
+reads in a female cannot produce a male call. The result is compared with the stated pedigree sex
+(`sex_match_y`) and with the chrX inference (`xy_agree`), each three-state as `sex_match` is,
+warned on any disagreement and recorded in the audit with the median ratio by pedigree sex and
+the mothers' median; it decides nothing, since the pedigree is canonical and the chrX inference is
+what fills in an unknown, and it does not enter `overall_pass`. Genotypes are deliberately not read
+for the proband or the mother on chrY, because after genotype refinement a chrY genotype is the
+diploid pedigree prior's opinion (Section 11).
 
 The proband's sex is resolved by one precedence rule shared by Steps 0, 5 and 6: a sex stated in
 the trios file is canonical, and the inference fills in only when the pedigree leaves it unknown.
@@ -390,8 +411,40 @@ model) and is counted as Mendelian-inconsistent.
 chrX site with a heterozygous or homozygous mother, both passing QC, and rarity at 1 × 10⁻²; a
 father carrying the allele does not veto the call but is flagged (`father_carries_x_allele`). For a
 female proband, a homozygous-alternate call with a carrier mother and a hemizygous
-(homozygous-alternate) father, all three passing QC, and the same rarity. Non-PAR chrY is routed
-to no inherited model.
+(homozygous-alternate) father, all three passing QC, and the same rarity.
+
+**Y-linked.** For a male proband, non-pseudoautosomal chrY records are judged on the
+pre-refinement likelihoods rather than on the refined genotype. GATK's genotype refinement
+(`CalculateGenotypePosteriors`) rewrites GT and GQ from a posterior that combines the caller's
+likelihoods with a diploid Mendelian pedigree prior and a population prior, and leaves FORMAT/PL as
+the caller produced it. On a haploid chromosome that prior is invalid, and on a refined GMKF trio
+its effects are visible: the mother is imputed a heterozygous genotype she has no reads for at
+father-son homozygous-alternate sites, and where her own mismapped reads confidently read
+homozygous reference the son's all-alternate call is pushed to heterozygous, since a
+homozygous-alternate child of a homozygous-reference mother is a de novo event under the prior.
+The hemizygous call therefore takes the genotype the likelihoods favour (`genotype.hemi_call`: the
+PL minimum among 0/0, 0/1 and 1/1, read as reference, mixed or alternate; the refined genotype only
+when no PL is present or the likelihoods are flat; a refined no-call stays a no-call), with GQ
+derived from the PL. A son who is hemizygous alternate (depth ≥ 10, likelihood GQ ≥ 20, allele
+balance ≥ 0.90) with a father who is hemizygous alternate is emitted as `y_linked` with
+`origin=pat`, gated at 1 × 10⁻² like the X-linked model and flagged `high_conf_rarity` below
+1 × 10⁻³; a father who is alternate but fails his own QC, or whose reads support both alleles, does
+not veto the call but flags it (`transmitting_parent_qc_fail`, and `y_site_mixed_reads` for the
+latter, the signature of a paralogous site). A son who is hemizygous alternate with a father who is
+confidently reference (depth ≥ 10, at most one alternate read, allele balance ≤ 0.10) is emitted
+as `denovo_y_hemi`, a secondary de novo call requiring child depth ≥ 20 and rarity at 1 × 10⁻⁴;
+GATK's `hiConfDeNovo` tag is reported but not consulted on chrY, because it is computed on the
+refined diploid genotypes, the imputed mother included. The mother's genotype is never read: she
+has no Y, so there is no maternal transmission and no Mendelian test. Her depth is recorded
+(`mother_dp`), and a mother with at least 3 reads (`qc.y_reads_min_dp`) at a male-specific chrY
+site flags the row `y_female_reads`, since reads in a female at such a site are X-derived
+mismapping and the son's allele there may be a mismapped maternal X allele. A son whose reads
+support both alleles is never a call (`male_y_het`); a father no-call leaves the sole transmitter
+unobserved (`parent_nocall`). Every row carries the likelihood-favoured genotype of all three
+members (`child_gt_pl`, `mother_gt_pl`, `father_gt_pl`) beside the refined ones, and a chrY row
+whose refined genotype the likelihoods overruled carries `child_gt_refined_discordant` or
+`father_gt_refined_discordant`. Unlocalised chrY scaffolds are treated as chrY; pseudoautosomal
+chrY positions, where present, are routed through the autosomal models.
 
 **Heterozygous collection and parent of origin.** Every heterozygous child call outside male
 hemizygous regions that passes the heterozygous predicate, is rare at 1 × 10⁻², and has a gene
@@ -424,7 +477,7 @@ consumed by a confirmed compound-heterozygous pair and is rare at 1 × 10⁻⁴ 
 is the recurrence signal Step 6 consolidates. A variant may appear under more than one mode.
 
 **Accounting.** Every record examined is classified as skipped (FILTER, unresolved sex, female
-chrY), called, or assigned a no-row reason (child not a carrier, chrY, a male X het, child or parent
+chrY), called, or assigned a no-row reason (child not a carrier, a male Y het, a male X het, child or parent
 QC failure, rarity, no gene, Mendelian inconsistency, parental no-call, the inert
 [1 × 10⁻⁴, 1 × 10⁻²) heterozygous band, a disabled mode, or the hiConf tag), so that per trio the
 number examined equals skipped plus called plus no-row. ClinVar P/LP alleles the child carried that
@@ -487,11 +540,14 @@ allele or a mapping artifact as a gene-level signal.
 random individual carries a qualifying genotype was computed under Hardy–Weinberg equilibrium
 from the run-oracle frequencies *q*ᵥ of the gene's observed qualifying variants, with a missing or
 zero frequency floored at 1 × 10⁻⁶ (`burden.absent_af_floor`): for the dominant model
-*p* = 1 − Πᵥ(1 − *q*ᵥ)²; for the biallelic model *p* = (Σᵥ *q*ᵥ)²; for the X-linked model
-*p* = 1 − Πᵥ(1 − *q*ᵥ). The recurrence *p*-value is the binomial upper tail P(X ≥ *n*) with
-X ~ Binomial(*N*, *p*), where *N* is the number of resolved trios, or for the X-linked model the
-number of male probands, decided per trio by the same rule Step 5 applies (the trios file's stated
-sex, else Step 0's inference). Benjamini–Hochberg *q*-values are computed within each
+*p* = 1 − Πᵥ(1 − *q*ᵥ)²; for the biallelic model *p* = (Σᵥ *q*ᵥ)²; for the X-linked and Y-linked
+models *p* = 1 − Πᵥ(1 − *q*ᵥ), gnomAD's chrY frequencies being per haploid male allele. The
+recurrence *p*-value is the binomial upper tail P(X ≥ *n*) with X ~ Binomial(*N*, *p*), where *N*
+is the number of resolved trios, or for the X-linked and Y-linked models the number of male
+probands, decided per trio by the same rule Step 5 applies (the trios file's stated sex, else
+Step 0's inference). Because every son of a carrier father carries his Y, a Y-linked recurrence
+across unrelated probands reflects haplogroup sharing unless the per-male frequency is very small,
+which is what this null measures. Benjamini–Hochberg *q*-values are computed within each
 model family over the nominated genes, and an exome-wide flag is set at *p* < 2.5 × 10⁻⁶. Because
 the null is built only from variants observed in the cohort, it saturates on private variants and
 is monotone in gene size; it is reported as a rank, not as a calibrated test.
@@ -707,7 +763,12 @@ frequency arm the effective rarity stringency depends on the proband's ancestry,
 maximum is taken over ancestry groups regardless of the proband's own. The Mendelian-error and
 contamination statistics are computed on a capped prefix of the genome and the VCF-only
 contamination proxy detects only gross contamination. Genotype QC operates on posterior-derived
-qualities, which are not independent of the family prior the inheritance model then uses. The
+qualities, which are not independent of the family prior the inheritance model then uses; on chrY,
+where that diploid prior is invalid, the model reads the pre-refinement likelihoods instead, but the
+same distortion affects male chrX and is not yet corrected there (a hemizygous alternate son of a
+reference father is pushed to heterozygous and then excluded as a male X het). chrY is assessed
+as single-nucleotide and small indel variation only; AZF deletions, 45,X/46,XY mosaicism and mosaic
+loss of Y are copy-number events outside the screen. The
 variant-layer weights are reasoned rather than fitted, and the pipeline has been exercised
 end-to-end on generated data (Section 17) but not yet validated against truth sets.
 
@@ -719,7 +780,8 @@ GitHub Container Registry on every commit and should be pulled by digest. Extern
 fetched and prepared by `scripts/prepare_resources.sh` from the pinned manifest
 `resources/manifest.env` (Table 1). The repository carries a pure-logic test suite (configuration
 validation, the annotation getters, genotype QC, the selection ladder, the whole Step 5
-inheritance model against a stubbed VCF, Step 6 counting and ranking, and the Step 9 null,
+inheritance model against a stubbed VCF including the Y-linked model on FORMAT/PL, Step 0's chrY
+coverage evidence, Step 6 counting and ranking, and the Step 9 null,
 tiering and never-drop invariant) and an end-to-end integration test that generates a small mock
 genome and trios, runs the resolve step and Steps 0, 1, 3, 4, 5, 6, 8 and 9 with the real bcftools
 toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
@@ -754,10 +816,12 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 | No-call rate flag | > 0.10 | Step 0 |
 | chrX het fraction for male | < 0.10 over ≥ 20 sites (callset-dependent; calibrate on the parents) | Step 0 |
 | FREEMIX / VCF-proxy contamination flag | > 0.05 / > 0.02 | Step 0 |
+| chrY coverage sex evidence (audit-only) | male ≥ 0.30, female ≤ 0.10 of the father's autosome-normalised anchor depth; ≥ 50 anchors; reads at depth ≥ 3 | Step 0 (Step 5 `y_female_reads`) |
 | Frequency oracle | faf95 (gnomAD v4.1 joint) | Steps 3, 5, 6, 9 |
 | BA1 (drop, never rescued) | ≥ 0.05 | Steps 3, 9 |
 | Recessive / compound-het rarity | < 1 × 10⁻² (high-confidence tag < 1 × 10⁻³) | Steps 3, 5 |
 | Dominant / de novo rarity | < 1 × 10⁻⁴ | Step 5 |
+| X-linked / Y-linked (hemizygous) rarity | < 1 × 10⁻² (high-confidence tag < 1 × 10⁻³); hemizygous de novo < 1 × 10⁻⁴ | Step 5 |
 | Impact rung | HIGH, MODERATE | Step 3 |
 | SpliceAI rung | max Δ ≥ 0.2 | Step 3 |
 | CADD rung | PHRED ≥ 25.3 | Step 3 |
