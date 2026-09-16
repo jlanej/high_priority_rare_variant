@@ -62,10 +62,16 @@ VARIANT_TIERS = ("V0", "V1", "V2", "V3", "V4", "V5")
 # not UP-weight them by it either — pLI/LOEUF measure selection against heterozygotes.
 # `homozygous` is the spec's name for what Step 5 emits as `hom_recessive`; both are matched so
 # the predicate survives either vocabulary.
-RECESSIVE_MODES = frozenset({"compound_het", "hom_recessive", "homozygous", "x_linked_recessive"})
-# Step-5 modes whose proband call is a single X allele. MOI coherence treats them as X-linked
-# observations (coherent with XLR *or* XLD), not as autosomal dominant/recessive ones.
-HEMIZYGOUS_MODES = frozenset({"x_linked_recessive", "denovo_x_hemi"})
+# `y_linked` sits here for the same reason as `x_linked_recessive`: gnomAD's pLoF constraint on
+# a hemizygous gene is measured on a different genotype class than the one observed, so it is
+# neither up- nor down-weighted.
+RECESSIVE_MODES = frozenset({"compound_het", "hom_recessive", "homozygous", "x_linked_recessive",
+                             "y_linked"})
+# Step-5 modes whose proband call is a single X (or Y) allele. MOI coherence treats them as
+# sex-linked observations — an X mode is coherent with XLR *or* XLD curation, a Y mode with a
+# Y-linked curation — never as autosomal dominant/recessive ones.
+HEMIZYGOUS_MODES = frozenset({"x_linked_recessive", "denovo_x_hemi", "y_linked", "denovo_y_hemi"})
+Y_MODES = frozenset({"y_linked", "denovo_y_hemi"})
 
 # Literal column-header tokens that must never be mistaken for a gene symbol. This is not
 # theoretical fastidiousness: the validation cohort's own `gene.counts.txt` (a
@@ -1183,7 +1189,8 @@ def rarity_driven_by_single_group(grpmax_af, max_af, cfg=None) -> bool:
     return m / g > ratio
 
 
-HOMOZYGOUS_MODES = frozenset({"hom_recessive", "homozygous", "x_linked_recessive", "denovo_x_hemi"})
+HOMOZYGOUS_MODES = frozenset({"hom_recessive", "homozygous", "x_linked_recessive", "denovo_x_hemi",
+                              "y_linked", "denovo_y_hemi"})
 
 
 def is_hom_alt_call(gt, ref="", inheritance="") -> bool:
@@ -1367,6 +1374,10 @@ def moi_coherence(inheritance, gene_moi, long_gene=False):
     # through the autosomal dominant/recessive split charged an XLD gene's hemizygous male -1.0
     # and labelled a hemizygous de novo in an XLR gene `moi_mismatch_het_in_recessive_gene`.
     if mode in HEMIZYGOUS_MODES:
+        if mode in Y_MODES:
+            has_yl = any(t.startswith("YL") or t.replace("-", "_") in ("Y_LINKED", "YLINKED")
+                         for t in curated)
+            return ("coherent" if has_yl else "unknown"), caveat
         has_xl = any(t.startswith("XL") or t.replace("-", "_") in ("X_LINKED", "XLINKED")
                      for t in curated)
         return ("coherent" if has_xl else "unknown"), caveat

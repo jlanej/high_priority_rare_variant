@@ -1306,6 +1306,18 @@ def test_prioritize_moi_coherence_and_long_gene_caveat():
     assert PR.moi_coherence("hom_recessive", "AR")[0] == "coherent"
     assert PR.moi_coherence("compound_het", "AD")[0] == "discordant"
     assert PR.moi_coherence("dominant", "AD;AR")[0] == "coherent"     # multi-MOI genes
+    # the Y modes are sex-linked observations: coherent with a Y-linked curation, otherwise
+    # EXACTLY neutral — never charged the autosomal split, and never matched by an XL token
+    assert PR.moi_coherence("y_linked", "YL")[0] == "coherent"
+    assert PR.moi_coherence("denovo_y_hemi", "Y-linked")[0] == "coherent"
+    assert PR.moi_coherence("y_linked", "AR")[0] == "unknown"
+    assert PR.moi_coherence("y_linked", "XLR")[0] == "unknown"
+    assert PR.moi_coherence("x_linked_recessive", "YL")[0] == "unknown"
+    assert PR.score_variant({"impact": "HIGH", "consequence": "stop_gained", "inheritance": "y_linked"},
+                            {"gene_moi": "AR", "cds_length": "1200"}, {})["pts_moi"] == 0.0
+    # a PL-rescued Y call carries a refined het gt_bases string; the MODE says it is hemizygous
+    assert PR.is_hom_alt_call("A/T", ref="A", inheritance="y_linked") is True
+    assert PR.is_hom_alt_call("A/T", ref="A", inheritance="dominant") is False
     # audit A-6: mode assignment is single-gene-keyed and long genes drift to compound_het, so a
     # discordance penalty there would punish an artifact of the mode assignment
     coh, caveat = PR.moi_coherence("compound_het", "AD", long_gene=True)
@@ -2515,7 +2527,10 @@ def test_prioritize_config_matches_canonical_defaults():
                       ("prioritization.variant_tier.nmd_escape.enabled", True),
                       ("resources.vep.spliceai_rescore.enabled", True),
                       ("resources.vep.spliceai_rescore.distance", 4999),
-                      ("resources.vep.spliceai_rescore.chunk_size", 1000)):
+                      ("resources.vep.spliceai_rescore.chunk_size", 1000),
+                      ("inheritance.emit_y_linked", True), ("qc.y_reads_min_dp", 3),
+                      ("qc.y_min_anchor_sites", 50), ("qc.y_cov_male_min", 0.30),
+                      ("qc.y_cov_female_max", 0.10)):
         got = get(cfg, key, "__MISSING__")
         assert got != "__MISSING__", f"{key} is absent from config.example.yaml"
         assert got == want, f"{key}: config {got} != code default {want}"
@@ -2806,17 +2821,31 @@ class _FakeVCF:
         return iter(self._v)
 
 
+class _PLVar(FakeVar):
+    """A FakeVar that also answers `format("PL")` (a GATK trio VCF carries the pre-refinement
+    likelihoods) — per sample, a (pl_00, pl_01, pl_11) triple, or None = no PL for that sample."""
+    def __init__(self, info, pls):
+        super().__init__(info)
+        self._pls = pls
+
+    def format(self, key):
+        if key == "PL" and self._pls is not None:
+            return [list(p) if p is not None else [-2147483648] * 3 for p in self._pls]
+        raise KeyError(key)
+
+
 def _v5(chrom, pos, gene, gts, af=None, ref="A", alt="T", gq=(99, 99, 99), dp=(40, 40, 40),
-        ad=None, filt=None, info=None, impact="MODERATE", csq="missense_variant"):
+        ad=None, filt=None, info=None, impact="MODERATE", csq="missense_variant", pl=None):
     """A Step-5 variant for the C/D/M trio. `gts` are cyvcf2 gt_types (0 HR, 1 HET, 2 UNK, 3 HA).
-    `ad` overrides per-sample (ref, alt) depths; (None, None) = AD absent (a GATK ref block)."""
+    `ad` overrides per-sample (ref, alt) depths; (None, None) = AD absent (a GATK ref block).
+    `pl` = {sample_idx: (pl_00, pl_01, pl_11)} adds FORMAT/PL for those samples (others: none)."""
     bases = {0: f"{ref}/{ref}", 1: f"{ref}/{alt}", 2: "./.", 3: f"{alt}/{alt}"}
     d = {"vep_Gene": "ENSG_" + gene, "vep_SYMBOL": gene, "vep_Consequence": csq,
          "vep_IMPACT": impact}
     if af is not None:
         d["vep_gnomADe_NFE_AF"] = str(af)
     d.update(info or {})
-    v = FakeVar(d)
+    v = _PLVar(d, None if pl is None else [pl.get(i) for i in range(len(gts))])
     v.CHROM, v.POS, v.REF, v.ALT, v.FILTER = chrom, pos, ref, [alt], filt
     v.gt_types = list(gts)
     v.gt_bases = [bases[g] for g in gts]
@@ -2974,8 +3003,9 @@ def test_step5_sex_chromosomes_and_gates():
     assert rows == [], "a hom-alt daughter with a hom-ref father is not called"
     rows, _ = _screen([_v5("chrX", X, "GX", (_HET, _HR, _HET), af=5e-5)], sex="2")
     assert _calls(rows) == [("dominant", X, "origin=mat")], "female X het flows through dominant"
-    rows, _ = _screen([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR))], sex="1")
-    assert rows == [], "chrY yields no inherited call and no de novo"
+    rows, _ = _screen([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR), dp=(40, 40, 0))], sex="1")
+    assert _calls(rows) == [("y_linked", 20_000_000, "origin=pat")], \
+        "a father-son hemizygous chrY alt is a y_linked call, paternal by construction"
     rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-4)], sex="0")
     assert rows == [], "unknown sex: sex chromosomes are skipped, never assumed female"
     rows, _ = _screen([_v5("chrX", PAR, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1")
@@ -3135,7 +3165,8 @@ def test_step5_accounts_for_every_examined_variant():
     assert why([_v5("chr1", 100, "G1", (_HA, _UNK, _HET), af=5e-4)]) == "parent_nocall"
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
                     info={"vep_Gene": "", "vep_SYMBOL": ""})]) == "no_gene"
-    assert why([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR))], sex="1") == "chry"
+    assert why([_v5("chrY", 20_000_000, "GY", (_HET, _HA, _HR))], sex="1") == "male_y_het"
+    assert why([_v5("chrY", 20_000_000, "GY", (_HA, _UNK, _HR))], sex="1") == "parent_nocall"
     assert why([_v5("chrX", 10_000_000, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1") == "male_x_het"
     hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag"
@@ -3334,6 +3365,12 @@ def test_config_validation_refuses_the_knobs_that_silently_kill_a_rung():
     assert "denovo_min_dp" in problems(**{"filters.genotype_qc.denovo_min_dp": 5})
     assert "keep_impacts" in problems(**{"filters.functional.keep_impacts": []})
     assert "emit_dominant" in problems(**{"inheritance.emit_dominant": "nope"})
+    assert "emit_y_linked" in problems(**{"inheritance.emit_y_linked": "nope"})
+    # the chrY coverage band: an overlap blanks every y_inferred_sex with exit 0
+    assert "y_cov_female_max" in problems(**{"qc.y_cov_female_max": 0.5})
+    assert "y_cov_male_min" in problems(**{"qc.y_cov_male_min": 5})
+    assert "y_reads_min_dp" in problems(**{"qc.y_reads_min_dp": 0})
+    assert validate_filters(with_(**{"qc.y_cov_male_min": 0.4, "qc.y_cov_female_max": 0.15})) == []
     # booleans: strings that MEAN false are false; bool() would have read every one as True
     for v in ("false", "False", "no", "off", "0", 0, False):
         assert as_bool(v, "k") is False, v
@@ -3983,6 +4020,333 @@ def test_step5_splicevault_columns():
     s5 = _load_step5()
     i = s5.COLS.index("spliceai_symbol_mismatch")
     assert s5.COLS[i + 1] == "splicevault_top_events" and "splicevault_agreement" in s5.COLS
+
+
+def test_genotype_hemizygous_call_reads_prerefinement_pl():
+    """GATK's genotype refinement applies a DIPLOID pedigree prior that is invalid on chrY: it
+    imputes the mother a 0/1 at a father-son 1/1 site and pushes a son's all-alt call to 0/1.
+    The hemizygous call reads FORMAT/PL — the pre-refinement likelihoods — when present, falls
+    back to the refined GT otherwise, and says which one decided. Plus: unlocalised chrY/chrX
+    scaffolds are sex-chromosome sequence (audit #99), and the PAR applies to the primary
+    contig only."""
+    thr = G.GtThresholds()
+    # contig recognition
+    assert G.sex_contig("chrY") == "Y" and G.sex_contig("Y") == "Y" and G.sex_contig("chrX") == "X"
+    assert G.sex_contig("chrY_KI270740v1_random") == "Y" and G.sex_contig("chrX_KI270880v1_alt") == "X"
+    assert G.sex_contig("chr1") is None and G.sex_contig("chrM") is None and G.sex_contig("chrXY_fake") is None
+    assert G.is_y_nonpar(FakeVar({}, CHROM="chrY_KI270740v1_random", POS=5000)), "a scaffold has no PAR"
+    assert G.in_par_y(FakeVar({}, CHROM="chrY", POS=100_000)) and not G.is_y_nonpar(FakeVar({}, CHROM="chrY", POS=100_000))
+    assert G.is_y_nonpar(FakeVar({}, CHROM="Y", POS=20_000_000))
+    # PL parsing
+    assert G.gt_from_pl([300, 120, 0]) == G.HOM_ALT and G.gt_from_pl([0, 45, 300]) == G.HOM_REF
+    assert G.gt_from_pl([60, 0, 60]) == G.HET
+    assert G.gt_from_pl([0, 0, 0]) is None, "flat PLs (no reads) carry no information"
+    assert G.gt_from_pl([0, 45]) is None and G.gt_from_pl(None) is None and G.gt_from_pl([None, 3, 0]) is None
+    assert G.gq_from_pl([300, 120, 0]) == 99 and G.gq_from_pl([30, 12, 0]) == 12 and G.gq_from_pl([0, 0, 0]) == 0
+    assert G.gq_from_pl([5]) is None
+
+    def hv(gt, pls, ref=0, alt=40):
+        v = _PLVar({}, None if pls is None else [pls])
+        v.gt_types, v.gt_quals, v.gt_depths = [gt], [99], [ref + alt]
+        v.gt_ref_depths, v.gt_alt_depths = [ref], [alt]
+        return v
+    # the refined GT says het, the likelihoods say hom-alt: the call is alt, decided by PL
+    assert G.hemi_call(hv(G.HET, (300, 120, 0)), 0) == ("alt", "pl", "mixed")
+    assert G.hemi_call(hv(G.HET, None), 0) == ("mixed", "gt", "mixed")        # no PL: refined GT
+    assert G.hemi_call(hv(G.HOM_ALT, (0, 0, 0)), 0) == ("alt", "gt", "alt")   # flat PL: refined GT
+    assert G.hemi_call(hv(G.HOM_REF, (0, 60, 300), ref=40, alt=0), 0) == ("ref", "pl", "ref")
+    assert G.hemi_call(hv(G.UNKNOWN, (300, 120, 0)), 0) == ("nocall", "gt", "nocall"), \
+        "a refined no-call stays a no-call: PL re-labels among CALLED genotypes only"
+    assert G.hemi_call(hv(G.HOM_ALT, (300, 0, 120)), 0) == ("mixed", "pl", "alt")
+    # the missing-value sentinels cyvcf2 uses for an absent PL read as no PL
+    assert G.pl(hv(G.HOM_ALT, (-2147483648, -2147483648, -2147483648)), 0) is None
+    # GQ for a hemizygous decision is the prior-free one when PL exists
+    assert G.hemi_gq(hv(G.HET, (30, 12, 0)), 0) == 12 and G.hemi_gq(hv(G.HET, None), 0) == 99
+    # QC: the alt band fails closed without AD and on a mixed site; the clean band fails open
+    assert G.hemi_qc(hv(G.HET, (300, 120, 0)), 0, thr, "alt") is True
+    assert G.hemi_qc(hv(G.HOM_ALT, (300, 120, 0), ref=6, alt=34), 0, thr, "alt") is False   # AB 0.85
+    assert G.hemi_qc(hv(G.HOM_ALT, (300, 120, 0), ref=0, alt=6), 0, thr, "alt") is False    # DP 6
+    assert G.hemi_qc(hv(G.HOM_ALT, (30, 12, 0)), 0, thr, "alt") is False                    # PL-GQ 12
+    noad = hv(G.HOM_ALT, (300, 120, 0)); noad.gt_ref_depths, noad.gt_alt_depths = [-1], [-1]
+    assert G.hemi_qc(noad, 0, thr, "alt") is False
+    assert G.hemi_qc(hv(G.HOM_REF, (0, 60, 300), ref=40, alt=0), 0, thr, "clean") is True
+    assert G.hemi_qc(hv(G.HOM_REF, (0, 60, 300), ref=37, alt=3), 0, thr, "clean") is False
+    noad_ref = hv(G.HOM_REF, (0, 60, 300)); noad_ref.gt_ref_depths, noad_ref.gt_alt_depths = [-1], [-1]
+    assert G.hemi_qc(noad_ref, 0, thr, "clean") is True, "the clean limb fails OPEN like clean_parent"
+    assert G.sample_qc_ad_measured(noad_ref, 0, "clean_parent") is False
+
+
+def test_step5_y_linked_model_reads_the_likelihoods_not_the_refined_gt():
+    """The Y-linked model: father-to-son hemizygous transmission on non-PAR chrY, judged on the
+    pre-refinement likelihoods, with the mother never consulted (only measured), the male-het
+    rule intact, a mixed father flagged rather than dropped, every no-row reason named, and the
+    female / unknown-sex / PAR / scaffold routes each doing what the docs say."""
+    Y = 20_000_000
+    cfg_proxy = {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
+
+    def yv(gts, pos=Y, gene="GY", **kw):
+        """A non-PAR chrY record whose MOTHER has no reads unless told otherwise (the harness
+        gives every member 40 reads, and a mother with reads at a Y site is itself a flag)."""
+        kw.setdefault("dp", (40, 40, 0))
+        return _v5("chrY", pos, gene, gts, **kw)
+
+    def st_of(variants, **kw):
+        rows, st = _screen(variants, **kw)
+        assert st["examined"] == sum(st["skipped"].values()) + st["with_call"] + sum(st["no_row"].values())
+        return rows, st
+
+    def why(variants, **kw):
+        rows, st = st_of(variants, **kw)
+        assert not rows, _calls(rows)
+        assert sum(st["no_row"].values()) == 1, dict(st["no_row"])
+        return next(iter(st["no_row"]))
+
+    def one(variants, **kw):
+        rows, _ = st_of(variants, **kw)
+        assert len(rows) == 1, _calls(rows)
+        return rows[0]
+
+    # 1. inherited: father 1/1, son 1/1, mother 0/0 (no reads) -> y_linked, paternal, no flags
+    r = one([yv((_HA, _HA, _HR), dp=(40, 40, 0), ad={2: (None, None)})], sex="1")
+    assert (r["mode"], r["flags"], r["child_gt"], r["father_gt"]) == ("y_linked", "origin=pat", "T/T", "T/T")
+    assert r["child_gt_pl"] == "" and r["mother_dp"] == "0" and r["father_dp"] == "40"
+    # 2. the imputed mother: refinement wrote her 0/1 with no reads — IGNORED, no Mendelian test
+    r = one([yv((_HA, _HA, _HET), dp=(40, 40, 0), ad={2: (None, None)})], sex="1")
+    assert r["mode"] == "y_linked" and r["flags"] == "origin=pat" and r["mother_gt"] == "A/T"
+    # 3. ...but a mother WITH reads at a male-specific site is X-derived mismapping: flagged
+    r = one([yv((_HA, _HA, _HET), dp=(40, 40, 12))], sex="1")
+    assert r["flags"] == "origin=pat;y_female_reads" and r["mother_dp"] == "12"
+    r = one([yv((_HA, _HA, _HR), dp=(40, 40, 2))], sex="1")
+    assert r["flags"] == "origin=pat", "below qc.y_reads_min_dp (3) the mother has no reads"
+    # 4. THE RESCUE: the refined GT says 0/1 (the diploid prior pushed it), the reads are all
+    #    alt and PL says 1/1 -> y_linked, with the disagreement on the row
+    r = one([yv((_HET, _HA, _HR), ad={0: (0, 40)}, pl={0: (300, 120, 0), 1: (300, 120, 0)})], sex="1")
+    assert r["mode"] == "y_linked" and r["flags"] == "origin=pat;child_gt_refined_discordant"
+    assert r["child_gt"] == "A/T" and r["child_gt_pl"] == "T/T" and r["father_gt_pl"] == "T/T"
+    assert r["child_ab"] == "1"
+    # 5. a genuinely mixed son (both alleles with reads, no PL) is never a call
+    assert why([yv((_HET, _HA, _HR))], sex="1") == "male_y_het"
+    # ...also when the PL itself says het against a 1/1 refined GT
+    assert why([yv((_HA, _HA, _HR), ad={0: (18, 22)}, pl={0: (200, 0, 200)})], sex="1") == "male_y_het"
+    # 6. the sole transmitter unobserved
+    assert why([yv((_HA, _UNK, _HR))], sex="1") == "parent_nocall"
+    # 7. a MIXED father: the site behaves diploid in him (paralogue / mismapping) — emitted, flagged
+    r = one([yv((_HA, _HET, _HR))], sex="1")
+    assert r["flags"] == "origin=pat;transmitting_parent_qc_fail;y_site_mixed_reads", r["flags"]
+    # 8. a father who is alt but fails his own QC (DP 6): emitted, flagged, never a veto
+    r = one([yv((_HA, _HA, _HR), dp=(40, 6, 0), ad={1: (0, 6), 2: (None, None)})], sex="1")
+    assert r["flags"] == "origin=pat;transmitting_parent_qc_fail"
+    # 9. the father's refined GT overruled by his PL: 0/1 refined, 1/1 by likelihood, all-alt
+    r = one([yv((_HA, _HET, _HR), ad={1: (0, 40)}, pl={1: (300, 120, 0)})], sex="1")
+    assert r["flags"] == "origin=pat;father_gt_refined_discordant"
+    # 10. de novo Y: son 1/1, father confidently ref -> denovo_y_hemi (secondary), cross-check flag
+    r = one([yv((_HA, _HR, _HR), dp=(40, 40, 0), ad={2: (None, None)})], sex="1")
+    assert (r["mode"], r["flags"], r["review_prior_crosscheck"]) == ("denovo_y_hemi", "", "1")
+    assert why([yv((_HA, _HR, _HR), dp=(15, 40, 0))], sex="1") == "qc_child", \
+        "the hemizygous de novo keeps the deeper de novo depth floor"
+    assert why([yv((_HA, _HR, _HR), ad={1: (37, 3)})], sex="1") == "qc_parent"
+    r = one([yv((_HA, _HR, _HR), ad={1: (None, None), 2: (None, None)})], sex="1")
+    assert r["mode"] == "denovo_y_hemi" and r["flags"] == "parent_ad_unmeasured"
+    # the hiConfDeNovo tag is NOT a gate on chrY (GATK computes it on the refined diploid
+    # genotypes, imputed mother included) — the autosomal path still honours it
+    hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
+    r = one([yv((_HA, _HR, _HR))], sex="1", header=hdr)
+    assert r["mode"] == "denovo_y_hemi" and r["hiConfDeNovo"] == ""
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag"
+    # 11. rarity: the inherited call gates at recessive_max, the de novo at dominant_max
+    assert why([yv((_HA, _HA, _HR), af=0.02)], sex="1") == "rarity"
+    assert why([yv((_HA, _HR, _HR), af=5e-4)], sex="1") == "rarity"
+    r = one([yv((_HA, _HA, _HR), af=5e-4)], sex="1")
+    assert r["flags"] == "origin=pat;high_conf_rarity"
+    # 12. switches
+    off = dict(cfg_proxy, inheritance={"emit_y_linked": False})
+    assert why([yv((_HA, _HA, _HR))], sex="1", cfg=off) == "mode_disabled"
+    nodn = dict(cfg_proxy, inheritance={"emit_denovo": False})
+    assert why([yv((_HA, _HR, _HR))], sex="1", cfg=nodn) == "mode_disabled"
+    # 13. a female proband's chrY records are artifacts: skipped and counted, never a row
+    rows, st = st_of([yv((_HET, _HA, _HET))], sex="2")
+    assert rows == [] and st["skipped"]["chry_female"] == 1
+    rows, st = st_of([yv((_HA, _HA, _HR))], sex="0")
+    assert rows == [] and st["skipped"]["sex_unresolved"] == 1
+    # 14. PAR-Y is diploid in both sexes and routes through the autosomal models
+    r = one([_v5("chrY", 100_000, "GYP", (_HET, _HR, _HET), af=5e-5)], sex="1")
+    assert (r["mode"], r["flags"]) == ("dominant", "origin=mat")
+    # 15. an unlocalised chrY scaffold is chrY (audit #99)
+    r = one([_v5("chrY_KI270740v1_random", 5000, "GYS", (_HA, _HA, _HR))], sex="1")
+    assert r["mode"] == "y_linked"
+    # 16. the pre-refinement columns are populated for EVERY member on EVERY row (autosomes too:
+    #     the documented gnomAD-prior cross-check), blank where a sample has no PL
+    r = one([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
+                 pl={0: (60, 0, 60), 2: (60, 0, 60)})])
+    assert (r["child_gt_pl"], r["mother_gt_pl"], r["father_gt_pl"]) == ("A/T", "A/T", "")
+    assert r["mother_dp"] == "40" and r["father_dp"] == "40"
+    # 17. the accounting: examined == skipped + with_call + no_row across a mixed batch
+    rows, st = st_of([yv((_HA, _HA, _HR)), yv((_HET, _HA, _HR), pos=Y + 1),
+                      yv((_HA, _HR, _HR), pos=Y + 2), yv((_HR, _HA, _HR), pos=Y + 3)],
+                     sex="1")
+    assert _calls(rows) == [("denovo_y_hemi", Y + 2, ""), ("y_linked", Y, "origin=pat")]
+    assert dict(st["no_row"]) == {"male_y_het": 1, "child_not_carrier": 1}, dict(st["no_row"])
+
+
+def test_step0_chry_coverage_sex_evidence():
+    """The audit-only chrY sex check: the proband's depth at the FATHER's hemizygous sites,
+    autosome-normalised, with the MOTHER as the in-trio female control. A few mismapped reads
+    cannot read a female as male (a median over >= min anchors), a mother with coverage refuses
+    the call, and the scan anchors on the likelihoods (a father whose refined GT was pushed to
+    0/1 still anchors) while never reading the proband's or mother's genotype."""
+    s0 = _load_step0()
+    # ratios: library depth cancels
+    assert s0.y_cov_ratio(20, 40, 20, 40) == 1.0 and s0.y_cov_ratio(30, 60, 20, 40) == 1.0
+    assert s0.y_cov_ratio(0, 40, 20, 40) == 0.0
+    assert s0.y_cov_ratio(None, 40, 20, 40) is None and s0.y_cov_ratio(20, 0, 20, 40) is None
+    assert s0.y_cov_ratio(20, 40, 0, 40) is None
+    # the call and its refusals
+    assert s0.infer_sex_y(1.0, 0.0, 100, 50, 0.30, 0.10) == ("1", "")
+    assert s0.infer_sex_y(0.02, 0.0, 100, 50, 0.30, 0.10) == ("2", "")
+    assert s0.infer_sex_y(0.2, 0.0, 100, 50, 0.30, 0.10) == (None, "y_cov_indeterminate")
+    assert s0.infer_sex_y(1.0, 0.5, 100, 50, 0.30, 0.10) == (None, "mother_y_coverage"), \
+        "a mother with chrY coverage means the trio's chrY reads cannot separate the sexes"
+    assert s0.infer_sex_y(1.0, 0.0, 10, 50, 0.30, 0.10) == (None, "father_y_anchors_low")
+    assert s0.infer_sex_y(None, 0.0, 100, 50, 0.30, 0.10) == (None, "y_ratio_unavailable")
+    assert s0.infer_sex_y(1.0, None, 100, 50, 0.30, 0.10) == ("1", "mother_y_control_unavailable")
+
+    class _Y:
+        def __init__(self, pos, gts, dps, ads, pls=None, filt=None, chrom="chrY"):
+            self.CHROM, self.POS, self.ALT, self.FILTER = chrom, pos, ["T"], filt
+            self.gt_types, self.gt_quals, self.gt_depths = list(gts), [99, 99, 99], list(dps)
+            self.gt_ref_depths = [a[0] for a in ads]
+            self.gt_alt_depths = [a[1] for a in ads]
+            self._pls = pls
+
+        def format(self, key):
+            if key == "PL" and self._pls is not None:
+                return [list(p) if p is not None else [-2147483648] * 3 for p in self._pls]
+            raise KeyError(key)
+
+    class _FakeY:
+        samples, seqnames = ["K", "D", "M"], ["chr1", "chrX", "chrY"]
+        records = []
+
+        def __init__(self, path, strict_gt=False):
+            assert strict_gt is True
+
+        def __call__(self, region):
+            assert region == "chrY"
+            return iter(self.records)
+
+        def __iter__(self):
+            return iter(self.records)
+
+        def close(self):
+            pass
+    HR, HET, HA = G.HOM_REF, G.HET, G.HOM_ALT
+    y0 = 20_000_000
+    _FakeY.records = [
+        # anchors: the father is a confident hemizygous alt (all-alt reads, DP >= 10, AB >= 0.9)
+        _Y(y0, (HA, HA, HR), (25, 30, 0), [(0, 25), (0, 30), (-1, -1)]),
+        _Y(y0 + 1, (HA, HA, HET), (30, 28, 2), [(0, 30), (0, 28), (1, 1)]),      # imputed mother, 2 reads
+        # the father's refined GT was pushed to 0/1 by the prior; PL + reads say 1/1 -> still an anchor
+        _Y(y0 + 2, (HET, HET, HR), (20, 32, 0), [(0, 20), (0, 32), (-1, -1)],
+           pls=[(200, 60, 0), (300, 96, 0), None]),
+        # NOT anchors: a mixed father (X-transposed site), a low-AB father, PAR-Y, a filtered site
+        _Y(y0 + 3, (HET, HET, HET), (40, 40, 40), [(20, 20), (20, 20), (20, 20)]),
+        _Y(y0 + 4, (HA, HA, HR), (40, 40, 0), [(0, 40), (6, 34), (-1, -1)]),
+        _Y(100_000, (HET, HA, HET), (40, 40, 40), [(20, 20), (0, 40), (20, 20)]),
+        _Y(y0 + 5, (HA, HA, HR), (40, 40, 0), [(0, 40), (0, 40), (-1, -1)], filt="LowQual"),
+    ]
+    s0.VCF = _FakeY
+    ys = s0.scan_y("any.vcf", "K", "D", "M", G.GtThresholds(), max_y=0, min_reads=3)
+    assert ys["anchors"] == 3 and ys["kid_dp"] == [25, 30, 20] and ys["dad_dp"] == [30, 28, 32]
+    assert ys["mom_dp"] == [0, 2, 0] and ys["kid_cov"] == 3 and ys["mom_cov"] == 0
+    assert s0.scan_y("any.vcf", "K", "D", "NOBODY", G.GtThresholds(), max_y=0, min_reads=3) is None
+    _FakeY.seqnames = ["chr1", "chrX"]
+    assert s0.scan_y("any.vcf", "K", "D", "M", G.GtThresholds(), max_y=0, min_reads=3) is None
+    _FakeY.seqnames = ["chr1", "chrX", "chrY"]
+    # the report columns from that scan: a son at 40x against a father at 40x reads 1.0; the
+    # mother 0; a daughter (kid depth 0 at every anchor) reads 0 and female
+    res = {"y": dict(ys, kid_med=25, dad_med=30, mom_med=0),
+           "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    ye = s0.y_evidence(res, 3, 0.30, 0.10)
+    assert ye["y_anchor_sites"] == 3 and ye["y_inferred_sex"] == "1" and ye["y_flag"] == ""
+    assert abs(ye["_kid_ratio"] - (25 / 42) / (30 / 50)) < 1e-9 and ye["_mom_ratio"] == 0.0
+    assert ye["y_covered_frac"] == "1" and ye["mom_y_cov_ratio"] == "0"
+    daughter = {"y": dict(ys, kid_med=0, dad_med=30, mom_med=0, kid_cov=0),
+                "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    ye = s0.y_evidence(daughter, 3, 0.30, 0.10)
+    assert ye["y_inferred_sex"] == "2" and ye["y_cov_ratio"] == "0" and ye["y_covered_frac"] == "0"
+    # a daughter with a few mismapped reads at a minority of anchors still reads 0 at the median
+    few = {"y": dict(ys, kid_dp=[6, 0, 0], kid_med=0, dad_med=30, mom_med=0, kid_cov=1),
+           "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    assert s0.y_evidence(few, 3, 0.30, 0.10)["y_inferred_sex"] == "2"
+    # too few anchors -> no call, named; a mother with coverage -> no call, named
+    assert s0.y_evidence(res, 50, 0.30, 0.10)["y_flag"] == "father_y_anchors_low"
+    assert s0.y_evidence(res, 50, 0.30, 0.10)["y_inferred_sex"] == ""
+    momcov = {"y": dict(ys, kid_med=25, dad_med=30, mom_med=20),
+              "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    ye = s0.y_evidence(momcov, 3, 0.30, 0.10)
+    assert ye["y_inferred_sex"] == "" and ye["y_flag"] == "mother_y_coverage"
+    assert s0.y_evidence({"y": None, "auto_dp_median": {}}, 3, 0.30, 0.10)["y_flag"] == "no_chry_contig"
+    assert s0.y_evidence({"y": dict(ys, anchors=0), "auto_dp_median": {}}, 3, 0.30, 0.10)["y_flag"] == "father_y_anchors_low"
+
+
+def test_step6_y_linked_family_counts_carriers_against_male_probands():
+    """Step 6 counts y_linked carriers as an INHERITED family of its own — distinct male
+    probands, tested against the male proband count with the single-allele null like the
+    X-linked family — and denovo_y_hemi under the secondary de novo column."""
+    import csv as _csv
+    import shutil
+    import types
+    _requires("yaml")
+    spec = importlib.util.spec_from_file_location(
+        "s6y", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    seen = {}
+    m.binom = types.SimpleNamespace(sf=lambda k, n, p: seen.setdefault("n", n) and 0.5)
+    m.poisson = types.SimpleNamespace(sf=lambda k, mu: 0.5)
+    d = tempfile.mkdtemp(prefix="_hprv_s6y_")
+    old_adir = os.environ.get("HPRV_AUDIT_DIR")
+    try:
+        calls = os.path.join(d, "calls.tsv")
+        cols = ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
+                "consequence", "rarity_af", "rarity_oracle"]
+
+        def row(t, mode, pos, gene="GENEY"):
+            return {"trio_id": t, "mode": mode, "pair_id": "", "chrom": "chrY", "pos": pos, "ref": "A",
+                    "alt": "T", "gene": "ENSG_" + gene, "symbol": gene,
+                    "consequence": "stop_gained", "rarity_af": "", "rarity_oracle": "faf95"}
+        with open(calls, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=cols, delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerow(row("T1", "y_linked", 500))
+            w.writerow(row("T3", "y_linked", 900))          # a DIFFERENT variant: distinct recurrence
+            w.writerow(row("T2", "denovo_y_hemi", 700))     # secondary column only
+            w.writerow(row("T1", "dominant", 100, "GENEA"))
+        qc = os.path.join(d, "qc_report.tsv")
+        with open(qc, "w") as fh:
+            fh.write("trio_id\tped_sex\tinferred_sex\nT1\t1\t\nT2\t1\t\nT3\t1\t\nT4\t2\t\n")
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("burden: {min_carriers: 2}\n")
+        os.environ["HPRV_AUDIT_DIR"] = os.path.join(d, "audit")
+        out = os.path.join(d, "genes.ranked.tsv")
+        assert m.main(["--calls", calls, "--out", out, "--config", cfgp, "--n-trios", "4",
+                       "--qc-report", qc]) == 0
+        with open(out) as fh:
+            genes = {r["gene"]: r for r in _csv.DictReader(fh, delimiter="\t")}
+        gy = genes["GENEY"]
+        assert (gy["n_ylinked"], gy["n_carriers"], gy["n_denovo"], gy["recurrent"]) == ("2", "2", "1", "1"), gy
+        assert gy["recurrence_kind"] == "distinct_variant" and "y_linked=2" in gy["modes"] and "denovo=1" in gy["modes"]
+        assert gy["p_recurrence_ylinked"] == "0.5" and gy["q_recurrence_ylinked"] != "" and gy["p_recurrence"] == ""
+        assert seen["n"] == 3, "the Y-linked null is sized on the MALE probands (3 of 4), not N_trios"
+        assert gy["recurrence_ylinked_exome_wide_sig"] == "0"
+        assert genes["GENEA"]["n_ylinked"] == "0" and genes["GENEA"]["p_recurrence_ylinked"] == ""
+    finally:
+        if old_adir is None:
+            os.environ.pop("HPRV_AUDIT_DIR", None)
+        else:
+            os.environ["HPRV_AUDIT_DIR"] = old_adir
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run_all():

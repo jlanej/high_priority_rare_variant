@@ -2,7 +2,7 @@
 """Generate a tiny, self-consistent mock dataset exercising the whole pipeline.
 
 Writes under --out:
-  reference.fa                mini GRCh38-like genome (chr1, chr2, chrX-with-nonPAR)
+  reference.fa                mini GRCh38-like genome (chr1, chr2, chrX-with-nonPAR, chrY-with-nonPAR)
   vcfs/fileA.vcf              trio A (CH_A/FA_A/MO_A) — autosomal modes + filter cases
   vcfs/fileB.vcf              FAMILY VCF: [MO_B, SIB_B, CH_B, FA_B] (extra sibling,
                               shuffled order) — de novo (recurrent gene) + X-linked
@@ -24,7 +24,8 @@ import os
 
 # chrM is present ON PURPOSE: Step 1 must EXCLUDE it (it is out of scope; see
 # 01_make_cohort_sites.sh EXCLUDE_CONTIGS). A mock without chrM cannot prove the filter works.
-CONTIGS = {"chr1": 20000, "chr2": 20000, "chrX": 2782200, "chrM": 16569}  # chrX > PAR1 end (2,781,479)
+# chrX and chrY both extend past the PAR1 end (2,781,479) so non-PAR sites exist on each.
+CONTIGS = {"chr1": 20000, "chr2": 20000, "chrX": 2782200, "chrY": 2800000, "chrM": 16569}
 BASES = "ACGT"
 
 
@@ -49,6 +50,23 @@ def ad(gt, dp, n_alt=1):
         return f"0,{dp}{pad}"
     h = dp // 2
     return f"{dp - h},{h}{pad}"
+
+
+def pl_str(gt, dp, n_alt=1):
+    """Pre-refinement PLs (FORMAT/PL, Number=G) consistent with the genotype: 0 for the called
+    genotype and 3*DP for every other (GATK's PL(0/1) - PL(1/1) is ~3 per all-alt read). A sample
+    with no reads carries FLAT PLs — no information — and a no-call / half-call carries none.
+    GATK's genotype refinement rewrites GT/GQ from a pedigree-prior posterior but leaves PL as
+    the caller produced it, which is what Step 5's chrY model reads (and what the `plov`
+    override below models: a refined 0/1 whose PL still says 1/1)."""
+    alleles = gt.replace("|", "/").split("/")
+    if "." in alleles:
+        return "."
+    called = tuple(sorted(int(x) for x in alleles))
+    pairs = [(j, k) for k in range(n_alt + 1) for j in range(k + 1)]   # VCF order: 0/0,0/1,1/1,0/2,..
+    if dp <= 0:
+        return ",".join("0" for _ in pairs)
+    return ",".join("0" if (j, k) == called else str(3 * dp) for j, k in pairs)
 
 
 # Sample groupings per VCF file (note fileB order is shuffled and has an extra sib).
@@ -184,6 +202,54 @@ add(file="B", chrom="chrX", pos=2782000, gene="GENEXAF", csq="missense_variant",
     af=1e-4,
     gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
+
+# --- chrY (non-PAR: PAR1 ends at 2,781,479). GATK genotypes chrY as DIPLOID, and the genotype
+#     refinement's DIPLOID pedigree prior then does two things a real GMKF trio shows: it imputes
+#     the MOTHER a 0/1 at father-son 1/1 sites (she has no reads there), and it pushes a son's
+#     all-alt 1/1 to 0/1 where her mismapped reads say 0/0 (a 1/1 child of a 0/0 mother is a de
+#     novo at 1e-8 under that prior). FORMAT/PL still carries the pre-refinement likelihoods,
+#     which is what Step 5's Y model decides on. ---
+# Y1) father-to-son transmission with the IMPUTED mother (0/1, DP 0, flat PL) -> y_linked,
+#     origin=pat, no y_female_reads. In the mock slim WITHOUT a faf95 -> rarity_basis=zero_ci
+#     on chrY (gnomAD publishes no fafmax for ~75% of chrY records).
+add(file="B", chrom="chrY", pos=2790000, gene="GENEY1", csq="stop_gained", impact="HIGH",
+    cadd="35", nhomalt="0", faf95_zero=True,
+    gts={"CH_B": ("1/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/1", 0, 0),
+         "SIB_B": ("0/0", 99, 40)},
+    adov={"MO_B": "0,0"})
+# Y2) THE RESCUE: the son's REFINED GT is 0/1 but his reads are all alt and his PL says 1/1 ->
+#     y_linked with child_gt_refined_discordant (the refined GT alone would file this true
+#     hemizygous call under male_y_het and lose it).
+add(file="B", chrom="chrY", pos=2791000, gene="GENEY2", csq="missense_variant", impact="MODERATE",
+    gts={"CH_B": ("0/1", 99, 40), "FA_B": ("1/1", 99, 40), "MO_B": ("0/0", 99, 0),
+         "SIB_B": ("0/0", 99, 40)},
+    adov={"CH_B": "0,40", "MO_B": "0,0"}, plov={"CH_B": "300,120,0"})
+# Y3) a de novo on chrY (secondary): son 1/1, father confidently 0/0 -> denovo_y_hemi.
+add(file="B", chrom="chrY", pos=2792000, gene="GENEYDN", csq="stop_gained", impact="HIGH",
+    hidenovo="CH_B",
+    gts={"CH_B": ("1/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("0/0", 99, 0),
+         "SIB_B": ("0/0", 99, 40)},
+    adov={"MO_B": "0,0"})
+# Y4) the X-transposed-region shape: EVERY member het (mismapped X reads). A male het on a
+#     haploid chromosome is never a call -> no_row.male_y_het; and the father is not a Step-0
+#     anchor there (he is het too).
+add(file="B", chrom="chrY", pos=2793000, gene="GENEYMIX", csq="missense_variant", impact="MODERATE",
+    gts={"CH_B": ("0/1", 99, 40), "FA_B": ("0/1", 99, 40), "MO_B": ("0/1", 99, 40),
+         "SIB_B": ("0/1", 99, 40)})
+# Y5-7) the FEMALE proband's trio: FA_A hemizygous alt at three sites (Step 0's chrY anchors);
+#     CH_A and MO_A carry a few mismapped reads at ONE of them and none at the others, so both
+#     read 0 chrY coverage at the median (y_inferred_sex=2 for CH_A, the mother as the female
+#     control) while y_covered_frac shows the stray reads. Every record is a candidate (the
+#     father carries the alt) and every one is skipped for CH_A as chry_female — counted, never
+#     a row.
+add(file="A", chrom="chrY", pos=2795000, gene="GENEYF", csq="missense_variant", impact="MODERATE",
+    gts={"CH_A": ("0/1", 99, 6), "FA_A": ("1/1", 99, 40), "MO_A": ("0/1", 99, 6)},
+    adov={"CH_A": "3,3", "MO_A": "3,3"})
+for i, p in enumerate((2796000, 2797000)):
+    add(file="A", chrom="chrY", pos=p, gene=f"GENEYF{i + 2}", csq="missense_variant",
+        impact="MODERATE",
+        gts={"CH_A": ("0/0", 99, 0), "FA_A": ("1/1", 99, 40), "MO_A": ("0/0", 99, 0)},
+        adov={"CH_A": "0,0", "MO_A": "0,0"})
 
 # --- autosomal hom-recessive with a HOM-ALT parent (consanguinity-like): FA_A hom-alt, MO_A het,
 #     CH_A hom-alt -> hom_recessive via the {HET,HOM_ALT} carrier rule (tests carrier_ok HOM_ALT). ---
@@ -391,6 +457,7 @@ VCF_HEADER = """##fileformat=VCFv4.2
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
 ##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Normalized, Phred-scaled likelihoods for genotypes as defined in the VCF specification">
 """
 
 
@@ -420,12 +487,14 @@ def write_vcf(path, samples, variants):
                 info += f";hiConfDeNovo={v['hidenovo']}"
             cells = []
             adov = v.get("adov", {})     # per-sample AD override (contamination; multiallelic AD)
+            plov = v.get("plov", {})     # per-sample PL override (a refined GT its PL disagrees with)
             for s in samples:
                 gt, gq, dp = v["gts"][s]
                 a = adov.get(s, ad(gt, dp, n_alt))
-                cells.append(f"{gt}:{a}:{dp}:{gq}")
+                pl = plov.get(s, pl_str(gt, dp, n_alt))
+                cells.append(f"{gt}:{a}:{dp}:{gq}:{pl}")
             fh.write(f"{v['chrom']}\t{v['pos']}\t.\t{ref}\t{alt}\t100\t{v['filter']}\t"
-                     f"{info}\tGT:AD:DP:GQ\t" + "\t".join(cells) + "\n")
+                     f"{info}\tGT:AD:DP:GQ:PL\t" + "\t".join(cells) + "\n")
 
 
 def write_sites(path, header_info, want):
@@ -586,7 +655,9 @@ def main(argv=None) -> int:
         # GENERC is curated as a BARE canonical AR — deliberately WITHOUT the overlay's
         # carrier-risk annotation — so the het observation there is a genuine
         # canonical-MOI mismatch and the suppression path is what gets tested.
-        fh.write("gene\tmoi\nGENED\tAD\nGENE2\tAR\nGENE3\tAR\nGENERC\tAR\n")
+        # GENEY1 is curated Y-LINKED so the hemizygous Y observation reads coherent; GENEY2 is
+        # uncurated (moi_unknown, exactly neutral) — neither may be charged the autosomal split.
+        fh.write("gene\tmoi\nGENED\tAD\nGENE2\tAR\nGENE3\tAR\nGENERC\tAR\nGENEY1\tYL\n")
     # The Class-B overlay. Present as a FILE but left DISABLED in the mock config, so the
     # integration run asserts the default contract: rank_prior == rank_agnostic.
     with open(os.path.join(W, "phenotype_overlay.txt"), "w") as fh:
@@ -732,6 +803,7 @@ inputs:
   vcf_list: ""
 qc:
   sex_min_sites: 2            # tiny mock has only a handful of chrX sites (prod default is 20)
+  y_min_anchor_sites: 2       # ...and 2-3 father-hemizygous chrY sites per trio (prod default is 50)
 outputs:
   xlsx: true
   igv: {{enabled: true, padding: 200, genome: hg38}}

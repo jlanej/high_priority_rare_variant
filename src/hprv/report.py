@@ -167,7 +167,8 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     line("Sheets", "", h2=True)
     for nm, desc in [
         ("Gene consolidation", "Genes ranked by recurrence across individuals (dominant het / "
-                               "biallelic / X-linked), weighted by constraint. The headline result."),
+                               "biallelic / X-linked / Y-linked), weighted by constraint. The "
+                               "headline result."),
         ("Candidate calls", "One row per candidate per trio: inheritance mode, genotypes, and "
                             "annotations (gnomAD rarity — rarity_af, with rarity_oracle / "
                             "rarity_basis saying which quantity and how it arose — HGVS, CADD, "
@@ -178,8 +179,12 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
                "proband's checked against the trios file's stated sex, which is canonical: "
                "sex_source says which one Step 5 used, sex_match 1/0/blank = agree/disagree/not "
                "compared; the parents' raw dad_/mom_x_het_ratio are the calibration set for "
-               "qc.x_het_male_max), and contamination (verifyBamID FREEMIX or VCF-only CHARR) "
-               "— the garbage-in guard."),
+               "qc.x_het_male_max), the audit-only chrY COVERAGE sex evidence (y_inferred_sex "
+               "from the proband's depth at the father's own hemizygous chrY sites, y_cov_ratio "
+               "~1 for a son / ~0 for a daughter, the mother's mom_y_cov_ratio as the in-trio "
+               "female control, sex_match_y vs the pedigree and xy_agree vs the chrX inference; "
+               "it decides nothing and never fails overall_pass), and contamination (verifyBamID "
+               "FREEMIX or VCF-only CHARR) — the garbage-in guard."),
         ("Audit counts", "Per-step input/output counts and funnel tallies (what went where, and why)."),
     ]:
         line(nm, desc)

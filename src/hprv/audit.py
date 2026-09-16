@@ -64,6 +64,26 @@ def summarize(adir, out_md=None):
               f"(matched >1 VCF: {g('resolve','trios_multi_vcf')})",
               f"- VCFs scanned: {g('resolve','vcfs_scanned')}; samples indexed: {g('resolve','samples_indexed')}",
               "  (per-trio detail in trio_resolution.tsv)", ""]
+    # Step 0: the sex evidence a methods section has to quote — who decided each proband's sex,
+    # how the chrX inference calibrated, and the audit-only chrY coverage check beside it.
+    lines += ["## Sample QC (Step 0)",
+              f"- trios QC'd: {g('00_qc','trios_qc')}; flagged (advisory): {g('00_qc','trios_flagged')}",
+              f"- proband sex source: pedigree {g('00_qc','trios_sex_source.ped')}, chrX inference "
+              f"{g('00_qc','trios_sex_source.inferred')}, unresolved {g('00_qc','trios_sex_source.none')}; "
+              f"pedigree-vs-chrX discordant: {g('00_qc','trios_sex_discordant_inference')}",
+              f"- chrX calibration: fathers inferred male {g('00_qc','fathers_inferred_male')} / female "
+              f"{g('00_qc','fathers_inferred_female')}; mothers inferred female "
+              f"{g('00_qc','mothers_inferred_female')} / male {g('00_qc','mothers_inferred_male')} "
+              f"(median het ratio fathers {g('00_qc','father_x_het_ratio_median')}, mothers "
+              f"{g('00_qc','mother_x_het_ratio_median')})",
+              f"- chrY coverage (audit-only): probands reading male {g('00_qc','y_sex_inferred_male')}, "
+              f"female {g('00_qc','y_sex_inferred_female')}, no call {g('00_qc','y_sex_inferred_none')}; "
+              f"contradicting the pedigree {g('00_qc','trios_sex_match_y_discordant')}, contradicting "
+              f"the chrX inference {g('00_qc','trios_xy_disagree')}, mothers with chrY coverage "
+              f"{g('00_qc','trios_mother_y_coverage')}; median proband y_cov_ratio PED-male "
+              f"{g('00_qc','proband_y_cov_ratio_median.ped_male')} / PED-female "
+              f"{g('00_qc','proband_y_cov_ratio_median.ped_female')}, mothers "
+              f"{g('00_qc','mother_y_cov_ratio_median')}", ""]
     lines += ["## Global variant funnel",
               f"- cohort union sites: {g('01_cohort_sites','union_sites')}",
               f"- annotated sites: {g('02_annotate','annotated_sites')}",

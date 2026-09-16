@@ -9,6 +9,10 @@ inheritance mode with the refined-GQ genotype-QC gates and per-mode rarity gates
     and (when present) the GATK hiConfDeNovo tag;
   * homozygous recessive;
   * X-linked recessive (male hemizygous);
+  * Y-linked (male proband, non-PAR chrY): father-to-son hemizygous transmission (`y_linked`)
+    and its de novo counterpart (`denovo_y_hemi`, secondary), judged on the PRE-REFINEMENT
+    likelihoods (FORMAT/PL) because the genotype refinement's diploid pedigree prior is invalid
+    on a haploid chromosome — the mother is never consulted (she has no Y), only measured;
   * compound heterozygous in TRANS (parent-of-origin: mat + pat, or inherited + de novo).
 
 Emits one TSV of candidate calls across all trios: the curated columns (COLS) first, then a
@@ -78,6 +82,13 @@ COLS = [
     # is BLANK when that transfer did not run. Blank != 0 stars — see annotations.clinvar_stars.
     "clnsig", "clinvar_stars", "child_gt", "child_gq", "child_dp", "child_ab",
     "mother_gt", "father_gt",
+    # The PRE-REFINEMENT genotype each member's FORMAT/PL favours (base form, like the columns
+    # above; blank when the record carries no PL or the likelihoods are flat) and the parents'
+    # depth. `child_gt`/`mother_gt`/`father_gt` are GATK's REFINED calls — the posterior after a
+    # pedigree + population prior — and these are what the reads said before the prior. On the
+    # autosomes a difference is the documented gnomAD-prior cross-check (CLAUDE.md); on non-PAR
+    # chrY the prior is diploid and therefore invalid, so the Y-linked model DECIDES on these.
+    "child_gt_pl", "mother_gt_pl", "father_gt_pl", "mother_dp", "father_dp",
     # The sex this trio's chrX/chrY calls were judged under and WHO said so: `ped` (the trios
     # file stated it — canonical), `inferred` (it did not; Step 0's chrX heuristic filled in) or
     # `none`. A PED sex the inference disagrees with is KEPT and every row of the trio carries
@@ -149,6 +160,16 @@ def info_values(v, ids):
 
 def fmt(x):
     return "" if x is None else (f"{x:.4g}" if isinstance(x, float) else str(x))
+
+
+def pl_gt_bases(v, i):
+    """The genotype the sample's FORMAT/PL favours, in the same base form as cyvcf2's gt_bases
+    (`A/T`), or blank when the record has no PL for it / the likelihoods are flat."""
+    g = G.gt_from_pl(G.pl(v, i))
+    if g is None:
+        return ""
+    ref, alt = v.REF, (v.ALT[0] if v.ALT else "")
+    return {G.HOM_REF: f"{ref}/{ref}", G.HET: f"{ref}/{alt}", G.HOM_ALT: f"{alt}/{alt}"}[g]
 
 
 class Trio:
@@ -223,6 +244,9 @@ def base_row(trio_id, v, gt, mode, pair_id="", cfg=None):
         "child_ab": fmt(G.allele_balance(v, gt.c)),
         "mother_gt": (v.gt_bases[gt.m] if v.gt_bases is not None else ""),
         "father_gt": (v.gt_bases[gt.d] if v.gt_bases is not None else ""),
+        "child_gt_pl": pl_gt_bases(v, gt.c), "mother_gt_pl": pl_gt_bases(v, gt.m),
+        "father_gt_pl": pl_gt_bases(v, gt.d),
+        "mother_dp": fmt(G.dp(v, gt.m)), "father_dp": fmt(G.dp(v, gt.d)),
         "child_sex": gt.child_sex, "child_sex_source": gt.child_sex_source,
         "hiConfDeNovo": ("1" if A.is_hiconf_denovo_for(v, gt.child_name) else ""),
         "review_prior_crosscheck": "", "flags": "",
@@ -252,6 +276,12 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     # dominant model — recurrent inherited rare functional hets — is the new emphasis.
     emit_denovo = get_bool(cfg, "inheritance.emit_denovo", True)
     emit_dominant = get_bool(cfg, "inheritance.emit_dominant", True)
+    # Y-linked: father-to-son hemizygous transmission on non-PAR chrY (+ its secondary de novo
+    # counterpart, which emit_denovo also gates). See the chrY block in the loop below.
+    emit_y_linked = get_bool(cfg, "inheritance.emit_y_linked", True)
+    # The ONE "this member has reads at a chrY site" floor, shared with Step 0's y_covered_frac:
+    # a MOTHER with reads at a non-PAR chrY site is the direct detector of X-derived mismapping.
+    y_reads_min_dp = int(get(cfg, "qc.y_reads_min_dp", 3))
     require_pass = get_bool(cfg, "filters.genotype_qc.require_pass", True)
     rec_strict = float(get(cfg, "filters.rarity.recessive_strict", 1e-3))
 
@@ -307,15 +337,61 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     def _hiconf_blocks(v):
         return require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name)
 
+    def y_flags(v, yc, yd):
+        """The review flags every Y-linked row carries: whose refined GT the likelihoods
+        overruled (the diploid-prior distortion, made visible), whether the site behaves diploid
+        in the father (both alleles with reads on a haploid chromosome = paralogue / mismapping),
+        and whether the MOTHER has reads at this male-specific site (X-derived mismapping)."""
+        fl = []
+        if yc[1] == "pl" and yc[0] != yc[2]:
+            fl.append("child_gt_refined_discordant")
+        if yd[1] == "pl" and yd[0] != yd[2]:
+            fl.append("father_gt_refined_discordant")
+        if yd[0] == G.HEMI_MIXED:
+            fl.append("y_site_mixed_reads")
+        mdp = G.dp(v, gt.m)
+        if mdp is not None and mdp >= y_reads_min_dp:
+            fl.append("y_female_reads")
+        return fl
+
+    def why_no_row_y(v):
+        """The chrY arm of why_no_row: mirrors the Y-linked block in the loop, on the SAME
+        pre-refinement calls it decides on (never the refined GT)."""
+        c, d = gt.c, gt.d
+        yc, yd = G.hemi_call(v, c), G.hemi_call(v, d)
+        if yc[0] in (G.HEMI_REF, G.HEMI_NOCALL):
+            return "child_not_carrier"
+        if yc[0] == G.HEMI_MIXED:
+            return "male_y_het"               # both alleles read on a haploid chromosome
+        if not emit_y_linked:
+            return "mode_disabled"
+        if not G.hemi_qc(v, c, thr, "alt"):
+            return "qc_child"
+        if yd[0] == G.HEMI_NOCALL:
+            return "parent_nocall"            # the sole transmitter is unobserved
+        if yd[0] == G.HEMI_REF:               # de novo shape
+            if not emit_denovo:
+                return "mode_disabled"
+            if not G.hemi_qc(v, d, thr, "clean"):
+                return "qc_parent"
+            if not rare(v, dom_max):
+                return "rarity"
+            if (G.dp(v, c) or 0) < thr.denovo_min_dp:
+                return "qc_child"
+            return "other"
+        if not rare(v, rec_max):
+            return "rarity"
+        return "other"
+
     def why_no_row(v, gc, gd, gmm, male_x, male_x_chrx):
         """The FIRST condition, in the order the mode logic applies them, that left this examined
         variant with no row and not pooled for pairing. Mirrors the branches above it exactly —
         keep the two in step when a mode's conditions change."""
         c, d, m = gt.c, gt.d, gt.m
+        if G.is_y_nonpar(v):
+            return why_no_row_y(v)            # judged on PL, so before the refined-GT tests
         if gc not in (G.HET, G.HOM_ALT):
             return "child_not_carrier"        # Step 4 keeps a locus any member carries
-        if G.is_y_nonpar(v):
-            return "chry"                     # no Y-linked model; documented
         if male_x and gc == G.HET:
             return "male_x_het"               # hemizygous het = QC red flag, never a call
         if gc == G.HET:
@@ -435,6 +511,45 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         # `male_x` still guards the het-suppression rule below (hemizygous is true of BOTH
         # chromosomes); `male_x_chrx` guards anything the mother's genotype drives.
         male_x_chrx = G.is_x_nonpar(v) and gt.child_male
+
+        # ---- Y-linked (non-PAR chrY; the proband is male here — a female's chrY records were
+        #      skipped above). The father is the SOLE transmitter and the mother has no Y, so
+        #      nothing below reads her genotype: she is only MEASURED (y_female_reads — reads in
+        #      a female at a male-specific site are X-derived mismapping, the main chrY artifact).
+        #      Zygosity is read from the PRE-REFINEMENT likelihoods (genotype.hemi_call): GATK's
+        #      CalculateGenotypePosteriors applies a DIPLOID pedigree prior that, on a haploid
+        #      chromosome, imputes the mother a 0/1 to explain a father-son 1/1 pair and pushes a
+        #      son's all-alt call to 0/1 when her mismapped reads say 0/0 — the refined GT would
+        #      then file a true hemizygous call under male_x_het. A `mixed` child (both alleles
+        #      with read support) is still never a call; a `mixed` FATHER is emitted and flagged
+        #      (never-drop), because the son's clean alt is real evidence whatever the father's
+        #      site looks like. The hiConfDeNovo tag is NOT consulted for the Y de novo: GATK
+        #      computes it from the refined diploid genotypes, including the imputed mother, so
+        #      on chrY it is unreliable in both directions — it is reported, never a gate. ----
+        if G.is_y_nonpar(v):
+            yc, yd = G.hemi_call(v, c), G.hemi_call(v, d)
+            if emit_y_linked and yc[0] == G.HEMI_ALT and G.hemi_qc(v, c, thr, "alt"):
+                if yd[0] in (G.HEMI_ALT, G.HEMI_MIXED):
+                    if rare(v, rec_max):
+                        r = base_row(trio_id, v, gt, "y_linked", cfg=cfg)
+                        fl = ["origin=pat"]
+                        if not G.hemi_qc(v, d, thr, "alt"):
+                            fl.append("transmitting_parent_qc_fail")
+                        r["flags"] = ";".join(fl + y_flags(v, yc, yd))
+                        rows.append(tag_strict(r, v))
+                elif yd[0] == G.HEMI_REF and emit_denovo:
+                    if (G.hemi_qc(v, d, thr, "clean") and rare(v, dom_max)
+                            and (G.dp(v, c) or 0) >= thr.denovo_min_dp):
+                        r = base_row(trio_id, v, gt, "denovo_y_hemi", cfg=cfg)
+                        fl = y_flags(v, yc, yd)
+                        if not G.sample_qc_ad_measured(v, d, "clean_parent"):
+                            fl.append("parent_ad_unmeasured")
+                        r["flags"] = ";".join(fl)
+                        if crosscheck:
+                            r["review_prior_crosscheck"] = "1"
+                        rows.append(r)
+            # anything else is a no-row; why_no_row_y names it. The blocks below are all gated
+            # off chrY (male_x / male_x_chrx), so this record touches no other mode.
 
         # ---- de novo (SECONDARY / cross-reference only; review handled elsewhere) ----
         denovo_hit = False

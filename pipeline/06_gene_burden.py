@@ -10,6 +10,9 @@ variation:
     carrying a qualifying dominant (inherited het) variant per gene.
   * RECESSIVE model — distinct individuals with a biallelic hit (homozygous or
     compound het), and X-linked recessive.
+  * Y-LINKED model — distinct male probands carrying a father-transmitted hemizygous
+    variant (`y_linked`); tested, like the X-linked family, against the MALE proband count
+    with a single-allele null.
   * De novo counts are carried as a SECONDARY column only (dedicated de novo
     filtering/review lives in separate machinery).
 
@@ -56,7 +59,8 @@ except ImportError:  # pragma: no cover
 DOMINANT_MODES = {"dominant"}
 BIALLELIC_MODES = {"hom_recessive", "compound_het"}
 XLINKED_MODES = {"x_linked_recessive"}
-DENOVO_MODES = {"denovo", "denovo_x_hemi"}
+YLINKED_MODES = {"y_linked"}
+DENOVO_MODES = {"denovo", "denovo_x_hemi", "denovo_y_hemi"}
 
 
 def _open_text(path):
@@ -209,10 +213,11 @@ def main(argv=None) -> int:
             trio, mode = r.get("trio_id"), r.get("mode")
             trios.add(trio)
             g = genes.setdefault(gene, {
-                "dom": set(), "bi": set(), "x": set(), "dn": set(), "all": set(),
-                "dom_faf": {}, "bi_faf": {}, "x_faf": {}, "denovo_lof": 0, "denovo_mis": 0,
+                "dom": set(), "bi": set(), "x": set(), "y": set(), "dn": set(), "all": set(),
+                "dom_faf": {}, "bi_faf": {}, "x_faf": {}, "y_faf": {},
+                "denovo_lof": 0, "denovo_mis": 0,
                 # per-trio SETS of variant keys, for same- vs distinct-variant recurrence
-                "dom_sets": {}, "bi_sets": {}, "x_sets": {},
+                "dom_sets": {}, "bi_sets": {}, "x_sets": {}, "y_sets": {},
             })
             g["all"].add(trio)
             # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
@@ -238,6 +243,9 @@ def main(argv=None) -> int:
             elif mode in XLINKED_MODES:
                 g["x"].add(trio); g["x_faf"][key] = faf
                 g["x_sets"].setdefault(trio, set()).add(key)
+            elif mode in YLINKED_MODES:
+                g["y"].add(trio); g["y_faf"][key] = faf
+                g["y_sets"].setdefault(trio, set()).add(key)
             elif mode in DENOVO_MODES:
                 g["dn"].add(trio)
                 cls = classify(r.get("consequence"))
@@ -252,9 +260,9 @@ def main(argv=None) -> int:
     if not n_trios:
         sys.stderr.write("WARN: --n-trios not provided; recurrence null + de novo enrichment "
                          "SKIPPED (counts only). Pass the resolved-trio count for calibrated p-values.\n")
-    # The X-linked (hemizygous-male) family is tested against the MALE proband count: a female
-    # proband cannot be a hemizygous carrier, so N_trios overstates that denominator and the
-    # p-value was conservative by the sex ratio. "Male" here is decided by the SAME precedence
+    # The X-linked and Y-linked (hemizygous-male) families are tested against the MALE proband
+    # count: a female proband cannot be a hemizygous carrier, so N_trios overstates that
+    # denominator and the p-value was conservative by the sex ratio. "Male" here is decided by the SAME precedence
     # Step 5 judged each trio's chrX calls under (ped.resolve_child_sex: the trios file's stated
     # sex is canonical; Step 0's chrX inference fills in only an unknown) — counting inferred_sex
     # alone would size this denominator on a heuristic the calls themselves did not follow.
@@ -266,7 +274,8 @@ def main(argv=None) -> int:
     n_x = n_male if n_male > 0 else n_trios
     if n_trios and not n_male:
         sys.stderr.write("WARN: no male proband count (--n-male-trios / --qc-report); the X-linked "
-                         "recurrence null uses N_trios as its denominator (conservative).\n")
+                         "and Y-linked recurrence nulls use N_trios as their denominator "
+                         "(conservative).\n")
 
     mut, mcols = _open_keyed(args.mutrate, {"gene", "gene_symbol", "symbol"})
     con, ccols = _open_keyed(args.constraint, {"gene", "gene_symbol", "symbol"})
@@ -340,7 +349,8 @@ def main(argv=None) -> int:
     C_mu = None
     if mu_of and n_trios > 0:
         _sum_mu = sum(mu_of.values())
-        _sum_n = sum(len(g["dom"] | g["bi"] | g["x"]) for gene, g in genes.items() if gene in mu_of)
+        _sum_n = sum(len(g["dom"] | g["bi"] | g["x"] | g["y"]) for gene, g in genes.items()
+                     if gene in mu_of)
         C_mu = (_sum_n / _sum_mu) if (_sum_mu > 0 and _sum_n > 0) else None
     if (mtg or mut) and not mu_of:
         sys.stderr.write("WARN: no usable mu_mis+mu_syn(+mu_lof) columns in --mutational-target/"
@@ -354,9 +364,9 @@ def main(argv=None) -> int:
 
     rows = []
     for gene, g in genes.items():
-        # Recurrence counts INHERITED models only (dominant het / biallelic / X-linked);
-        # de novo is tracked separately (n_denovo) and never drives the recurrence flag.
-        n_carriers = len(g["dom"] | g["bi"] | g["x"])
+        # Recurrence counts INHERITED models only (dominant het / biallelic / X-linked /
+        # Y-linked); de novo is tracked separately (n_denovo) and never drives the recurrence flag.
+        n_carriers = len(g["dom"] | g["bi"] | g["x"] | g["y"])
 
         # --- Calibrated recurrence null: is seeing this many distinct carriers surprising
         # given the gnomAD frequencies of the gene's qualifying variants? Each inheritance
@@ -365,6 +375,11 @@ def main(argv=None) -> int:
         #   dominant het  -> Binomial(N, 1 - prod_v (1-q_v)^2)      [PRIMARY headline signal]
         #   biallelic     -> Binomial(N, (sum_v q_v)^2)
         #   X-linked male -> Binomial(N, 1 - prod_v (1-q_v))        [hemizygous, single allele]
+        #   Y-linked      -> Binomial(N_male, 1 - prod_v (1-q_v))   [hemizygous; gnomAD's chrY
+        #                    frequencies are already per haploid male allele, so q_v IS the
+        #                    per-male carrier frequency. Every son of a carrier father carries
+        #                    it, so a recurrence across UNRELATED probands is haplogroup sharing
+        #                    unless q_v is tiny — which is what the null measures]
         # Only defined for >= min_carriers (a single observed carrier is not "recurrence" and
         # would be an ascertainment artifact). BH-FDR across genes on the primary p below.
         # (Case-only approximation using in-cohort variants; a gnomAD-derived per-gene
@@ -383,6 +398,8 @@ def main(argv=None) -> int:
         _, p_rec_bi = _recur(len(g["bi"]), g["bi_faf"],
                              lambda f: p_biallelic_hwe(f, absent_floor))
         _, p_rec_x = _recur(len(g["x"]), g["x_faf"],
+                            lambda f: p_carrier_hwe(f, absent_floor, 1), n_total=n_x)
+        _, p_rec_y = _recur(len(g["y"]), g["y_faf"],
                             lambda f: p_carrier_hwe(f, absent_floor, 1), n_total=n_x)
 
         # size-normalised rank (see above); None when the gene has no mutational target
@@ -432,6 +449,8 @@ def main(argv=None) -> int:
             modes.append(f"biallelic={len(g['bi'])}")
         if g["x"]:
             modes.append(f"x_linked={len(g['x'])}")
+        if g["y"]:
+            modes.append(f"y_linked={len(g['y'])}")
         if g["dn"]:
             modes.append(f"denovo={len(g['dn'])}")
         # DISTINCT-variant recurrence (independent hits -> gene signal) vs SAME-variant recurrence
@@ -441,21 +460,24 @@ def main(argv=None) -> int:
         # read same_variant (each leg used to count as a distinct variant).
         rec_kind = ""
         for cset, per_trio in ((g["dom"], g["dom_sets"]), (g["bi"], g["bi_sets"]),
-                               (g["x"], g["x_sets"])):
+                               (g["x"], g["x_sets"]), (g["y"], g["y_sets"])):
             if len(cset) >= min_carriers:
                 distinct = {frozenset(v) for v in per_trio.values()}
                 rec_kind = "same_variant" if len(distinct) <= 1 else "distinct_variant"
                 break
         # rank by the STRONGEST recurrence signal across the applicable models (so recessive/X-only
         # recurrent genes are ordered by their own p, not left at 1.0)
-        best_p = min([p for p in (p_recurrence, p_rec_bi, p_rec_x) if p is not None], default=None)
+        best_p = min([p for p in (p_recurrence, p_rec_bi, p_rec_x, p_rec_y) if p is not None],
+                     default=None)
         rank_basis = "mu_normalised" if (rank_by_mu and p_excess is not None) else "case_only"
         rows.append({
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
-            "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_denovo": len(g["dn"]),
+            "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_ylinked": len(g["y"]),
+            "n_denovo": len(g["dn"]),
             "recurrent": "1" if n_carriers >= min_carriers else "0", "recurrence_kind": rec_kind,
             "exp_carriers": exp_car, "p_recurrence": p_recurrence, "best_p": best_p,
             "p_recurrence_biallelic": p_rec_bi, "p_recurrence_xlinked": p_rec_x,
+            "p_recurrence_ylinked": p_rec_y,
             "mu_tot": mu_g, "exp_carriers_mu": exp_mu, "carrier_excess_ratio": excess_mu,
             "p_carrier_excess": p_excess, "rank_basis": rank_basis,
             "loeuf": loeuf, "pli": pli, "s_het": shet, "phaplo": phaplo,
@@ -465,7 +487,7 @@ def main(argv=None) -> int:
             "modes": ";".join(modes),
         })
 
-    # BH-FDR + exome-wide flag PER model family. The three INHERITED families correct over the
+    # BH-FDR + exome-wide flag PER model family. The four INHERITED families correct over the
     # CALLED genes — legitimately conditional on observing >= min_carriers carriers (the test only
     # exists once a gene is nominated; see gene_burden.md) — so recessive-only recurrent genes get a
     # corrected q.
@@ -473,6 +495,7 @@ def main(argv=None) -> int:
         ("p_recurrence", "q_recurrence", "recurrence_exome_wide_sig"),
         ("p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig"),
         ("p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig"),
+        ("p_recurrence_ylinked", "q_recurrence_ylinked", "recurrence_ylinked_exome_wide_sig"),
     ):
         for r, q in zip(rows, bh_fdr([r[pcol] for r in rows])):
             r[qcol] = q
@@ -509,11 +532,13 @@ def main(argv=None) -> int:
                 r["dn_p_enrich"] if r["dn_p_enrich"] is not None else 1.0)
     rows.sort(key=rank_key)
 
-    out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_denovo",
+    out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_ylinked",
+                "n_denovo",
                 "recurrent", "recurrence_kind", "exp_carriers", "p_recurrence", "q_recurrence",
                 "recurrence_exome_wide_sig",
                 "p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig",
                 "p_recurrence_xlinked", "q_recurrence_xlinked", "recurrence_xlinked_exome_wide_sig",
+                "p_recurrence_ylinked", "q_recurrence_ylinked", "recurrence_ylinked_exome_wide_sig",
                 "mu_tot", "exp_carriers_mu", "carrier_excess_ratio", "p_carrier_excess", "rank_basis",
                 "loeuf", "pli", "s_het", "phaplo", "constrained",
                 "dn_exp", "dn_p_enrich", "dn_mu_src", "dn_q_enrich", "dn_exome_wide_sig", "modes"]
@@ -529,8 +554,9 @@ def main(argv=None) -> int:
     # the dominant family (as before) under-counted recessive-only / X-linked-only significant genes;
     # genes.ranked.tsv already carries every per-family column, so this only fixes the summary tally.
     _sig_cols = ("recurrence_exome_wide_sig", "recurrence_biallelic_exome_wide_sig",
-                 "recurrence_xlinked_exome_wide_sig")
-    _q_cols = ("q_recurrence", "q_recurrence_biallelic", "q_recurrence_xlinked")
+                 "recurrence_xlinked_exome_wide_sig", "recurrence_ylinked_exome_wide_sig")
+    _q_cols = ("q_recurrence", "q_recurrence_biallelic", "q_recurrence_xlinked",
+               "q_recurrence_ylinked")
     n_rec_sig = sum(1 for r in rows if any(r.get(c) == "1" for c in _sig_cols))
     n_rec_fdr = sum(1 for r in rows
                     if any(r.get(c) is not None and r[c] < fdr_q for c in _q_cols))
