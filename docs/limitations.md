@@ -318,9 +318,24 @@ limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_ge
   so the residuals above are measurable on a run rather than argued from the code. The largest bucket
   on real WGS is expected to be `inert_band_het`: an inherited het pooled at `recessive_max` that paired
   with nothing and sits above `dominant_max` — emitted under no mode by policy, and now visible.
-- **No Y-linked inheritance model.** chrY is deliberately routed away from the mother-keyed
-  hemizygous models, so male non-PAR chrY produces no rows at all. Clinically near-empty (Y-linked
-  Mendelian SNV disease is essentially confined to spermatogenic failure, whose lesions are CNVs).
+- **chrY is in scope as SNV/indel only, on the pre-refinement likelihoods.** `y_linked` /
+  `denovo_y_hemi` read FORMAT/PL because the genotype refinement's diploid pedigree prior is
+  invalid on a haploid chromosome; a callset delivered WITHOUT PL falls back to the refined GT and
+  inherits that prior's distortions (an imputed maternal het is harmless — she is never consulted —
+  but a son pushed to `0/1` is then `no_row.male_y_het`). Not modelled: AZF deletions, 45,X/46,XY
+  mosaicism and loss of Y (copy-number / mosaic), PAR-Y (hard-masked in the analysis-set
+  reference; routed autosomal where present), and X-transposed / ampliconic mismapping beyond what
+  `y_female_reads`, `y_site_mixed_reads`, the male-het rule and the gnomAD chrY gate catch. A
+  recurrence of one inherited Y variant across unrelated probands is haplogroup sharing unless
+  its per-male frequency is tiny — read `p_recurrence_ylinked` with that in mind.
+- **The same diploid-prior distortion reaches male chrX, and there it is NOT yet corrected.** A
+  true hemizygous alt in a son whose father is `0/0` is a de novo under the diploid prior (1e-8),
+  so the refined GT is pushed to `0/1` unless the son's PL margin (~3 per all-alt read) beats the
+  prior — roughly 26 all-alt reads, more than a male's chrX carries at 30x — and Step 5 then files
+  it under `no_row.male_x_het`. The Y model's `genotype.hemi_call` is the ready-made fix; adopting
+  it for `male_x_chrx` is a deliberate follow-up, and the same effect inflates the chrX het ratio
+  Step 0 infers sex from for rare alleles (part of why `qc.x_het_male_max` reads every male as
+  female on this callset — which the chrY coverage check now exposes as `xy_agree=0`).
 
 ## Reading a negative result
 

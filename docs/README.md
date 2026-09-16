@@ -107,6 +107,7 @@ not immutable law. A gene-specific ClinGen VCEP value **overrides** any generic 
 |------|----------------------|-------|
 | Dominant / de novo | **1e-4** | applied to faf95 under the default oracle, to the grpmax proxy only under `oracle: grpmax_proxy`. Because faf95 ≤ the point estimate, the SAME cutoff **retains more** — that is the correction, not a regression. The old `nhomalt ≤ 1` de novo condition stays removed; `nhomalt` is reported and flags biallelic conflicts instead. |
 | Recessive / comp-het | **1e-2** per allele (permissive); **1e-3** high-confidence tier | applied per variant, not per gene |
+| X-linked / Y-linked (hemizygous) | **1e-2** per allele; **1e-3** high-confidence tier; the hemizygous de novo (`denovo_x_hemi` / `denovo_y_hemi`) at **1e-4** | gnomAD's chrY frequency is per haploid male allele; faf95 is published on ~24% of chrY records and the rest resolve `zero_ci` exactly as on autosomes |
 | Benign, all modes | drop if `rarity_af` ≥ **0.05** (ClinGen BA1) | never rescue |
 
 PM2 is applied at **Supporting** strength only and is *evidence*, not the rarity gate itself.
@@ -227,8 +228,18 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   unknown, and a stated sex the inference disagrees with is kept and flagged
   `sex_discordant_inference`. **X-dominant is not
   a separate mode** (a female's X het is emitted as `dominant`, a male hemizygote as
-  `x_linked_recessive`); **chrY yields no inherited call** — the hemizygous models are keyed on the
-  mother, which is meaningless on Y.
+  `x_linked_recessive`).
+- **Y-linked** (`y_linked`, `inheritance.emit_y_linked` **true**): a male proband's non-PAR chrY
+  hemizygous alt transmitted by his father (origin always paternal; `denovo_y_hemi` when the
+  father is confidently reference — secondary, `rarity_af` `< 1e-4`, the `hiConfDeNovo` tag
+  reported but never a gate on chrY). Gated at `rarity_af` `< 1e-2` like the hemizygous-X model.
+  Zygosity is read from the PRE-REFINEMENT likelihoods (FORMAT/PL, `genotype.hemi_call`) because
+  GATK's genotype refinement applies a diploid pedigree prior that is invalid on a haploid
+  chromosome (it imputes the mother a `0/1` at father-son `1/1` sites and pushes a son's all-alt
+  call to `0/1`); the mother is never consulted, only measured (`y_female_reads` at
+  `qc.y_reads_min_dp` **3** reads — X-derived mismapping). A son with both alleles read is never a
+  call (`no_row.male_y_het`); a father with both is flagged `y_site_mixed_reads`, never a veto.
+  SNV/indel only: AZF deletions and loss of Y are copy-number events.
 - **De novo** (SECONDARY / cross-reference only — filtering & review handled by separate
   machinery): `hiConfDeNovo` (child-membership checked) → re-verify DP/AB + parental cleanliness.
 - **Sample QC (Step 0)**: trio kid/dad/mom roles come from the upstream Kids First workflow (which
@@ -260,6 +271,18 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   It reads only ~1/3 of the true contamination fraction, so it flags **gross (≳5–8%)** contamination,
   not the 1–3% band; near 1–3%, use the FREEMIX path. (Richer somalier ancestry/relatedness is a
   roadmap follow-on; CHARR: Lu et al., AJHG 2023.)
+- **chrY coverage sex evidence (Step 0, audit-only)**: the proband's median depth at the FATHER's own
+  hemizygous chrY sites (anchors = father `hemi_call`=alt on the pre-refinement PL, passing the
+  hemizygous QC; at least `qc.y_min_anchor_sites` **50** of them), autosome-normalised, as a fraction
+  of the father's — a son ~1, a daughter ~0 — read male at ≥ `qc.y_cov_male_min` **0.30**, female at
+  ≤ `qc.y_cov_female_max` **0.10**, indeterminate between; a member "has reads" at
+  `qc.y_reads_min_dp` **3** (also Step 5's `y_female_reads` floor). The MOTHER is the in-trio female
+  control: above `y_cov_female_max` the trio is refused a call (`mother_y_coverage`) rather than
+  trusted. Reported (`y_inferred_sex`, `y_cov_ratio`, `y_covered_frac`, `mom_y_cov_ratio`,
+  `sex_match_y` vs the PED, `xy_agree` vs the chrX inference, `y_flag`), WARNed on any disagreement,
+  audited (medians by PED sex) — and it decides nothing: the PED is canonical, the chrX inference
+  fills in an unknown, `overall_pass` does not read it. Genotypes are never read for the proband or
+  mother (on chrY the refined GT is the diploid prior's opinion).
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 

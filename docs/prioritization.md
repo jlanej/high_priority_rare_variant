@@ -749,8 +749,9 @@ The `moi_coherence` column takes `coherent` / `discordant` / `unknown`, from the
 against a curated MOI (`--gene-moi`). Dominant-like observed modes (`dominant`, `denovo`) are
 coherent with AD/XLD curation; recessive-like ones (`compound_het`, `hom_recessive`) with AR
 curation; the hemizygous modes `x_linked_recessive` and `denovo_x_hemi` are `coherent` with any
-XL/XLR/XLD curation and `unknown` otherwise — never charged the dominant/recessive discordance
-penalty, because an X-linked observation is not evidence for or against an autosomal model.
+XL/XLR/XLD curation, `y_linked` and `denovo_y_hemi` with a YL / Y-linked curation, and `unknown`
+otherwise — never charged the dominant/recessive discordance penalty, because a sex-linked
+observation is not evidence for or against an autosomal model.
 Discordance is a **small demotion (−1) and a review flag, never a filter** — incomplete
 penetrance, mosaicism, a second undetected hit and a genuinely novel mechanism all produce
 discordance. **`unknown` scores exactly 0**: any penalty there converts the score into a
@@ -1138,7 +1139,7 @@ participates in the idempotency key so toggling it re-runs rather than serving a
 | Missense CADD | **25.3**, labelled `cadd_offlabel` | IMPLEMENTED | Pejaver 2022 (PMID 36413997); REVEL is ClinGen's calibrated choice |
 | Rarity bands | 1e-5 / 1e-4 / 1e-3 / 1e-2, `permissive_fail` [1e-2, 0.05) → 0, BA1 0.05 | IMPLEMENTED | on `rarity_af` — faf95 by default, the proxy only if opted down; not ACMG PM2 |
 | `genotype_qc` zygosity | from the base-form `child_gt` or the mode | IMPLEMENTED | `gt_bases` strings (`T/T`), never `1/1`; a hom-alt call is judged on the hom-alt band |
-| `moi_coherence` for hemizygous modes | `coherent` with XL/XLR/XLD, else `unknown` | IMPLEMENTED | `x_linked_recessive`/`denovo_x_hemi` are never charged the AD/AR discordance |
+| `moi_coherence` for hemizygous modes | `coherent` with XL/XLR/XLD (X modes) or YL/Y-linked (Y modes), else `unknown` | IMPLEMENTED | `x_linked_recessive`/`denovo_x_hemi`/`y_linked`/`denovo_y_hemi` are never charged the AD/AR discordance |
 | `outputs.igv.nonhuman_screen.flag_fraction` / `min_reads` | **0.5** / **5** | IMPLEMENTED | ONE key pair read by Step 8's `nhf_flag` and Step 9's `nhf_status` |
 | Mechanism gating | V0 **0.0**, V1/V2 **0.5**, V3–V5 **1.0** | IMPLEMENTED | ACMG/ClinGen SVI; also zeroed for recessive modes |
 | NHF states | clean / flagged / **not_screened** | IMPLEMENTED | Blank ≠ 0.0; `not_screened` scores 0, neither penalty nor credit |
