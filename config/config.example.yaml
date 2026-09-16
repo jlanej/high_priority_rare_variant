@@ -416,6 +416,22 @@ qc:
                                   #  detector of transposed parents, which the MIE rate cannot see;
                                   #  the proband's is checked against the trios-file sex when stated,
                                   #  sex_match, and fills in when it is not, sex_source)
+  # chrY COVERAGE sex evidence — the secondary, audit-only sex check (it never decides a call;
+  # the trios file is canonical and the chrX inference fills in an unknown). On a diploid-called
+  # callset the chrX het ratio above is miscalibrated by default, while a proband's DEPTH at the
+  # father's own hemizygous chrY sites is close to binary: a son reads ~1x the father's
+  # (autosome-normalised), a daughter ~0. Anchored on the father (a known male) with the mother
+  # (a known female) as the in-trio negative control, so mismapped X reads at a few sites cannot
+  # read a female as male: the statistic is a MEDIAN over >= y_min_anchor_sites father-hemizygous
+  # sites, and a trio whose mother herself exceeds y_cov_female_max is refused a Y call
+  # (y_flag=mother_y_coverage) rather than trusted. Reported per trio (y_inferred_sex,
+  # y_cov_ratio, y_covered_frac, sex_match_y, xy_agree, mom_y_cov_ratio), WARNed on disagreement
+  # with the pedigree or with the chrX inference, and audited; overall_pass does NOT read it.
+  y_reads_min_dp: 3               # a member "has reads" at a chrY site at DP >= this (also Step
+                                  #   5's y_female_reads flag on the mother — the ONE shared floor)
+  y_min_anchor_sites: 50          # fewer father-hemizygous anchor sites -> no Y inference (blank)
+  y_cov_male_min: 0.30            # proband chrY coverage ratio >= this -> reads male
+  y_cov_female_max: 0.10          # <= this -> reads female; between -> indeterminate (blank)
   # Per-member genotype no-call rate on the scanned sites above which the trio is flagged. A trio
   # jointly genotyped by GATK carries an affirmative 0/0 for a non-carrier parent (~1-2% no-calls
   # from low coverage); a merge of single-sample callsets carries ./. at every singleton site
@@ -435,6 +451,16 @@ inheritance:
                                   #   the recurrence signal Step 6 consolidates across individuals
   emit_denovo: true               # SECONDARY / cross-reference only (review handled elsewhere);
                                   #   set false to omit de novo rows entirely
+  # Y-linked: a male proband's non-PAR chrY hemizygous alt transmitted by his father (`y_linked`,
+  # origin is always paternal) and its de novo counterpart (`denovo_y_hemi`, secondary — also
+  # gated by emit_denovo). Judged on the PRE-REFINEMENT likelihoods (FORMAT/PL): GATK's
+  # CalculateGenotypePosteriors applies a diploid pedigree prior that is invalid on a haploid
+  # chromosome (it imputes the mother a 0/1 at father-son 1/1 sites and pushes a son's all-alt
+  # call to 0/1). The mother's genotype is never read, only her depth (qc.y_reads_min_dp below:
+  # a mother with reads at a male-specific chrY site is the signature of X-derived mismapping,
+  # flagged y_female_reads). Gated at recessive_max like the X-linked hemizygous model; SNV/indel
+  # only — AZF deletions and loss of Y are copy-number events no genotype screen can see.
+  emit_y_linked: true
   # (recessive: homozygous + compound-het-in-trans, and X-linked recessive, are always emitted)
 
 # --- Cross-pedigree gene consolidation (Step 6): recurrence across individuals ---

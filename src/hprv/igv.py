@@ -303,24 +303,30 @@ def write_sample_qc(qc_report, manifest, out_tsv):
                 # checked against: the proband's PED sex is the trios file's (canonical when
                 # stated; `sex_source` says whether Step 5 judged chrX ploidy on it or on the
                 # inference), the parents' is their role. Contamination is per-member.
+                # ...and the chrY coverage evidence beside it (audit-only in Step 0): the
+                # proband's call and ratio, the mother's ratio as the in-trio female control; the
+                # father is the anchor (his ratio is 1 by construction) so his cell stays blank.
                 per_role = (
                     ("proband", kid, r.get("inferred_sex", ""), r.get("ped_sex", ""),
-                     r.get("sex_source", ""), r.get("kid_contam", "")),
+                     r.get("sex_source", ""), r.get("kid_contam", ""),
+                     r.get("y_inferred_sex", ""), r.get("y_cov_ratio", "")),
                     ("mother", mom, r.get("mom_inferred_sex", ""), "2", "role",
-                     r.get("mom_contam", "")),
+                     r.get("mom_contam", ""), "", r.get("mom_y_cov_ratio", "")),
                     ("father", dad, r.get("dad_inferred_sex", ""), "1", "role",
-                     r.get("dad_contam", "")),
+                     r.get("dad_contam", ""), "", ""),
                 )
-                for role, sid, sex, ped_sex, src, contam in per_role:
+                for role, sid, sex, ped_sex, src, contam, ysex, ycov in per_role:
                     rows.append({
                         "trio_id": tid, "role": role, "sample_id": sid, "mie_rate": mie,
                         "inferred_sex": sex, "ped_sex": ped_sex, "sex_source": src,
+                        "y_inferred_sex": ysex, "y_cov_ratio": ycov,
                         "contam": contam, "contam_flag": cflag,
                     })
     with open(out_tsv, "w", newline="") as out:
         w = csv.DictWriter(
             out, fieldnames=["trio_id", "role", "sample_id", "mie_rate", "inferred_sex", "ped_sex",
-                             "sex_source", "contam", "contam_flag"], delimiter="\t", lineterminator="\n")
+                             "sex_source", "y_inferred_sex", "y_cov_ratio", "contam", "contam_flag"],
+            delimiter="\t", lineterminator="\n")
         w.writeheader()
         for r in rows:
             w.writerow(r)

@@ -89,6 +89,30 @@ def main(argv=None) -> int:
           "CH_B: father inferred male and mother female from their own chrX genotypes")
     check(qc.get("CH_A", {}).get("dad_inferred_sex") == "" and qc.get("CH_A", {}).get("parent_sex_flag") == "0",
           "CH_A: no chrX sites -> no parental sex inference and NO flag (absence is not a mismatch)")
+    # --- Step 0: the AUDIT-ONLY chrY coverage sex evidence. CH_B (a son) reads ~1x his father's
+    # depth at the father's own hemizygous chrY sites; CH_A (a daughter with a few mismapped reads
+    # at one of three anchors) reads 0 at the median; both mothers read 0 — the in-trio female
+    # control. Genotypes are never read for the proband or mother (the imputed maternal 0/1 at
+    # GENEY1 is exactly the kind of refined call this must ignore). ---
+    for t, want in (("CH_B", "1"), ("CH_A", "2")):
+        q = qc.get(t, {})
+        check(int(q.get("y_anchor_sites") or 0) >= 2,
+              f"{t}: >= 2 father-hemizygous chrY anchor sites (got {q.get('y_anchor_sites')})")
+        check(q.get("y_inferred_sex") == want and q.get("sex_match_y") == "1" and q.get("y_flag") == "",
+              f"{t}: chrY coverage reads {want}, agreeing with the pedigree (sex_match_y=1, no flag)")
+        check(q.get("mom_y_cov_ratio") == "0",
+              f"{t}: the mother reads 0 chrY coverage at the father's hemizygous sites (the female control)")
+    check(float(qc.get("CH_B", {}).get("y_cov_ratio") or 0) > 0.9 and qc.get("CH_B", {}).get("xy_agree") == "1",
+          "CH_B: y_cov_ratio ~1 (a son matches his father) and the chrX and chrY inferences agree")
+    check(qc.get("CH_A", {}).get("y_cov_ratio") == "0" and qc.get("CH_A", {}).get("xy_agree") == "",
+          "CH_A: y_cov_ratio 0 at the median; xy_agree blank (no chrX inference to compare)")
+    yf = qc.get("CH_A", {}).get("y_covered_frac")
+    check(yf not in ("", "0") and float(yf) < 0.5,
+          f"CH_A: a few mismapped reads at a minority of anchors show in y_covered_frac ({yf}) but "
+          "cannot move the median — a female with stray chrY reads is not read as male")
+    check(qc.get("CH_A", {}).get("overall_pass") == qc.get("CH_A", {}).get("overall_pass") and
+          all(c in qc.get("CH_B", {}) for c in ("kid_y_dp_median", "dad_y_dp_median", "mom_y_dp_median", "y_flag")),
+          "qc_report carries the raw chrY depth medians beside the ratios (the calibration evidence)")
 
     # --- Step 5 provenance: the sex each trio's calls were judged under, and who said so ---
     calls_all = rows(os.path.join(W, "candidates.calls.tsv"))
@@ -204,6 +228,39 @@ def main(argv=None) -> int:
           "X-linked recessive called with an affected (hom-alt) father")
     # autosomal hom-recessive with a HOM-ALT parent (carrier rule accepts HET or HOM_ALT parents)
     check(has("CH_A", "hom_recessive", "chr1", 8500, "GENE2H"), "hom recessive called with a HOM-ALT parent")
+    # --- The Y-LINKED model. Father-to-son hemizygous transmission on non-PAR chrY, judged on
+    # the PRE-REFINEMENT likelihoods (FORMAT/PL) because GATK's diploid pedigree prior is invalid
+    # on a haploid chromosome; the mother is never consulted, only measured. ---
+    check(has("CH_B", "y_linked", "chrY", 2790000, "GENEY1"),
+          "CH_B y_linked GENEY1 (father-to-son hemizygous transmission)")
+    y1 = [r for r in calls if r["symbol"] == "GENEY1"]
+    check(y1 and all(r["flags"] == "origin=pat;high_conf_rarity" and r["mother_dp"] == "0" for r in y1),
+          "GENEY1: paternal origin (+ high_conf_rarity: faf95 0 on chrY); the IMPUTED maternal 0/1 "
+          "(no reads) is ignored, not flagged, and not read as a Mendelian inconsistency")
+    check(y1 and all("/" in r["mother_gt"] and r["mother_gt"] != r["child_gt"] and r["mother_gt_pl"] == ""
+                     for r in y1),
+          "GENEY1: the refined maternal het is REPORTED (mother_gt) while her flat PL yields no mother_gt_pl")
+    check(y1 and all(r["father_gt_pl"] == r["father_gt"] for r in y1),
+          "GENEY1: the father's PL agrees with his refined 1/1 (father_gt_pl == father_gt)")
+    check(y1 and all(r["rarity_basis"] == "zero_ci" and r["rarity_af"] == "0" for r in y1),
+          "GENEY1: gnomAD has the allele on chrY but published no faf95 -> zero_ci, rarity 0 (rarest)")
+    y2 = [r for r in calls if r["symbol"] == "GENEY2"]
+    check(y2 and all(r["mode"] == "y_linked" and r["flags"] == "origin=pat;child_gt_refined_discordant"
+                     for r in y2),
+          "GENEY2: a son whose refined GT was pushed to 0/1 is RESCUED by his PL (child_gt_refined_discordant)")
+    check(y2 and all(r["child_gt"] != r["child_gt_pl"] and len(set(r["child_gt_pl"].split("/"))) == 1
+                     and r["child_ab"] == "1" for r in y2),
+          "GENEY2: child_gt is the refined het, child_gt_pl the hom-alt the reads support (child_ab 1.0)")
+    check(has("CH_B", "denovo_y_hemi", "chrY", 2792000, "GENEYDN"),
+          "CH_B denovo_y_hemi GENEYDN (secondary; the hiConfDeNovo tag is not a gate on chrY)")
+    check(not any(r["symbol"] == "GENEYMIX" for r in calls),
+          "GENEYMIX: a male het on chrY (every member het = mismapped X reads) is never a call")
+    check(not any(r["trio_id"] == "CH_A" and r["chrom"] == "chrY" for r in calls),
+          "CH_A (female): no chrY call of any kind")
+    check(all(r["child_gt_pl"] != "" for r in calls if r["trio_id"] == "CH_B" and r["chrom"] != "chrY"
+              and r["child_dp"] not in ("", "0")),
+          "the pre-refinement genotype (child_gt_pl) is populated on autosomal rows too — the "
+          "documented gnomAD-prior cross-check, no longer only advice")
     check(not has("CH_A", "denovo", "chr1", 15000), "low-GQ pseudo-de-novo NOT called (QC gate)")
     # --- The AD fail-open asymmetry, end to end. A ref-block father (no AD) passes clean_parent
     # VACUOUSLY: the de novo must still be called (never-drop) and must carry parent_ad_unmeasured,
@@ -289,6 +346,15 @@ def main(argv=None) -> int:
     check(genes.get("GENEDD", {}).get("recurrence_kind") == "distinct_variant", "GENEDD = distinct-variant recurrence")
     check(genes.get("GENEDD", {}).get("n_dominant") == "2", "GENEDD has 2 dominant carriers")
     check(genes.get("GENE1", {}).get("n_denovo") == "2", "GENE1 has 2 de novo carriers (secondary)")
+    # the Y-linked family is its own inherited count, sized on the male probands in the null
+    gy = genes.get("GENEY1", {})
+    check(gy.get("n_ylinked") == "1" and gy.get("n_carriers") == "1" and gy.get("modes") == "y_linked=1",
+          f"GENEY1: 1 y_linked carrier counted as an INHERITED carrier (got {gy.get('n_ylinked')}/{gy.get('n_carriers')}/{gy.get('modes')})")
+    check(gy.get("p_recurrence_ylinked") == "" and gy.get("recurrent") == "0",
+          "GENEY1: a single carrier is not recurrence — no Y-linked p-value")
+    check(genes.get("GENEYDN", {}).get("n_denovo") == "1" and genes.get("GENEYDN", {}).get("n_carriers") == "0",
+          "GENEYDN: the Y de novo is counted under the secondary de novo column only")
+    check("GENEYMIX" not in genes, "GENEYMIX (no row) never reaches the gene table")
     # the case-only recurrence null (a RANK, not a calibrated test): a rare variant recurring in
     # 2 individuals clears the exome-wide line even in a 2-trio mock — which is the point
     check(float(genes.get("GENED", {}).get("p_recurrence") or 1) < 1e-4,
@@ -393,7 +459,8 @@ def main(argv=None) -> int:
         # --- Genotype QC must READ the base-form GT Step 5 writes (`T/T`, never `1/1`). Every
         # hom-alt call carries AB ~1.0, so a zygosity test that never fires pushed them all through
         # the het band: gt_qc_pass=0 and -2 points on every recessive candidate. ---
-        homs = [r for r in pv if r["inheritance"] in ("hom_recessive", "x_linked_recessive")]
+        homs = [r for r in pv if r["inheritance"] in ("hom_recessive", "x_linked_recessive",
+                                                       "y_linked", "denovo_y_hemi")]
         check(homs and all(r["gt_qc_pass"] == "1" for r in homs),
               "every hom_recessive / x_linked_recessive call passes genotype QC on its hom-alt band "
               f"({[r['gt_qc_fail_reason'] for r in homs if r['gt_qc_pass'] != '1'][:3]})")
@@ -732,6 +799,14 @@ def main(argv=None) -> int:
         check(xl and all(r["moi_coherence"] in ("coherent", "unknown") and float(r["pts_moi"]) == 0.0
                          for r in xl),
               "hemizygous male calls are never charged an autosomal MOI discordance")
+        yl = {r["gene"]: r for r in pv if r["inheritance"] in ("y_linked", "denovo_y_hemi")}
+        check(yl.get("GENEY1", {}).get("moi_coherence") == "coherent",
+              "GENEY1 (curated YL) reads moi_coherent for a y_linked observation")
+        check(yl.get("GENEY2", {}).get("moi_coherence") == "unknown" and
+              all(float(r["pts_moi"]) == 0.0 for r in yl.values()),
+              "an uncurated Y gene reads moi_unknown and no Y call is charged an MOI penalty")
+        check(yl.get("GENEY2", {}).get("gt_qc_pass") == "1",
+              "the PL-rescued Y call (refined het gt_bases, AB 1.0) is judged on the hemizygous band and passes")
 
     # --- audit exists ---
     check(os.path.exists(os.path.join(W, "audit", "summary.md")), "audit/summary.md written")
@@ -766,7 +841,19 @@ def main(argv=None) -> int:
     check(am("05_inheritance", "no_row.qc_child", "CH_A") == "1", "CH_A: GENE5 lost to child QC is counted")
     check(am("05_inheritance", "no_row.parent_nocall", "CH_A") == "1", "CH_A: GENEDN3 lost to a parental no-call is counted")
     check(am("05_inheritance", "no_row.inert_band_het", "CH_A") == "2", "CH_A: the two inert-band hets are counted")
-    check(am("05_inheritance", "variants_no_row", "CH_B") == "0", "CH_B: every examined variant produced a call")
+    check(am("05_inheritance", "variants_no_row", "CH_B") == "1" and am("05_inheritance", "no_row.male_y_het", "CH_B") == "1",
+          "CH_B: exactly one examined variant produced no row — the chrY male het (GENEYMIX), counted as male_y_het")
+    check(am("05_inheritance", "skipped.chry_female", "CH_A") == "3",
+          "CH_A: the female proband's three chrY records are skipped as chry_female and counted")
+    check(am("05_inheritance", "mode.y_linked", "CH_B") == "2" and am("05_inheritance", "mode.denovo_y_hemi", "CH_B") == "1",
+          "the audit records the Y modes per trio (2 y_linked, 1 denovo_y_hemi for CH_B)")
+    check(am("00_qc", "y_sex_inferred_male") == "1" and am("00_qc", "y_sex_inferred_female") == "1"
+          and am("00_qc", "trios_sex_match_y_discordant") == "0" and am("00_qc", "trios_xy_disagree") == "0"
+          and am("00_qc", "trios_mother_y_coverage") == "0",
+          "Step 0 audits the chrY coverage evidence: one proband male, one female, no contradictions")
+    check(am("00_qc", "mother_y_cov_ratio_median") == "0" and am("00_qc", "proband_y_cov_ratio_median.ped_female") == "0"
+          and float(am("00_qc", "proband_y_cov_ratio_median.ped_male") or 0) > 0.9,
+          "Step 0 audits the chrY calibration medians (mothers 0, PED-female proband 0, PED-male ~1)")
     # GENE7 is ClinVar P/LP at 1.6e-4: the old counter (>= recessive_max) reads 0 for it and the
     # complete one reads 1 — both are recorded so the band it sits in is unambiguous
     check(am("05_inheritance", "clinvar_plp_dropped_ge_recessive_max") == "0",
@@ -799,6 +886,8 @@ def main(argv=None) -> int:
         smd = fh.read()
     check("| with a call |" in smd and "produced no row" in smd,
           "audit/summary.md shows examined / with a call / no row per trio and the no-row reasons")
+    check("chrY coverage (audit-only)" in smd and "probands reading male 1" in smd,
+          "audit/summary.md summarises the Step-0 sex evidence including the chrY coverage check")
 
     # --- Step 7: xlsx summary ---
     xlsx = os.path.join(W, "hprv_summary.xlsx")

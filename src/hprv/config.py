@@ -106,7 +106,8 @@ def keep_impacts(cfg: dict) -> set:
 
 _BOOL_KNOBS = ("filters.genotype_qc.require_pass", "filters.denovo.use_hiconf_tag",
                "filters.denovo.crosscheck_prerefinement_pl", "inheritance.emit_denovo",
-               "inheritance.emit_dominant", "burden.rank_by_mutational_target",
+               "inheritance.emit_dominant", "inheritance.emit_y_linked",
+               "burden.rank_by_mutational_target",
                "prioritization.composite.gene_list_prior.enabled",
                "prioritization.variant_tier.nmd_escape.enabled",
                "resources.vep.spliceai_rescore.enabled")
@@ -181,6 +182,22 @@ def validate_filters(cfg: dict):
                 as_bool(v, k)
             except ValueError as e:
                 problems.append(str(e) + " — a quoted or ${ENV}-templated string is not a YAML boolean")
+    # Step 0's chrY coverage sex evidence: an inverted band silently blanks every y_inferred_sex,
+    # and the read floor is shared with Step 5's y_female_reads flag.
+    ym, yf = num("qc.y_cov_male_min", 0.30), num("qc.y_cov_female_max", 0.10)
+    if None not in (ym, yf):
+        if not (0 < ym <= 2.0) or not (0 <= yf < 1.0):
+            problems.append(f"qc.y_cov_male_min ({ym}) / qc.y_cov_female_max ({yf}): the chrY coverage ratio is a fraction of the father's (a son reads ~1, a daughter ~0)")
+        elif yf >= ym:
+            problems.append(f"qc.y_cov_female_max ({yf}) >= qc.y_cov_male_min ({ym}): the bands overlap, so no proband could be called either sex from chrY")
+    for k, floor in (("qc.y_reads_min_dp", 1), ("qc.y_min_anchor_sites", 1)):
+        v = get(cfg, k, None)
+        if v is not None:
+            try:
+                if int(v) < floor:
+                    problems.append(f"{k}: {v} is below {floor}")
+            except (TypeError, ValueError):
+                problems.append(f"{k}: expected an integer, got {v!r}")
     return problems
 
 

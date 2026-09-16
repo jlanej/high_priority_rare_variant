@@ -116,28 +116,158 @@ def allele_balance(v, i):
     return (a / tot) if tot > 0 else None
 
 
+def sex_contig(chrom: str):
+    """'X' or 'Y' when `chrom` is a sex-chromosome contig in any spelling, else None.
+
+    Recognises the primary contig (`chrX`, `X`, `chrY`, `Y`) AND GRCh38's unlocalised / alt
+    scaffolds of it (`chrY_KI270740v1_random`, `chrX_KI270880v1_alt`): those are sex-chromosome
+    sequence too, hemizygous in males, and reading them as autosomes emitted a male's het calls
+    there as `dominant` (robustness audit #99). The PAR coordinates apply to the PRIMARY contig
+    only; a scaffold is treated as non-PAR.
+    """
+    c = chrom[3:] if chrom.startswith("chr") else chrom
+    head = c.split("_", 1)[0]
+    return head if head in ("X", "Y") else None
+
+
+def _primary_sex_contig(chrom: str):
+    """The bare 'X'/'Y' for the PRIMARY contig only (a scaffold has no PAR)."""
+    c = chrom[3:] if chrom.startswith("chr") else chrom
+    return c if c in ("X", "Y") else None
+
+
 def in_par_x(v) -> bool:
-    chrom = v.CHROM.replace("chr", "")
-    if chrom != "X":
+    if _primary_sex_contig(v.CHROM) != "X":
         return False
     return any(lo <= v.POS <= hi for lo, hi in PAR_X)
 
 
 def is_x_nonpar(v) -> bool:
-    return v.CHROM.replace("chr", "") == "X" and not in_par_x(v)
+    return sex_contig(v.CHROM) == "X" and not in_par_x(v)
 
 
 def in_par_y(v) -> bool:
-    return v.CHROM.replace("chr", "") == "Y" and any(lo <= v.POS <= hi for lo, hi in PAR_Y)
+    return _primary_sex_contig(v.CHROM) == "Y" and any(lo <= v.POS <= hi for lo, hi in PAR_Y)
 
 
 def is_y_nonpar(v) -> bool:
-    return v.CHROM.replace("chr", "") == "Y" and not in_par_y(v)
+    return sex_contig(v.CHROM) == "Y" and not in_par_y(v)
 
 
 def is_sex_nonpar(v) -> bool:
     """Non-PAR chrX or chrY — hemizygous in males; het calls there are a QC red flag."""
     return is_x_nonpar(v) or is_y_nonpar(v)
+
+
+# --- pre-refinement genotype likelihoods (FORMAT/PL) --------------------------------------------
+# GATK's genotype refinement (CalculateGenotypePosteriors) overwrites GT/GQ from a posterior that
+# folds in a PEDIGREE prior and a population prior, but it leaves the original PL in place. That
+# prior is DIPLOID and Mendelian: it is right on the autosomes and wrong on a haploid chromosome.
+# On non-PAR chrY it has two concrete effects on a GMKF trio: a father-son hemizygous alt site
+# (both truly 1/1) is "explained" by imputing the mother a 0/1 she has no reads for, and where the
+# mother's own mismapped reads say 0/0 confidently the son's all-alt 1/1 is pushed to 0/1 (a 1/1
+# child of a 0/0 mother is a de novo under the diploid prior, ~1e-8) — after which the male-het
+# rule reads the true hemizygous call as a mapping artifact and drops it. The hemizygous call
+# below therefore reads the LIKELIHOODS when the record carries them and the refined GT only as a
+# fallback, and every consumer records which one decided.
+
+HEMI_ALT, HEMI_REF, HEMI_MIXED, HEMI_NOCALL = "alt", "ref", "mixed", "nocall"
+_GT_TO_HEMI = {HOM_ALT: HEMI_ALT, HOM_REF: HEMI_REF, HET: HEMI_MIXED}
+
+
+def pl(v, i):
+    """The sample's FORMAT/PL values as a list of ints (None where a value is missing), or None
+    when the record carries no PL for that sample at all."""
+    try:
+        arr = v.format("PL")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if arr is None:
+        return None
+    try:
+        row = arr[i]
+    except (IndexError, TypeError):
+        return None
+    try:
+        out = [_int(x) for x in row]     # cyvcf2 missing / vector-end sentinels are negative
+    except TypeError:
+        return None
+    return out if any(x is not None for x in out) else None
+
+
+def gt_from_pl(pls):
+    """The biallelic diploid genotype class the PLs favour — HOM_REF / HET / HOM_ALT (the
+    argmin over the first three values) — or None when the PLs are absent, incomplete, or
+    tied at the minimum (flat `0,0,0` PLs carry no read evidence at all)."""
+    if not pls or len(pls) < 3:
+        return None
+    vals = pls[:3]
+    if any(x is None for x in vals):
+        return None
+    m = min(vals)
+    if vals.count(m) != 1:
+        return None
+    return (HOM_REF, HET, HOM_ALT)[vals.index(m)]
+
+
+def gq_from_pl(pls):
+    """Pre-refinement genotype quality: the second-smallest PL minus the smallest, capped at 99
+    (exactly how GATK derives GQ from PL before any prior is applied); None without >= 2 values."""
+    vals = sorted(x for x in (pls or [])[:3] if x is not None)
+    if len(vals) < 2:
+        return None
+    return min(99, vals[1] - vals[0])
+
+
+def hemi_call(v, i):
+    """Zygosity of a HAPLOID (hemizygous) site as the pre-refinement likelihoods see it.
+
+    Returns ``(call, source, refined)``: `call` and `refined` are each one of `alt` / `ref` /
+    `mixed` (both alleles have read support — on a haploid chromosome that is the mismapping /
+    paralogue signature, never a genotype) / `nocall`; `source` is `pl` when FORMAT/PL decided
+    the call and `gt` when the refined GT had to. A refined no-call stays a no-call: the
+    likelihood read re-labels among CALLED genotypes only (the diploid-prior distortion moves a
+    hemizygous 1/1 to 0/1 and imputes a parent; it does not manufacture data where a caller
+    declined to call).
+    """
+    g = v.gt_types[i]
+    if g not in _GT_TO_HEMI:
+        return HEMI_NOCALL, "gt", HEMI_NOCALL
+    refined = _GT_TO_HEMI[g]
+    from_pl = gt_from_pl(pl(v, i))
+    if from_pl is None:
+        return refined, "gt", refined
+    return _GT_TO_HEMI[from_pl], "pl", refined
+
+
+def hemi_gq(v, i):
+    """GQ for a hemizygous decision: derived from PL when present (the prior-free quality), else
+    the refined GQ."""
+    q = gq_from_pl(pl(v, i))
+    return q if q is not None else gq(v, i)
+
+
+def hemi_qc(v, i, thr: GtThresholds, kind: str) -> bool:
+    """Genotype QC for a HAPLOID site. kind: 'alt' (a hemizygous alternate carrier: DP >= min_dp,
+    GQ >= min_gq on the pre-refinement quality, AB >= homalt_ab_min — fails CLOSED without AD,
+    like `sample_qc(..., "hom_alt")`) or 'clean' (a confidently reference parent under a
+    hemizygous de novo: DP >= parent_min_dp, alt AD <= parent_max_alt_ad, AB <= homref_ab_max —
+    the AD limb fails OPEN, exactly like `sample_qc(..., "clean_parent")`, and
+    `sample_qc_ad_measured(v, i, "clean_parent")` is the witness)."""
+    q = hemi_gq(v, i)
+    if q is None or q < thr.min_gq:
+        return False
+    d = dp(v, i)
+    need_dp = thr.parent_min_dp if kind == "clean" else thr.min_dp
+    if d is None or d < need_dp:
+        return False
+    ab = allele_balance(v, i)
+    if kind == "alt":
+        return ab is not None and ab >= thr.homalt_ab_min
+    if kind == "clean":
+        a = alt_ad(v, i)
+        return (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
+    return False
 
 
 def sample_qc(v, i, thr: GtThresholds, kind: str) -> bool:
