@@ -294,14 +294,17 @@ limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_ge
   emitted under **no mode at all**. Fix: lift `Gene` with `-s all` for the pairing key only, and
   index each variant under every gene it hits. (slivar's `comphet` evaluates all transcripts for
   exactly this reason.)
-- **A male non-PAR chrX hemizygote is dropped by every mode when the mother's genotype is
-  uninformative.** For a male child on chrX the only reachable branches split the maternal genotype
-  into `{HOM_REF}` (de novo) and `{HET, HOM_ALT}` (X-linked recessive); a maternal **no-call** falls
-  through both with no row and **no audit counter**. A hemizygous LoF in an affected boy is causally
-  self-sufficient — the maternal genotype separates inherited from de novo/germline-mosaic, it does
-  not establish causality — so the exclusion is most costly exactly here. Rate-limited (the mother is
-  diploid on X at ~2× the son's coverage). Fix: emit with `flags=maternal_gt_uninformative`, or at
-  minimum add a dropped-count audit metric so a negative is distinguishable from "not looked for".
+- **A parent grades a hom-alt / hemizygous call's support; it never vetoes — so read the flags.**
+  A confidently hom-ref parent under a hom-alt child (`noncarrier_parent`) is a hemizygous
+  deletion in trans, uniparental disomy, OR a parental allele dropout, and the genotypes alone
+  cannot say which: only read-level review (the mini-CRAMs) or a CNV call can. A hemizygous son
+  with an uncalled or unclean mother (`parent_gt_uninformative=mat`) is inherited OR de novo, again
+  undecided. Step 6 counts carriers resting on such a parent apart
+  (`n_carriers_parent_unsupported`) and audits genes recurrent only through them; a gene
+  nominated only that way deserves suspicion before enthusiasm. The two de novo shapes the screen
+  still does not emit — a parent with alt reads (`parent_alt_reads`) and a child below the het
+  band (`child_ab_low`) — are parental / postzygotic mosaicism when real and buccal contamination
+  when not; they are counted here and left to the de novo machinery's read-level tools.
 - **A permissive comp-het partner can still suppress a dominant call.** Hets are pooled for pairing
   at `recessive_max` (1e-2) but the dominant gate is `dominant_max` (1e-4). A *phase-confirmed*
   `mat × pat` pair consumes both legs, so a genuinely dominant-grade variant is re-labelled
