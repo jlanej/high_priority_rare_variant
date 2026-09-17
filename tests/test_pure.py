@@ -3316,6 +3316,26 @@ def test_step0_parent_mismatch_diagnosis_and_pass_only_sex_scan():
         "only the PASS/'.' non-PAR fully-called sites count (the two filtered hets are skipped)"
     assert s0.scan_sex("any.vcf", "NOT_A_SAMPLE", G.GtThresholds(), max_x=0) == (0, 0)
 
+    # ...and the genotype COUNTED is the PL-favoured one: a hemizygous male's rare alt that the
+    # refinement prior pushed to 0/1 (PL still says 1/1) counts as hom, so the prior can no
+    # longer inflate his het ratio; a flat PL falls back to the refined GT, a low PL-GQ is skipped
+    class _XPL(_X):
+        def __init__(self, pos, gt, pls, filt=None):
+            super().__init__(pos, gt, filt)
+            self._pls = pls
+
+        def format(self, key):
+            if key == "PL":
+                return [list(self._pls)]
+            raise KeyError(key)
+    _FakeX.records = [_XPL(x0, G.HET, (300, 120, 0)),      # refined het, PL hom-alt -> hom
+                      _X(x0 + 1, G.HET),                    # no PL at all -> refined het stands
+                      _XPL(x0 + 2, G.HOM_ALT, (30, 12, 0)),  # PL-GQ 12 < 20 -> skipped
+                      _XPL(x0 + 3, G.HOM_ALT, (300, 120, 0)),
+                      _XPL(x0 + 4, G.HET, (0, 0, 0))]       # FLAT PL = no read evidence (GQ 0):
+    assert s0.scan_sex("any.vcf", "S", G.GtThresholds(), max_x=0) == (1, 2), \
+        "a prior-pushed het counts as hom; a flat-PL genotype (an imputed call) is no evidence at all"
+
 
 def test_config_validation_refuses_the_knobs_that_silently_kill_a_rung():
     """Four YAML shapes of keep_impacts, an inverted rarity ladder, a percent-scale or inverted
@@ -4186,6 +4206,72 @@ def test_step5_y_linked_model_reads_the_likelihoods_not_the_refined_gt():
                      sex="1")
     assert _calls(rows) == [("denovo_y_hemi", Y + 2, ""), ("y_linked", Y, "origin=pat")]
     assert dict(st["no_row"]) == {"male_y_het": 1, "child_not_carrier": 1}, dict(st["no_row"])
+
+
+def test_step5_male_x_reads_the_likelihoods_like_chry():
+    """On a male's non-PAR chrX the father is haploid too, so the refinement's diploid pedigree
+    prior distorts the trio exactly as on chrY: a son's hemizygous alt with a hemizygous-ref
+    father is a de novo under it, and the cheapest repair lands on whichever member has the
+    fewest reads. Every member's class is therefore read from PL (refined GT as the fallback),
+    QC runs on the PL-derived GQ, the row records whose GT was overruled, and the hiConfDeNovo
+    tag — computed on the refined genotypes — no longer gates the hemizygous de novo."""
+    X = 10_000_000
+
+    def st_of(variants, **kw):
+        rows, st = _screen(variants, **kw)
+        assert st["examined"] == sum(st["skipped"].values()) + st["with_call"] + sum(st["no_row"].values())
+        return rows, st
+
+    def why(variants, **kw):
+        rows, st = st_of(variants, **kw)
+        assert not rows, _calls(rows)
+        assert sum(st["no_row"].values()) == 1, dict(st["no_row"])
+        return next(iter(st["no_row"]))
+
+    def one(variants, **kw):
+        rows, _ = st_of(variants, **kw)
+        assert len(rows) == 1, _calls(rows)
+        return rows[0]
+
+    def xv(gts, **kw):
+        return _v5("chrX", X, "GX", gts, **kw)
+    HOMALT_PL, HET_PL, REF_PL = (300, 120, 0), (60, 0, 60), (0, 120, 300)
+    # 1. THE RESCUE: the son's refined GT is 0/1 (the prior), his reads all alt, PL says 1/1, a
+    #    carrier mother -> x_linked_recessive with child_gt_refined_discordant. Without PL this
+    #    exact record is a male_x_het no-row (the loss the fix removes).
+    r = one([xv((_HET, _HR, _HET), af=5e-4, ad={0: (0, 40)}, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1")
+    assert (r["mode"], r["flags"]) == ("x_linked_recessive", "child_gt_refined_discordant;high_conf_rarity"), r["flags"]
+    assert r["child_gt"] == "A/T" and r["child_gt_pl"] == "T/T" and r["father_gt_pl"] == "A/A"
+    assert why([xv((_HET, _HR, _HET), af=5e-4, ad={0: (0, 40)})], sex="1") == "male_x_het", \
+        "without PL the refined het stands and the male-het rule applies (the documented fallback)"
+    # 2. the FATHER pushed instead: refined 0/1, reads all ref, PL 0/0 -> no father_carries_x_allele,
+    #    but father_gt_refined_discordant; a father whose PL agrees with his 1/1 IS flagged as carrying
+    r = one([xv((_HA, _HET, _HET), af=5e-4, ad={1: (40, 0)}, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1")
+    assert r["flags"] == "father_gt_refined_discordant;high_conf_rarity", r["flags"]
+    r = one([xv((_HA, _HA, _HET), af=5e-4, pl={0: HOMALT_PL, 1: HOMALT_PL, 2: HET_PL})], sex="1")
+    assert r["flags"] == "father_carries_x_allele;high_conf_rarity", r["flags"]
+    # 3. the MOTHER pushed: refined 1/1, reads 20/20, PL het -> still a carrier, flagged discordant
+    r = one([xv((_HA, _HR, _HA), af=5e-4, ad={2: (20, 20)}, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1")
+    assert r["mode"] == "x_linked_recessive" and r["flags"] == "mother_gt_refined_discordant;high_conf_rarity"
+    # 4. a genuinely mixed son (PL het, reads 20/20) is still never a call
+    assert why([xv((_HA, _HR, _HET), af=5e-4, ad={0: (20, 20)}, pl={0: HET_PL, 1: REF_PL, 2: HET_PL})], sex="1") == "male_x_het"
+    # 5. QC on the PL-derived GQ: a son whose PL margin is 12 fails min_gq even at refined GQ 99
+    assert why([xv((_HA, _HR, _HET), af=5e-4, pl={0: (30, 12, 0), 1: REF_PL, 2: HET_PL})], sex="1") == "qc_child"
+    # 6. the hemizygous de novo: rescued son (refined het, PL 1/1), mother clean -> denovo_x_hemi,
+    #    with the hiConfDeNovo tag PRESENT in the header but absent on the record — reported, not a gate
+    hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
+    r = one([xv((_HET, _HR, _HR), ad={0: (0, 40)}, pl={0: HOMALT_PL, 1: REF_PL, 2: REF_PL})], sex="1", header=hdr)
+    assert (r["mode"], r["flags"], r["hiConfDeNovo"]) == ("denovo_x_hemi", "child_gt_refined_discordant", "")
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag", \
+        "the autosomal de novo still honours the tag"
+    # 7. a refined no-call stays a no-call whatever the PL says (the mother here)
+    assert why([xv((_HA, _HR, _UNK), af=5e-4, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1") == "parent_nocall"
+    # 8. a FEMALE proband's chrX is diploid: the refined GTs stand and no discordance flag appears
+    r = one([xv((_HET, _HR, _HET), af=5e-5, pl={0: (60, 0, 60), 1: REF_PL, 2: HET_PL})], sex="2")
+    assert (r["mode"], r["flags"]) == ("dominant", "origin=mat")
+    r = one([xv((_HET, _HR, _HET), af=5e-5, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="2")
+    assert r["mode"] == "dominant" and "discordant" not in r["flags"] and r["child_gt_pl"] == "T/T", \
+        "a daughter's chrX is under a valid diploid model: her refined GT stands (the PL is reported only)"
 
 
 def test_step0_chry_coverage_sex_evidence():

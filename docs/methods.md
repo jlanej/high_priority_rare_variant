@@ -134,7 +134,11 @@ Sex is inferred for all three members from chrX outside the pseudoautosomal regi
 chrX:10,001–2,781,479; PAR2 chrX:155,701,383–156,030,895). Among that individual's FILTER-passing
 (PASS or `.`), fully called biallelic chrX calls with GQ ≥ 20 and depth ≥ 10, a heterozygous
 fraction het/(het + hom-alt) below `qc.x_het_male_max` (default 0.10) is called male and otherwise
-female, provided at least 20 informative sites are available (else unknown). Filtered records and
+female, provided at least 20 informative sites are available (else unknown). The genotype counted
+is the one the pre-refinement likelihoods favour where FORMAT/PL is present (and the GQ filter
+uses the likelihood-derived quality), because the genotype refinement's diploid pedigree prior
+pushes a male's rare hemizygous alternate calls to heterozygous (Section 11) and would otherwise
+inflate his heterozygous fraction. Filtered records and
 half-called genotypes are excluded because both are enriched for the artifacts that render a
 hemizygous male as heterozygous. A father inferred female or a mother inferred male raises
 `parent_sex_flag`; the accompanying warning distinguishes the pattern a transposition produces
@@ -418,7 +422,18 @@ model) and is counted as Mendelian-inconsistent.
 
 **X-linked recessive.** For a male proband, a homozygous (hemizygous) alternate call at a non-PAR
 chrX site with a heterozygous or homozygous mother, both passing QC, and rarity at 1 × 10⁻²; a
-father carrying the allele does not veto the call but is flagged (`father_carries_x_allele`). For a
+father carrying the allele does not veto the call but is flagged (`father_carries_x_allele`). On a
+male proband's non-pseudoautosomal chrX every member's genotype class is the one the
+pre-refinement likelihoods favour (FORMAT/PL; the refined genotype where PL is absent or flat, a
+refined no-call kept as a no-call) and the genotype QC uses the likelihood-derived GQ, for the
+reason given under the Y-linked model below: the father is haploid on chrX, so the refinement's
+diploid pedigree prior treats a son's hemizygous alternate with a hemizygous-reference father as
+a de novo event and repairs it by pushing the son to heterozygous, or by imputing a heterozygous
+call into the parent with the fewest reads. Whichever member's refined genotype was overruled is
+flagged (`child_gt_refined_discordant`, `father_gt_refined_discordant`,
+`mother_gt_refined_discordant`), and the `hiConfDeNovo` tag, computed on the refined genotypes, is
+reported but not consulted for the hemizygous de novo. A female proband's chrX is diploid and is
+judged on the refined genotypes. For a
 female proband, a homozygous-alternate call with a carrier mother and a hemizygous
 (homozygous-alternate) father, all three passing QC, and the same rarity.
 
@@ -772,10 +787,10 @@ frequency arm the effective rarity stringency depends on the proband's ancestry,
 maximum is taken over ancestry groups regardless of the proband's own. The Mendelian-error and
 contamination statistics are computed on a capped prefix of the genome and the VCF-only
 contamination proxy detects only gross contamination. Genotype QC operates on posterior-derived
-qualities, which are not independent of the family prior the inheritance model then uses; on chrY,
-where that diploid prior is invalid, the model reads the pre-refinement likelihoods instead, but the
-same distortion affects male chrX and is not yet corrected there (a hemizygous alternate son of a
-reference father is pushed to heterozygous and then excluded as a male X het). chrY is assessed
+qualities, which are not independent of the family prior the inheritance model then uses; on a
+male's non-pseudoautosomal chrX and on chrY, where that diploid prior is invalid, the model reads
+the pre-refinement likelihoods instead, which requires FORMAT/PL to be present in the callset and
+ignores the population prior as well. chrY is assessed
 as single-nucleotide and small indel variation only; AZF deletions, 45,X/46,XY mosaicism and mosaic
 loss of Y are copy-number events outside the screen. The
 variant-layer weights are reasoned rather than fitted, and the pipeline has been exercised

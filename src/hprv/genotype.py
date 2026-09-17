@@ -241,8 +241,9 @@ def hemi_call(v, i):
 
 
 def hemi_gq(v, i):
-    """GQ for a hemizygous decision: derived from PL when present (the prior-free quality), else
-    the refined GQ."""
+    """GQ for a decision on a hemizygous-model site: derived from PL when present (the
+    prior-free quality — valid for a diploid member too, it is simply GATK's GQ before any prior),
+    else the refined GQ."""
     q = gq_from_pl(pl(v, i))
     return q if q is not None else gq(v, i)
 
@@ -270,9 +271,12 @@ def hemi_qc(v, i, thr: GtThresholds, kind: str) -> bool:
     return False
 
 
-def sample_qc(v, i, thr: GtThresholds, kind: str) -> bool:
-    """kind: 'het' | 'hom_alt' | 'hom_ref' | 'denovo_child' | 'clean_parent'."""
-    q = gq(v, i)
+def sample_qc(v, i, thr: GtThresholds, kind: str, gq_value=None) -> bool:
+    """kind: 'het' | 'hom_alt' | 'hom_ref' | 'denovo_child' | 'clean_parent'.
+
+    `gq_value` substitutes the refined GQ — Step 5 passes the PL-derived quality (`hemi_gq`) on a
+    male's non-PAR chrX, where the refinement's diploid pedigree prior is invalid (see below)."""
+    q = gq(v, i) if gq_value is None else gq_value
     if q is None or q < thr.min_gq:
         return False
     d = dp(v, i)

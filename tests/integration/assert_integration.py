@@ -66,6 +66,11 @@ def main(argv=None) -> int:
           "qc_report carries the parents' raw chrX het ratios (the calibration set for qc.x_het_male_max)")
     check(qc.get("CH_B", {}).get("dad_x_het_ratio") == "0" and float(qc.get("CH_B", {}).get("mom_x_het_ratio") or 0) > 0.5,
           "CH_B: father's chrX het ratio 0 (all hemizygous 1/1), mother's > 0.5")
+    # the chrX scan counts the PL-FAVOURED genotype: GENEXPL is a refined 0/1 whose PL says 1/1
+    # (all-alt reads); counted as a het it would put CH_B at 1/6 = 0.167 > 0.10 and read him female
+    check(qc.get("CH_B", {}).get("x_het_ratio") == "0" and int(qc.get("CH_B", {}).get("x_sites") or 0) == 6,
+          f"CH_B: chrX het ratio 0 over 6 sites — the prior-pushed 0/1 counts as the hom-alt its PL says "
+          f"(got {qc.get('CH_B', {}).get('x_het_ratio')} over {qc.get('CH_B', {}).get('x_sites')})")
     # no selfSM configured -> VCF-only CHARR fallback; mock hom-alt AD is 0 ref -> ~0, unflagged
     check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
     check(qc.get("CH_A", {}).get("contam_flag") == "0", "CH_A not flagged contaminated (clean)")
@@ -238,6 +243,16 @@ def main(argv=None) -> int:
     # transmitted to a son) — the previously-required father-hom-ref would have wrongly dropped it
     check(has("CH_B", "x_linked_recessive", "chrX", 2782000, "GENEXAF"),
           "X-linked recessive called with an affected (hom-alt) father")
+    # THE MALE-X RESCUE: the son's refined 0/1 (the diploid prior) is overruled by his PL, so the
+    # true hemizygous call is made instead of being dropped as a male X het
+    xpl = [r for r in calls if r["symbol"] == "GENEXPL"]
+    check(xpl and all(r["mode"] == "x_linked_recessive" and "child_gt_refined_discordant" in r["flags"]
+                      and "father_carries_x_allele" not in r["flags"] for r in xpl),
+          "GENEXPL: a son whose refined chrX GT was pushed to 0/1 is RESCUED by his PL (x_linked_recessive, "
+          "child_gt_refined_discordant; the 0/0 father is not credited with the allele)")
+    check(xpl and all(r["child_gt"] != r["child_gt_pl"] and len(set(r["child_gt_pl"].split("/"))) == 1
+                      and r["child_ab"] == "1" for r in xpl),
+          "GENEXPL: child_gt is the refined het, child_gt_pl the hom-alt the reads support")
     # autosomal hom-recessive with a HOM-ALT parent (carrier rule accepts HET or HOM_ALT parents)
     check(has("CH_A", "hom_recessive", "chr1", 8500, "GENE2H"), "hom recessive called with a HOM-ALT parent")
     # --- The Y-LINKED model. Father-to-son hemizygous transmission on non-PAR chrY, judged on
