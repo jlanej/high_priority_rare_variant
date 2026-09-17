@@ -306,26 +306,31 @@ def write_sample_qc(qc_report, manifest, out_tsv):
                 # ...and the chrY coverage evidence beside it (audit-only in Step 0): the
                 # proband's call and ratio, the mother's ratio as the in-trio female control; the
                 # father is the anchor (his ratio is 1 by construction) so his cell stays blank.
+                # The parents' Y sex comes from their RAW haploid-scaled coverage (a male ~1, a
+                # female ~0), the proband's from the father-anchored call; y_cov_haploid is the
+                # raw figure for all three, y_cov_ratio the proband's father-normalised one.
                 per_role = (
                     ("proband", kid, r.get("inferred_sex", ""), r.get("ped_sex", ""),
                      r.get("sex_source", ""), r.get("kid_contam", ""),
-                     r.get("y_inferred_sex", ""), r.get("y_cov_ratio", "")),
+                     r.get("y_inferred_sex", ""), r.get("y_cov_ratio", ""), r.get("kid_y_cov_haploid", "")),
                     ("mother", mom, r.get("mom_inferred_sex", ""), "2", "role",
-                     r.get("mom_contam", ""), "", r.get("mom_y_cov_ratio", "")),
+                     r.get("mom_contam", ""), r.get("mom_y_sex", ""), r.get("mom_y_cov_ratio", ""),
+                     r.get("mom_y_cov_haploid", "")),
                     ("father", dad, r.get("dad_inferred_sex", ""), "1", "role",
-                     r.get("dad_contam", ""), "", ""),
+                     r.get("dad_contam", ""), r.get("dad_y_sex", ""), "", r.get("dad_y_cov_haploid", "")),
                 )
-                for role, sid, sex, ped_sex, src, contam, ysex, ycov in per_role:
+                for role, sid, sex, ped_sex, src, contam, ysex, ycov, yhap in per_role:
                     rows.append({
                         "trio_id": tid, "role": role, "sample_id": sid, "mie_rate": mie,
                         "inferred_sex": sex, "ped_sex": ped_sex, "sex_source": src,
-                        "y_inferred_sex": ysex, "y_cov_ratio": ycov,
+                        "y_inferred_sex": ysex, "y_cov_ratio": ycov, "y_cov_haploid": yhap,
                         "contam": contam, "contam_flag": cflag,
                     })
     with open(out_tsv, "w", newline="") as out:
         w = csv.DictWriter(
             out, fieldnames=["trio_id", "role", "sample_id", "mie_rate", "inferred_sex", "ped_sex",
-                             "sex_source", "y_inferred_sex", "y_cov_ratio", "contam", "contam_flag"],
+                             "sex_source", "y_inferred_sex", "y_cov_ratio", "y_cov_haploid", "contam",
+                             "contam_flag"],
             delimiter="\t", lineterminator="\n")
         w.writeheader()
         for r in rows:

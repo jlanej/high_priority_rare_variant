@@ -83,7 +83,13 @@ def summarize(adir, out_md=None):
               f"{g('00_qc','trios_mother_y_coverage')}; median proband y_cov_ratio PED-male "
               f"{g('00_qc','proband_y_cov_ratio_median.ped_male')} / PED-female "
               f"{g('00_qc','proband_y_cov_ratio_median.ped_female')}, mothers "
-              f"{g('00_qc','mother_y_cov_ratio_median')}", ""]
+              f"{g('00_qc','mother_y_cov_ratio_median')}",
+              f"- chrY parent-role check (raw haploid coverage, a male ~1 / a female ~0): fathers "
+              f"reading male {g('00_qc','fathers_y_male')} / female {g('00_qc','fathers_y_female')}, "
+              f"mothers reading female {g('00_qc','mothers_y_female')} / male "
+              f"{g('00_qc','mothers_y_male')} (median father {g('00_qc','father_y_cov_haploid_median')}, "
+              f"mother {g('00_qc','mother_y_cov_haploid_median')}); trios with a parent contradicted: "
+              f"{g('00_qc','trios_parent_sex_flag_y')}", ""]
     lines += ["## Global variant funnel",
               f"- cohort union sites: {g('01_cohort_sites','union_sites')}",
               f"- annotated sites: {g('02_annotate','annotated_sites')}",

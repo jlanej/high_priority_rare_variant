@@ -4258,35 +4258,67 @@ def test_step0_chry_coverage_sex_evidence():
     ys = s0.scan_y("any.vcf", "K", "D", "M", G.GtThresholds(), max_y=0, min_reads=3)
     assert ys["anchors"] == 3 and ys["kid_dp"] == [25, 30, 20] and ys["dad_dp"] == [30, 28, 32]
     assert ys["mom_dp"] == [0, 2, 0] and ys["kid_cov"] == 3 and ys["mom_cov"] == 0
+    # the RAW coverage covers every passing non-PAR record, whoever drove it (5 of the 7)
+    assert ys["records"] == 5 and ys["kid_all"] == [25, 30, 20, 40, 40]
+    assert ys["dad_all"] == [30, 28, 32, 40, 40] and ys["mom_all"] == [0, 2, 0, 40, 0]
+    assert s0.y_cov_haploid(20, 40) == 1.0 and s0.y_cov_haploid(0, 40) == 0.0
+    assert s0.y_cov_haploid(None, 40) is None and s0.y_cov_haploid(20, 0) is None
+    assert s0.sex_from_y_cov(1.2, 0.30, 0.10) == "1" and s0.sex_from_y_cov(0.0, 0.30, 0.10) == "2"
+    assert s0.sex_from_y_cov(0.2, 0.30, 0.10) is None and s0.sex_from_y_cov(None, 0.30, 0.10) is None
+    assert "transposed" in s0.parent_y_diagnosis("2", "1") and "inverted" in s0.parent_y_diagnosis("2", "1")
+    assert "not" not in s0.parent_y_diagnosis("2", "1").split(":")[0]
+    assert "no Y" in s0.parent_y_diagnosis("2", "2") and "transposed" not in s0.parent_y_diagnosis("2", "2")
+    assert "female control" in s0.parent_y_diagnosis("1", "1")
     assert s0.scan_y("any.vcf", "K", "D", "NOBODY", G.GtThresholds(), max_y=0, min_reads=3) is None
     _FakeY.seqnames = ["chr1", "chrX"]
     assert s0.scan_y("any.vcf", "K", "D", "M", G.GtThresholds(), max_y=0, min_reads=3) is None
     _FakeY.seqnames = ["chr1", "chrX", "chrY"]
     # the report columns from that scan: a son at 40x against a father at 40x reads 1.0; the
     # mother 0; a daughter (kid depth 0 at every anchor) reads 0 and female
-    res = {"y": dict(ys, kid_med=25, dad_med=30, mom_med=0),
-           "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    AUTO = {"kid": 42, "dad": 50, "mom": 45}
+    base = dict(ys, kid_med=25, dad_med=30, mom_med=0, kid_all_med=22, dad_all_med=30, mom_all_med=0)
+    res = {"y": base, "auto_dp_median": AUTO}
     ye = s0.y_evidence(res, 3, 0.30, 0.10)
     assert ye["y_anchor_sites"] == 3 and ye["y_inferred_sex"] == "1" and ye["y_flag"] == ""
+    assert ye["y_basis"] == "anchor" and ye["y_records"] == 5
     assert abs(ye["_kid_ratio"] - (25 / 42) / (30 / 50)) < 1e-9 and ye["_mom_ratio"] == 0.0
     assert ye["y_covered_frac"] == "1" and ye["mom_y_cov_ratio"] == "0"
-    daughter = {"y": dict(ys, kid_med=0, dad_med=30, mom_med=0, kid_cov=0),
-                "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    # the parents' roles, from RAW haploid coverage: the father ~1.2 reads male, the mother 0 female
+    assert ye["dad_y_sex"] == "1" and ye["mom_y_sex"] == "2" and ye["parent_sex_flag_y"] == "0"
+    assert abs(float(ye["dad_y_cov_haploid"]) - 30 / 25) < 1e-6 and ye["mom_y_cov_haploid"] == "0"
+    daughter = {"y": dict(base, kid_med=0, kid_cov=0, kid_all_med=0), "auto_dp_median": AUTO}
     ye = s0.y_evidence(daughter, 3, 0.30, 0.10)
     assert ye["y_inferred_sex"] == "2" and ye["y_cov_ratio"] == "0" and ye["y_covered_frac"] == "0"
+    assert ye["kid_y_cov_haploid"] == "0"
     # a daughter with a few mismapped reads at a minority of anchors still reads 0 at the median
-    few = {"y": dict(ys, kid_dp=[6, 0, 0], kid_med=0, dad_med=30, mom_med=0, kid_cov=1),
-           "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    few = {"y": dict(base, kid_dp=[6, 0, 0], kid_med=0, kid_cov=1, kid_all_med=0), "auto_dp_median": AUTO}
     assert s0.y_evidence(few, 3, 0.30, 0.10)["y_inferred_sex"] == "2"
-    # too few anchors -> no call, named; a mother with coverage -> no call, named
-    assert s0.y_evidence(res, 50, 0.30, 0.10)["y_flag"] == "father_y_anchors_low"
-    assert s0.y_evidence(res, 50, 0.30, 0.10)["y_inferred_sex"] == ""
-    momcov = {"y": dict(ys, kid_med=25, dad_med=30, mom_med=20),
-              "auto_dp_median": {"kid": 42, "dad": 50, "mom": 45}}
+    # too few anchors AND too few records -> no call, named; a mother with coverage -> no call, named
+    ye = s0.y_evidence(res, 50, 0.30, 0.10)
+    assert ye["y_flag"] == "father_y_anchors_low" and ye["y_inferred_sex"] == "" and ye["y_basis"] == ""
+    assert ye["dad_y_sex"] == "" and ye["parent_sex_flag_y"] == "", "too few records = no expectation"
+    momcov = {"y": dict(base, mom_med=20, mom_all_med=18), "auto_dp_median": AUTO}
     ye = s0.y_evidence(momcov, 3, 0.30, 0.10)
     assert ye["y_inferred_sex"] == "" and ye["y_flag"] == "mother_y_coverage"
+    assert ye["mom_y_sex"] == "1" and ye["parent_sex_flag_y"] == "1", "a male in the mother slot"
     assert s0.y_evidence({"y": None, "auto_dp_median": {}}, 3, 0.30, 0.10)["y_flag"] == "no_chry_contig"
-    assert s0.y_evidence({"y": dict(ys, anchors=0), "auto_dp_median": {}}, 3, 0.30, 0.10)["y_flag"] == "father_y_anchors_low"
+    assert s0.y_evidence({"y": dict(base, anchors=0, records=0), "auto_dp_median": {}}, 3, 0.30, 0.10)["y_flag"] == "no_chry_records"
+    # THE RAW FALLBACK: the father slot yields no anchors (no chrY coverage at all — a female or
+    # Y-less sample there); the proband is still called on raw haploid coverage, the father slot
+    # is read female, and the flag says a swap rather than a transposition (the mother reads female)
+    swap = {"y": dict(base, anchors=0, kid_dp=[], dad_dp=[], mom_dp=[], kid_cov=0, records=120,
+                      kid_med=None, dad_med=None, mom_med=None, kid_all_med=20, dad_all_med=0,
+                      mom_all_med=0), "auto_dp_median": AUTO}
+    ye = s0.y_evidence(swap, 50, 0.30, 0.10)
+    assert ye["y_inferred_sex"] == "1" and ye["y_basis"] == "raw" and ye["y_flag"] == ""
+    assert ye["dad_y_sex"] == "2" and ye["mom_y_sex"] == "2" and ye["parent_sex_flag_y"] == "1"
+    assert ye["y_cov_ratio"] == "" and ye["mom_y_cov_ratio"] == "" and ye["y_covered_frac"] == ""
+    # ...and a TRANSPOSED pair: no Y in the father slot, a full Y in the mother slot — both parents
+    # contradicted, and the "mother" is no control, so no proband call is made
+    transposed = {"y": dict(swap["y"], mom_all_med=22), "auto_dp_median": AUTO}
+    ye = s0.y_evidence(transposed, 50, 0.30, 0.10)
+    assert ye["dad_y_sex"] == "2" and ye["mom_y_sex"] == "1" and ye["parent_sex_flag_y"] == "1"
+    assert ye["y_inferred_sex"] == "" and ye["y_flag"] == "mother_y_coverage"
 
 
 def test_step6_y_linked_family_counts_carriers_against_male_probands():
