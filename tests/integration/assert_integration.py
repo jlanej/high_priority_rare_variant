@@ -68,8 +68,8 @@ def main(argv=None) -> int:
           "CH_B: father's chrX het ratio 0 (all hemizygous 1/1), mother's > 0.5")
     # the chrX scan counts the PL-FAVOURED genotype: GENEXPL is a refined 0/1 whose PL says 1/1
     # (all-alt reads); counted as a het it would put CH_B at 1/6 = 0.167 > 0.10 and read him female
-    check(qc.get("CH_B", {}).get("x_het_ratio") == "0" and int(qc.get("CH_B", {}).get("x_sites") or 0) == 6,
-          f"CH_B: chrX het ratio 0 over 6 sites — the prior-pushed 0/1 counts as the hom-alt its PL says "
+    check(qc.get("CH_B", {}).get("x_het_ratio") == "0" and int(qc.get("CH_B", {}).get("x_sites") or 0) == 7,
+          f"CH_B: chrX het ratio 0 over 7 sites — the prior-pushed 0/1 counts as the hom-alt its PL says "
           f"(got {qc.get('CH_B', {}).get('x_het_ratio')} over {qc.get('CH_B', {}).get('x_sites')})")
     # no selfSM configured -> VCF-only CHARR fallback; mock hom-alt AD is 0 ref -> ~0, unflagged
     check(qc.get("CH_A", {}).get("contam_source") == "charr", "contamination falls back to CHARR")
@@ -255,6 +255,27 @@ def main(argv=None) -> int:
           "GENEXPL: child_gt is the refined het, child_gt_pl the hom-alt the reads support")
     # autosomal hom-recessive with a HOM-ALT parent (carrier rule accepts HET or HOM_ALT parents)
     check(has("CH_A", "hom_recessive", "chr1", 8500, "GENE2H"), "hom recessive called with a HOM-ALT parent")
+    # --- PARENTAL SUPPORT is graded, never a veto (the four shapes that were silent no-rows) ---
+    nc = [r for r in calls if r["symbol"] == "GENEHRNC"]
+    check(nc and all(r["mode"] == "hom_recessive" and r["flags"] == "noncarrier_parent=pat;high_conf_rarity"
+                     for r in nc),
+          "GENEHRNC: a hom-alt child with a CONFIDENT hom-ref father is emitted as hom_recessive, flagged "
+          "noncarrier_parent=pat (the deletion-in-trans / UPD / dropout shape), not dropped as Mendelian-inconsistent")
+    check(nc and all("parent_ad_unmeasured" not in r["flags"] for r in nc),
+          "GENEHRNC: the father's hom-ref rests on measured allele depths (no parent_ad_unmeasured)")
+    xf = [r for r in calls if r["symbol"] == "GENEXF"]
+    check(xf and all(r["mode"] == "x_linked_recessive" and r["flags"] == "noncarrier_parent=pat"
+                     and r["child_sex"] == "2" for r in xf),
+          "GENEXF: a hom-alt DAUGHTER whose father is hemizygous reference by PL and reads is emitted, "
+          "flagged noncarrier_parent=pat")
+    xnc = [r for r in calls if r["symbol"] == "GENEXNC"]
+    check(xnc and all(r["mode"] == "x_linked_recessive" and r["flags"] == "parent_gt_uninformative=mat"
+                      and r["mother_gt"] == "./." for r in xnc),
+          "GENEXNC: a hemizygous son with a maternal no-call is emitted on his own genotype, flagged "
+          "parent_gt_uninformative=mat (inherited vs de novo unestablished)")
+    check(not any(r["symbol"] in ("GENEPAR", "GENEABL") for r in calls),
+          "GENEPAR / GENEABL: the parental-alt-reads and child-low-AB de novo shapes are NOT emitted "
+          "(de novo is secondary; they are counted for the de novo machinery)")
     # --- The Y-LINKED model. Father-to-son hemizygous transmission on non-PAR chrY, judged on
     # the PRE-REFINEMENT likelihoods (FORMAT/PL) because GATK's diploid pedigree prior is invalid
     # on a haploid chromosome; the mother is never consulted, only measured. ---
@@ -381,6 +402,16 @@ def main(argv=None) -> int:
           "GENEY1: a single carrier is not recurrence — no Y-linked p-value")
     check(genes.get("GENEYDN", {}).get("n_denovo") == "1" and genes.get("GENEYDN", {}).get("n_carriers") == "0",
           "GENEYDN: the Y de novo is counted under the secondary de novo column only")
+    # carriers a parent did not support are counted like any other AND counted apart
+    for g, fam in (("GENEHRNC", "n_biallelic"), ("GENEXF", "n_biallelic"), ("GENEXNC", "n_xlinked")):
+        row = genes.get(g, {})
+        check(row.get(fam) == "1" and row.get("n_carriers") == "1" and row.get("n_carriers_parent_unsupported") == "1",
+              f"{g}: 1 carrier under {fam}, and 1 counted as parent-unsupported "
+              f"(got {row.get(fam)}/{row.get('n_carriers')}/{row.get('n_carriers_parent_unsupported')})")
+    check(genes.get("GENEXF", {}).get("n_xlinked") == "0",
+          "GENEXF: the hom-alt daughter is a BIALLELIC hit for the recurrence null, not a hemizygous-male one")
+    check(genes.get("GENED", {}).get("n_carriers_parent_unsupported") == "0",
+          "GENED: ordinary inherited hets have no parent-unsupported carrier")
     check("GENEYMIX" not in genes, "GENEYMIX (no row) never reaches the gene table")
     # the case-only recurrence null (a RANK, not a calibrated test): a rare variant recurring in
     # 2 individuals clears the exome-wide line even in a 2-trio mock — which is the point
@@ -864,10 +895,21 @@ def main(argv=None) -> int:
     # CH_A's four formerly silent losses, by name: GENE5 (child GQ 12 under a de novo), GENEDN3
     # (half-called father, no origin), and GENE7 + GENEMID (inherited hets at 1.6e-4 and 1.6e-3 —
     # the [dominant_max, recessive_max) band, paired with nothing, emitted under no mode)
-    check(am("05_inheritance", "variants_no_row", "CH_A") == "4", "CH_A: 4 examined variants produced no row")
-    check(am("05_inheritance", "no_row.qc_child", "CH_A") == "1", "CH_A: GENE5 lost to child QC is counted")
+    check(am("05_inheritance", "variants_no_row", "CH_A") == "6", "CH_A: 6 examined variants produced no row")
+    check(am("05_inheritance", "no_row.qc_child", "CH_A") == "1", "CH_A: GENE5 lost to child QC (GQ 12) is counted as qc_child")
     check(am("05_inheritance", "no_row.parent_nocall", "CH_A") == "1", "CH_A: GENEDN3 lost to a parental no-call is counted")
     check(am("05_inheritance", "no_row.inert_band_het", "CH_A") == "2", "CH_A: the two inert-band hets are counted")
+    check(am("05_inheritance", "no_row.parent_alt_reads", "CH_A") == "1" and am("05_inheritance", "no_row.child_ab_low", "CH_A") == "1",
+          "CH_A: the parental-alt-reads (GENEPAR) and child-low-AB (GENEABL) de novo shapes are counted by name")
+    # the flags carried by the calls are tallied per trio and globally
+    check(am("05_inheritance", "flag.noncarrier_parent=pat", "CH_A") == "2"
+          and am("05_inheritance", "flag.parent_gt_uninformative=mat", "CH_B") == "1"
+          and am("05_inheritance", "flag.noncarrier_parent=pat") == "2"
+          and int(am("05_inheritance", "flag.origin=pat") or 0) >= 3,
+          "Step 5 audits every flag token per trio and globally (noncarrier_parent, parent_gt_uninformative, origin=...)")
+    check(am("06_burden", "genes_with_parent_unsupported_carriers") == "3"
+          and am("06_burden", "genes_recurrent_only_with_parent_unsupported") == "0",
+          "Step 6 audits the genes whose carriers a parent did not support (3) and those recurrent only through them (0)")
     check(am("05_inheritance", "variants_no_row", "CH_B") == "1" and am("05_inheritance", "no_row.male_y_het", "CH_B") == "1",
           "CH_B: exactly one examined variant produced no row — the chrY male het (GENEYMIX), counted as male_y_het")
     check(am("05_inheritance", "skipped.chry_female", "CH_A") == "3",
@@ -919,6 +961,9 @@ def main(argv=None) -> int:
           "audit/summary.md shows examined / with a call / no row per trio and the no-row reasons")
     check("chrY coverage (audit-only)" in smd and "probands reading male 1" in smd,
           "audit/summary.md summarises the Step-0 sex evidence including the chrY coverage check")
+    check("flags carried by the emitted calls" in smd and "noncarrier_parent=pat: 2" in smd
+          and "a parent did not support" in smd,
+          "audit/summary.md lists the flag tallies and the parent-unsupported gene counts")
 
     # --- Step 7: xlsx summary ---
     xlsx = os.path.join(W, "hprv_summary.xlsx")

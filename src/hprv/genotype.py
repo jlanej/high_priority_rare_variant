@@ -22,6 +22,9 @@ class GtThresholds:
     min_gq: int = 20
     min_dp: int = 10
     denovo_min_dp: int = 20
+    # the de novo depth floor on a HEMIZYGOUS site (a male's non-PAR chrX/chrY): a haploid
+    # chromosome carries half the autosomal depth, so the diploid floor is twice as strict there
+    denovo_min_dp_hemizygous: int = 10
     het_ab_min: float = 0.25
     het_ab_max: float = 0.75
     homalt_ab_min: float = 0.90
@@ -37,6 +40,7 @@ class GtThresholds:
             min_gq=int(get(cfg, g + "min_gq", 20)),
             min_dp=int(get(cfg, g + "min_dp", 10)),
             denovo_min_dp=int(get(cfg, g + "denovo_min_dp", 20)),
+            denovo_min_dp_hemizygous=int(get(cfg, g + "denovo_min_dp_hemizygous", 10)),
             het_ab_min=float(get(cfg, g + "het_ab_min", 0.25)),
             het_ab_max=float(get(cfg, g + "het_ab_max", 0.75)),
             homalt_ab_min=float(get(cfg, g + "homalt_ab_min", 0.90)),
@@ -55,8 +59,9 @@ class GtThresholds:
                 raise ValueError(f"filters.genotype_qc.{k} = {v}: allele balance is a fraction in [0, 1], not a percentage")
         if self.het_ab_min >= self.het_ab_max:
             raise ValueError(f"filters.genotype_qc.het_ab_min ({self.het_ab_min}) must be below het_ab_max ({self.het_ab_max}); no het could pass this band")
-        if self.min_dp < 1 or self.denovo_min_dp < 1 or self.parent_min_dp < 1 or self.min_gq < 0:
-            raise ValueError("filters.genotype_qc: min_dp / denovo_min_dp / parent_min_dp must be >= 1 and min_gq >= 0")
+        if (self.min_dp < 1 or self.denovo_min_dp < 1 or self.denovo_min_dp_hemizygous < 1
+                or self.parent_min_dp < 1 or self.min_gq < 0):
+            raise ValueError("filters.genotype_qc: min_dp / denovo_min_dp / denovo_min_dp_hemizygous / parent_min_dp must be >= 1 and min_gq >= 0")
         return self
 
 
@@ -248,54 +253,86 @@ def hemi_gq(v, i):
     return q if q is not None else gq(v, i)
 
 
-def hemi_qc(v, i, thr: GtThresholds, kind: str) -> bool:
-    """Genotype QC for a HAPLOID site. kind: 'alt' (a hemizygous alternate carrier: DP >= min_dp,
-    GQ >= min_gq on the pre-refinement quality, AB >= homalt_ab_min — fails CLOSED without AD,
-    like `sample_qc(..., "hom_alt")`) or 'clean' (a confidently reference parent under a
-    hemizygous de novo: DP >= parent_min_dp, alt AD <= parent_max_alt_ad, AB <= homref_ab_max —
+def hemi_qc_reason(v, i, thr: GtThresholds, kind: str):
+    """WHY a sample fails the QC band for a HAPLOID site, or None when it passes — the same
+    reason vocabulary as sample_qc_reason. kind: 'alt' (a hemizygous alternate carrier: DP >=
+    min_dp, GQ >= min_gq on the pre-refinement quality, AB >= homalt_ab_min — fails CLOSED
+    without AD, like `sample_qc(..., "hom_alt")`) or 'clean' (a confidently reference parent under
+    a hemizygous de novo: DP >= parent_min_dp, alt AD <= parent_max_alt_ad, AB <= homref_ab_max —
     the AD limb fails OPEN, exactly like `sample_qc(..., "clean_parent")`, and
     `sample_qc_ad_measured(v, i, "clean_parent")` is the witness)."""
     q = hemi_gq(v, i)
     if q is None or q < thr.min_gq:
-        return False
+        return "gq"
     d = dp(v, i)
     need_dp = thr.parent_min_dp if kind == "clean" else thr.min_dp
     if d is None or d < need_dp:
-        return False
+        return "dp"
     ab = allele_balance(v, i)
     if kind == "alt":
-        return ab is not None and ab >= thr.homalt_ab_min
+        if ab is None:
+            return "ab_missing"
+        return None if ab >= thr.homalt_ab_min else "ab_low"
     if kind == "clean":
         a = alt_ad(v, i)
-        return (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
-    return False
+        ok = (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
+        return None if ok else "alt_reads"
+    if kind == "ref":
+        # a confident hemizygous REFERENCE (the non-carrier band, mirroring the diploid `hom_ref`
+        # band: AB <= homref_ab_max, the AD limb failing open) — looser than `clean`
+        return None if (ab is None or ab <= thr.homref_ab_max) else "alt_reads"
+    return "kind"
 
 
-def sample_qc(v, i, thr: GtThresholds, kind: str, gq_value=None) -> bool:
-    """kind: 'het' | 'hom_alt' | 'hom_ref' | 'denovo_child' | 'clean_parent'.
+def hemi_qc(v, i, thr: GtThresholds, kind: str) -> bool:
+    """True when the sample passes the haploid QC band for `kind` (see hemi_qc_reason)."""
+    return hemi_qc_reason(v, i, thr, kind) is None
 
+
+def sample_qc_reason(v, i, thr: GtThresholds, kind: str, gq_value=None):
+    """WHY a sample fails the QC band for `kind`, or None when it passes.
+
+    kind: 'het' | 'hom_alt' | 'hom_ref' | 'denovo_child' | 'clean_parent'. The reason is one of
+    `gq`, `dp`, `ab_missing` (the carrier bands fail CLOSED without AD), `ab_low`, `ab_high`,
+    or `alt_reads` (a hom-ref / clean-parent band failed because the sample HAS alt reads — the
+    parental-mosaicism / contamination shape, which Step 5 counts apart from a quality failure).
     `gq_value` substitutes the refined GQ — Step 5 passes the PL-derived quality (`hemi_gq`) on a
-    male's non-PAR chrX, where the refinement's diploid pedigree prior is invalid (see below)."""
+    male's non-PAR chrX, where the refinement's diploid pedigree prior is invalid (see below).
+    """
     q = gq(v, i) if gq_value is None else gq_value
     if q is None or q < thr.min_gq:
-        return False
+        return "gq"
     d = dp(v, i)
     need_dp = thr.denovo_min_dp if kind == "denovo_child" else (
         thr.parent_min_dp if kind == "clean_parent" else thr.min_dp)
     if d is None or d < need_dp:
-        return False
+        return "dp"
     ab = allele_balance(v, i)
     if kind in ("het", "denovo_child"):
-        return ab is not None and thr.het_ab_min <= ab <= thr.het_ab_max
+        if ab is None:
+            return "ab_missing"
+        if ab < thr.het_ab_min:
+            return "ab_low"
+        if ab > thr.het_ab_max:
+            return "ab_high"
+        return None
     if kind == "hom_alt":
-        return ab is not None and ab >= thr.homalt_ab_min
+        if ab is None:
+            return "ab_missing"
+        return None if ab >= thr.homalt_ab_min else "ab_low"
     if kind == "hom_ref":
-        return ab is None or ab <= thr.homref_ab_max
+        return None if (ab is None or ab <= thr.homref_ab_max) else "alt_reads"
     if kind == "clean_parent":
         # parent must be hom-ref AND essentially free of alt reads
         a = alt_ad(v, i)
-        return (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
-    return False
+        ok = (a is None or a <= thr.parent_max_alt_ad) and (ab is None or ab <= thr.homref_ab_max)
+        return None if ok else "alt_reads"
+    return "kind"
+
+
+def sample_qc(v, i, thr: GtThresholds, kind: str, gq_value=None) -> bool:
+    """True when the sample passes the QC band for `kind` (see sample_qc_reason)."""
+    return sample_qc_reason(v, i, thr, kind, gq_value=gq_value) is None
 
 
 def sample_qc_ad_measured(v, i, kind: str) -> bool:

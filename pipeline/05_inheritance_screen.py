@@ -163,6 +163,21 @@ def fmt(x):
     return "" if x is None else (f"{x:.4g}" if isinstance(x, float) else str(x))
 
 
+def flag_tally(rows):
+    """Count the flag tokens over `rows` — the audit's record of what each call carried. A
+    `key=value` token whose value is a NUMBER (`mother_alt_reads=3`) is tallied by its key, every
+    other token verbatim (`origin=pat`, `noncarrier_parent=mat`)."""
+    t = Counter()
+    for r in rows:
+        for tok in (r.get("flags") or "").split(";"):
+            if not tok:
+                continue
+            k, sep, val = tok.partition("=")
+            numeric = sep and val.lstrip("-").replace(".", "", 1).isdigit()
+            t[k if numeric else tok] += 1
+    return t
+
+
 def pl_gt_bases(v, i):
     """The genotype the sample's FORMAT/PL favours, in the same base form as cyvcf2's gt_bases
     (`A/T`), or blank when the record has no PL for it / the likelihoods are flat."""
@@ -362,6 +377,69 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 fl.append(f"{name}_gt_refined_discordant")
         return out[0], out[1], out[2], fl
 
+    def parent_support(v, idx, gtype, role, gq_value=None, hemizygous=False):
+        """Grade ONE parent's genotype as SUPPORT for a hom-alt / hemizygous child's call.
+
+        Returns (state, flags). `carrier`: a QC-confident carrier. `carrier_qc_fail`: carries,
+        but its own band failed — the call stands, flagged `transmitting_parent_qc_fail` exactly
+        as the dominant model does. `noncarrier`: a confident hom-ref — the Mendelian-
+        inconsistent shape (a hemizygous deletion in trans, uniparental disomy, or a parental
+        allele dropout), flagged `noncarrier_parent=<role>`, plus `parent_ad_unmeasured` when the
+        hom-ref rests on no allele depths. `uninformative`: a no-call, or a hom-ref whose own
+        band failed — flagged `parent_gt_uninformative=<role>`, with `<parent>_alt_reads=N` when
+        it has any. A parent is NEVER a veto: the child's own genotype decides whether a row
+        exists; the parents grade its support. `hemizygous` reads the parent's class from the
+        pre-refinement likelihoods (a father on chrX or chrY), else `gtype` is the class the
+        caller already resolved.
+        """
+        word = "mother" if role == "mat" else "father"
+
+        def _alt_reads_flag():
+            a = G.alt_ad(v, idx)
+            return [f"{word}_alt_reads={a}"] if a else []
+        if hemizygous:
+            call = G.hemi_call(v, idx)[0]
+            if call == G.HEMI_ALT:
+                return (("carrier", []) if G.hemi_qc(v, idx, thr, "alt")
+                        else ("carrier_qc_fail", ["transmitting_parent_qc_fail"]))
+            if call == G.HEMI_MIXED:
+                return "carrier_qc_fail", ["transmitting_parent_qc_fail"]
+            if call == G.HEMI_REF:
+                if G.hemi_qc(v, idx, thr, "ref"):
+                    fl = [f"noncarrier_parent={role}"]
+                    if not G.sample_qc_ad_measured(v, idx, "hom_ref"):
+                        fl.append("parent_ad_unmeasured")
+                    return "noncarrier", fl
+                return "uninformative", [f"parent_gt_uninformative={role}"] + _alt_reads_flag()
+            return "uninformative", [f"parent_gt_uninformative={role}"]
+        if gtype in (G.HET, G.HOM_ALT):
+            kind = "het" if gtype == G.HET else "hom_alt"
+            return (("carrier", []) if G.sample_qc(v, idx, thr, kind, gq_value=gq_value)
+                    else ("carrier_qc_fail", ["transmitting_parent_qc_fail"]))
+        if gtype == G.HOM_REF:
+            if G.sample_qc(v, idx, thr, "hom_ref", gq_value=gq_value):
+                fl = [f"noncarrier_parent={role}"]
+                if not G.sample_qc_ad_measured(v, idx, "hom_ref"):
+                    fl.append("parent_ad_unmeasured")
+                return "noncarrier", fl
+            return "uninformative", [f"parent_gt_uninformative={role}"] + _alt_reads_flag()
+        return "uninformative", [f"parent_gt_uninformative={role}"]
+
+    def merged_flags(*lists):
+        """Flag lists in order, each token once (both parents may fail the same band)."""
+        out = []
+        for fl in lists:
+            for f in fl:
+                if f not in out:
+                    out.append(f)
+        return out
+
+    def child_qc_no_row(reason):
+        """A child QC failure as a no-row reason: an allele-balance failure is its own class
+        (`child_ab_low` — the postzygotic-mosaic / contamination shape; `child_ab_high`), every
+        depth / quality / missing-AD failure is `qc_child`."""
+        return {"ab_low": "child_ab_low", "ab_high": "child_ab_high"}.get(reason, "qc_child")
+
     def y_flags(v, yc, yd):
         """The review flags every Y-linked row carries: whose refined GT the likelihoods
         overruled (the diploid-prior distortion, made visible), whether the site behaves diploid
@@ -390,20 +468,19 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             return "male_y_het"               # both alleles read on a haploid chromosome
         if not emit_y_linked:
             return "mode_disabled"
-        if not G.hemi_qc(v, c, thr, "alt"):
-            return "qc_child"
-        if yd[0] == G.HEMI_NOCALL:
-            return "parent_nocall"            # the sole transmitter is unobserved
-        if yd[0] == G.HEMI_REF:               # de novo shape
+        cr = G.hemi_qc_reason(v, c, thr, "alt")
+        if cr is not None:
+            return child_qc_no_row(cr)
+        if yd[0] == G.HEMI_REF and G.hemi_qc(v, d, thr, "clean"):   # de novo shape
             if not emit_denovo:
                 return "mode_disabled"
-            if not G.hemi_qc(v, d, thr, "clean"):
-                return "qc_parent"
             if not rare(v, dom_max):
                 return "rarity"
-            if (G.dp(v, c) or 0) < thr.denovo_min_dp:
+            if (G.dp(v, c) or 0) < thr.denovo_min_dp_hemizygous:
                 return "qc_child"
             return "other"
+        # a carrier, a mixed, an unclean-reference or an uncalled father: the y_linked path, in
+        # which the father grades the support and never vetoes (parent_support)
         if not rare(v, rec_max):
             return "rarity"
         return "other"
@@ -420,20 +497,27 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         if male_x and gc == G.HET:
             return "male_x_het"               # hemizygous het = QC red flag, never a call
         if gc == G.HET:
-            if not G.sample_qc(v, c, thr, "het"):
-                return "qc_child"
+            cr = G.sample_qc_reason(v, c, thr, "het")
+            if cr is not None:
+                return child_qc_no_row(cr)
             if gd == G.HOM_REF and gmm == G.HOM_REF:          # de novo shape
-                clean = G.sample_qc(v, m, thr, "clean_parent") and G.sample_qc(v, d, thr, "clean_parent")
-                if not clean:
-                    return "qc_parent"        # not a clean de novo; no inherited origin either
+                rm = G.sample_qc_reason(v, m, thr, "clean_parent")
+                rd = G.sample_qc_reason(v, d, thr, "clean_parent")
+                if rm is not None or rd is not None:
+                    # not a clean de novo, and no inherited origin either. A parent WITH alt
+                    # reads is the parental-mosaicism / contamination shape — counted apart from
+                    # a parent whose depth or quality merely fell short, so the de novo machinery
+                    # can size it; neither is emitted here (de novo is secondary).
+                    return "parent_alt_reads" if "alt_reads" in (rm, rd) else "qc_parent"
                 if not rare(v, rec_max):
                     return "rarity"
                 if not (A._str(v, "gene") or A.symbol(v)):
                     # not poolable (no gene) and the de novo row itself did not fire: why?
                     if not emit_denovo:
                         return "mode_disabled"
-                    if not G.sample_qc(v, c, thr, "denovo_child"):
-                        return "qc_child"
+                    cr = G.sample_qc_reason(v, c, thr, "denovo_child")
+                    if cr is not None:
+                        return child_qc_no_row(cr)
                     if not rare(v, dom_max):
                         return "rarity"
                     if _hiconf_blocks(v):
@@ -448,51 +532,29 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             if gd not in (G.HET, G.HOM_ALT) and gmm not in (G.HET, G.HOM_ALT):
                 return "parent_nocall"                    # no carrier, and not both hom-ref
             return "other"     # a carrier exists -> pooled with transmitting_parent_qc_fail, never here
-        # HOM_ALT child. On male chrX the classes are the PL-favoured ones (prior_free_classes)
-        # and QC runs on the PL-derived GQ; the hiConfDeNovo tag is not consulted (it is computed
-        # on the refined diploid genotypes, which is the distortion being corrected).
+        # HOM_ALT child. The parents never veto (parent_support grades them onto the row), so
+        # the only no-row reasons are the child's own QC and rarity — except the male-X de novo
+        # shape (a confidently CLEAN mother), which is the secondary de novo path with its own
+        # gates. On male chrX the classes are the PL-favoured ones (prior_free_classes) and QC
+        # runs on the PL-derived GQ; the hiConfDeNovo tag is not consulted there.
         if male_x_chrx:
-            if gmm == G.UNKNOWN:
-                return "parent_nocall"
-            if gmm == G.HOM_REF:                          # male-X de novo shape
-                if not emit_denovo:
+            cr = G.sample_qc_reason(v, c, thr, "hom_alt", gq_value=G.hemi_gq(v, c))
+            if cr is not None:
+                return child_qc_no_row(cr)
+            if gmm == G.HOM_REF and G.sample_qc(v, m, thr, "clean_parent", gq_value=G.hemi_gq(v, m)):
+                if not emit_denovo:                       # male-X de novo shape
                     return "mode_disabled"
-                if not G.sample_qc(v, c, thr, "hom_alt", gq_value=G.hemi_gq(v, c)):
-                    return "qc_child"
-                if not G.sample_qc(v, m, thr, "clean_parent", gq_value=G.hemi_gq(v, m)):
-                    return "qc_parent"
                 if not rare(v, dom_max):
                     return "rarity"
-                if (G.dp(v, c) or 0) < thr.denovo_min_dp:
+                if (G.dp(v, c) or 0) < thr.denovo_min_dp_hemizygous:
                     return "qc_child"
                 return "other"
-            if not G.sample_qc(v, c, thr, "hom_alt", gq_value=G.hemi_gq(v, c)):
-                return "qc_child"
-            if not _carrier_qc(v, m, gmm, gq_value=G.hemi_gq(v, m)):
-                return "qc_parent"
             if not rare(v, rec_max):
                 return "rarity"
             return "other"
-        if G.is_x_nonpar(v):                              # hom-alt daughter
-            if G.UNKNOWN in (gd, gmm):
-                return "parent_nocall"
-            if gd != G.HOM_ALT or gmm not in (G.HET, G.HOM_ALT):
-                return "mendelian_inconsistent"           # her father must be hemizygous
-            if not G.sample_qc(v, c, thr, "hom_alt"):
-                return "qc_child"
-            if not (_carrier_qc(v, m, gmm) and G.sample_qc(v, d, thr, "hom_alt")):
-                return "qc_parent"
-            if not rare(v, rec_max):
-                return "rarity"
-            return "other"
-        if G.UNKNOWN in (gd, gmm):                        # autosomal hom-alt
-            return "parent_nocall"
-        if G.HOM_REF in (gd, gmm):
-            return "mendelian_inconsistent"               # deletion-in-trans / UPD shape
-        if not G.sample_qc(v, c, thr, "hom_alt"):
-            return "qc_child"
-        if not (_carrier_qc(v, d, gd) and _carrier_qc(v, m, gmm)):
-            return "qc_parent"
+        cr = G.sample_qc_reason(v, c, thr, "hom_alt")     # hom-alt daughter, or autosomal
+        if cr is not None:
+            return child_qc_no_row(cr)
         if not rare(v, rec_max):
             return "rarity"
         return "other"
@@ -561,17 +623,10 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         if G.is_y_nonpar(v):
             yc, yd = G.hemi_call(v, c), G.hemi_call(v, d)
             if emit_y_linked and yc[0] == G.HEMI_ALT and G.hemi_qc(v, c, thr, "alt"):
-                if yd[0] in (G.HEMI_ALT, G.HEMI_MIXED):
-                    if rare(v, rec_max):
-                        r = base_row(trio_id, v, gt, "y_linked", cfg=cfg)
-                        fl = ["origin=pat"]
-                        if not G.hemi_qc(v, d, thr, "alt"):
-                            fl.append("transmitting_parent_qc_fail")
-                        r["flags"] = ";".join(fl + y_flags(v, yc, yd))
-                        rows.append(tag_strict(r, v))
-                elif yd[0] == G.HEMI_REF and emit_denovo:
-                    if (G.hemi_qc(v, d, thr, "clean") and rare(v, dom_max)
-                            and (G.dp(v, c) or 0) >= thr.denovo_min_dp):
+                if yd[0] == G.HEMI_REF and G.hemi_qc(v, d, thr, "clean"):
+                    # the de novo shape: a confidently CLEAN father (secondary, its own gates)
+                    if (emit_denovo and rare(v, dom_max)
+                            and (G.dp(v, c) or 0) >= thr.denovo_min_dp_hemizygous):
                         r = base_row(trio_id, v, gt, "denovo_y_hemi", cfg=cfg)
                         fl = y_flags(v, yc, yd)
                         if not G.sample_qc_ad_measured(v, d, "clean_parent"):
@@ -580,6 +635,14 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                         if crosscheck:
                             r["review_prior_crosscheck"] = "1"
                         rows.append(r)
+                elif rare(v, rec_max):
+                    # the son's hemizygous alt stands on its own; the father — a carrier, a mixed
+                    # site, an unclean reference or a no-call — grades the support, never vetoes
+                    sd, fd = parent_support(v, d, None, "pat", hemizygous=True)
+                    r = base_row(trio_id, v, gt, "y_linked", cfg=cfg)
+                    origin = ["origin=pat"] if sd in ("carrier", "carrier_qc_fail") else []
+                    r["flags"] = ";".join(merged_flags(origin, fd, y_flags(v, yc, yd)))
+                    rows.append(tag_strict(r, v))
             # anything else is a no-row; why_no_row_y names it. The blocks below are all gated
             # off chrY (male_x / male_x_chrx), so this record touches no other mode.
 
@@ -606,8 +669,8 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 parents_ad = parents_ad and G.sample_qc_ad_measured(v, d, "clean_parent")
             ok = (G.sample_qc(v, c, thr, child_kind, gq_value=xq(c)) and parents_clean
                   and rare(v, dom_max))
-            if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
-                ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
+            if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp_hemizygous:
+                ok = False  # a hemizygous de novo keeps a deeper floor, scaled to the haploid depth
             # The gnomAD-homozygote gate that used to sit here is gone with nhomalt: the VEP
             # cache carries no homozygote count. rare(v, dom_max) above still applies the
             # frequency gate, which is the bulk of what it did. De novo is secondary here
@@ -637,35 +700,56 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
                 return G.sample_qc(v, idx, thr, "hom_alt", gq_value=gq_value)
             return False
 
-        # ---- autosomal homozygous recessive: HOM_ALT child, both parents carriers (HET or HOM_ALT) ----
-        if not male_x and not G.is_x_nonpar(v) and gc == G.HOM_ALT \
-                and gd in (G.HET, G.HOM_ALT) and gmm in (G.HET, G.HOM_ALT):
-            if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(d, gd) and carrier_ok(m, gmm)
-                    and rare(v, rec_max)):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "hom_recessive", cfg=cfg), v))
-
-        # ---- X-linked recessive, affected male: hemizygous son + carrier mother. The father
-        #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and is not
-        #      required — an affected/carrier father or a father chrX no-call must not drop the call. ----
-        if male_x_chrx and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
-            if (G.sample_qc(v, c, thr, "hom_alt", gq_value=xq(c)) and carrier_ok(m, gmm, xq(m))
-                    and rare(v, rec_max)):
-                r = base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg)
-                # ...on the father's PL-favoured class: a het the prior imputed to explain the
-                # son's 1/1 (his reads all reference) no longer credits him with the allele
-                if gd in (G.HET, G.HOM_ALT):
-                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "father_carries_x_allele"
-                for fl in x_flags:
-                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + fl
+        # ---- autosomal homozygous recessive: a QC-confident HOM_ALT child. The parents grade
+        #      the support and never veto (parent_support): two carriers is the textbook shape; a
+        #      confidently hom-ref parent is the hemizygous-deletion-in-trans / uniparental-disomy
+        #      / dropout shape (noncarrier_parent), an uncalled or unclean one is uninformative.
+        #      Every one of those used to be a silent no-row (mendelian_inconsistent / parent_nocall
+        #      / qc_parent); the child's hom-alt is the evidence, and the flags say what the parents
+        #      added. Step 6 counts carriers that rest on an unsupporting parent separately. ----
+        if not male_x and not G.is_x_nonpar(v) and gc == G.HOM_ALT:
+            if G.sample_qc(v, c, thr, "hom_alt") and rare(v, rec_max):
+                _, fd = parent_support(v, d, gd, "pat")
+                _, fm = parent_support(v, m, gmm, "mat")
+                r = base_row(trio_id, v, gt, "hom_recessive", cfg=cfg)
+                r["flags"] = ";".join(merged_flags(fd, fm))
                 rows.append(tag_strict(r, v))
 
-        # ---- X-linked recessive, affected female: HOM_ALT daughter, carrier mother, hemizygous-
-        #      affected father (he DOES transmit his X to a daughter) (docs §3.4) ----
-        if (not male_x and G.is_x_nonpar(v) and gc == G.HOM_ALT
-                and gmm in (G.HET, G.HOM_ALT) and gd == G.HOM_ALT):
-            if (G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm)
-                    and G.sample_qc(v, d, thr, "hom_alt") and rare(v, rec_max)):
-                rows.append(tag_strict(base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg), v))
+        # ---- X-linked recessive, affected male: a QC-confident hemizygous son. The father
+        #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and never
+        #      required — a carrier father is only flagged. The MOTHER grades the support: a
+        #      carrier (or a carrier failing her own band, flagged) is the inherited shape; a
+        #      confidently clean hom-ref is the de novo shape, owned by the de novo block above; a
+        #      hom-ref that is NOT clean, or a no-call, leaves the origin unestablished — the son's
+        #      hemizygous call still stands (a hemizygous LoF in an affected boy is causally
+        #      self-sufficient; the maternal genotype only separates inherited from de novo). ----
+        if male_x_chrx and gc == G.HOM_ALT:
+            if G.sample_qc(v, c, thr, "hom_alt", gq_value=xq(c)) and rare(v, rec_max):
+                mother_clean = (gmm == G.HOM_REF
+                                and G.sample_qc(v, m, thr, "clean_parent", gq_value=xq(m)))
+                if not mother_clean:
+                    _, fm = parent_support(v, m, gmm, "mat", gq_value=xq(m))
+                    r = base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg)
+                    # ...on the father's PL-favoured class: a het the prior imputed to explain the
+                    # son's 1/1 (his reads all reference) no longer credits him with the allele
+                    fx = ["father_carries_x_allele"] if gd in (G.HET, G.HOM_ALT) else []
+                    r["flags"] = ";".join(merged_flags(fx, fm, x_flags))
+                    rows.append(tag_strict(r, v))
+
+        # ---- X-linked recessive, affected female: a QC-confident HOM_ALT daughter. Her mother
+        #      is diploid and her father haploid (he DOES transmit his X to a daughter), so his
+        #      class is read from the pre-refinement likelihoods; both grade the support, a
+        #      non-hemizygous father being the same deletion / dropout shape as an autosomal
+        #      non-carrier parent (docs §3.4). ----
+        if not male_x and G.is_x_nonpar(v) and gc == G.HOM_ALT:
+            if G.sample_qc(v, c, thr, "hom_alt") and rare(v, rec_max):
+                _, fm = parent_support(v, m, gmm, "mat")
+                _, fd = parent_support(v, d, None, "pat", hemizygous=True)
+                fcall = G.hemi_call(v, d)
+                fx = ["father_gt_refined_discordant"] if (fcall[1] == "pl" and fcall[0] != fcall[2]) else []
+                r = base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg)
+                r["flags"] = ";".join(merged_flags(fm, fd, fx))
+                rows.append(tag_strict(r, v))
 
         # ---- collect het candidates (het child, rare, parent-of-origin) ----
         #      The transmitting parent must be a QC-confident carrier (documented rule),
@@ -1002,6 +1086,10 @@ def main(argv=None) -> int:
         audit.record("05_inheritance", "clinvar_plp_no_row", st["clinvar_plp_no_row"], scope=trio_id)
         for mode, c in sorted(tmodes.items()):
             audit.record("05_inheritance", f"mode.{mode}", c, scope=trio_id)
+        # what the calls CARRY: every flag token, per trio — so a methods section can say how many
+        # calls rested on an unsupporting parent, a PL-overruled genotype, an unphased partner...
+        for fl, n in sorted(flag_tally(trio_rows).items()):
+            audit.record("05_inheritance", f"flag.{fl}", n, scope=trio_id)
         why = ", ".join(f"{k}={n}" for k, n in sorted(st["no_row"].items()))
         sys.stderr.write(
             f"  [{trio_id}] {st['examined']} examined -> {st['with_call']} with a call, "
@@ -1060,6 +1148,9 @@ def main(argv=None) -> int:
     audit.record("05_inheritance", "clinvar_plp_no_row", tot["clinvar_plp_no_row"])
     for mode, c in sorted(by_mode.items()):
         audit.record("05_inheritance", f"mode.{mode}", c)
+    flags_all = flag_tally(all_rows)
+    for fl, n in sorted(flags_all.items()):
+        audit.record("05_inheritance", f"flag.{fl}", n)
     sys.stderr.write(
         f"Step 5 complete: {len(all_rows)} candidate calls across {n_trios} trios "
         f"-> {args.out}\n  by mode: {by_mode}\n"
@@ -1069,6 +1160,7 @@ def main(argv=None) -> int:
         f"  examined {tot['examined']} variants: {tot['with_call']} with a call, "
         f"{sum(tot['no_row'].values())} no row {dict(sorted(tot['no_row'].items()))}, "
         f"skipped {dict(sorted(tot['skipped'].items()))}\n"
+        f"  flags carried: {dict(sorted(flags_all.items()))}\n"
     )
     return 0
 

@@ -365,6 +365,11 @@ filters:
     min_gq: 20
     min_dp: 10
     denovo_min_dp: 20
+    # The de novo depth floor on a HEMIZYGOUS site (denovo_x_hemi / denovo_y_hemi): a male's
+    # non-PAR chrX and chrY carry HALF the autosomal depth (~15x at 30x), so the diploid floor
+    # of 20 is twice as strict there and dropped real hemizygous de novos that an autosomal one
+    # at the same per-allele depth would have kept. Half the diploid floor.
+    denovo_min_dp_hemizygous: 10
     het_ab_min: 0.25
     het_ab_max: 0.75
     homalt_ab_min: 0.90
