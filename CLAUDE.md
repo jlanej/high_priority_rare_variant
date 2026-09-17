@@ -164,7 +164,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   MOTHER as the in-trio female control (`y_inferred_sex`, `y_cov_ratio`, `y_covered_frac`,
   `mom_y_cov_ratio`, `sex_match_y` vs the PED, `xy_agree` vs the chrX inference, `y_flag`;
   `qc.y_reads_min_dp` 3, `y_min_anchor_sites` 50, `y_cov_male_min` 0.30, `y_cov_female_max`
-  0.10). It decides NOTHING (the PED is canonical and the chrX inference fills in an unknown) and
+  0.10). The chrX inference itself now counts the PL-favoured genotype (`scan_sex`), so the
+  refinement prior no longer inflates a male's het ratio; mapping artifacts still do, so
+  `qc.x_het_male_max` still needs calibrating on the run. It decides NOTHING (the PED is
+  canonical and the chrX inference fills in an unknown) and
   never fails `overall_pass`; the statistic is a median, and a mother above `y_cov_female_max`
   refuses the call (`mother_y_coverage`), so a few mismapped reads cannot read a female as male.
   Genotypes are never read for the proband or mother there — on chrY the refined GT is the
@@ -252,7 +255,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   a son with read support for both alleles is `no_row.male_y_het`, a father with both is emitted
   with `transmitting_parent_qc_fail;y_site_mixed_reads`, a female proband's chrY records are
   `skipped.chry_female`, and the `hiConfDeNovo` tag is reported but never gates `denovo_y_hemi`
-  (GATK computes it on the refined diploid genotypes, imputed mother included). Step 5 opens
+  (GATK computes it on the refined diploid genotypes, imputed mother included). **A male's
+  non-PAR chrX is read the same way**: all three members' classes come from PL
+  (`prior_free_classes`), the `x_linked_recessive` / `denovo_x_hemi` QC runs on the PL-derived
+  GQ, `father_carries_x_allele` is judged on the father's PL class, the overruled member is
+  flagged `*_gt_refined_discordant`, and the hiConf tag does not gate `denovo_x_hemi`. Step 5 opens
   VCFs with `strict_gt=True` — cyvcf2's default reports a half-called `0/.` as hom-ref, which would
   defeat every "parent is a confident no-call" test. Modes are configured in
   `inheritance.emit_dominant` / `inheritance.emit_denovo`. Every row carries `rarity_af` (the value
@@ -721,10 +728,16 @@ two things that look identical in the output are not the same fact:
   loses below ~26 reads). Every chrY decision therefore goes through `genotype.hemi_call`
   (PL argmin, refined GT only as the fallback) and `hemi_qc` (GQ from PL); Step 0's chrY anchors
   and coverage read DEPTH, never a genotype; and the `hiConfDeNovo` tag — computed on those
-  refined genotypes — never gates `denovo_y_hemi`. **The same distortion reaches male chrX and is
-  NOT yet corrected there**: a true hemizygous X alt in a son of a `0/0` father is pushed to
-  `0/1` and filed under `no_row.male_x_het`, and it inflates the chrX het ratio Step 0 infers sex
-  from. Adopting `hemi_call` for `male_x_chrx` is the documented follow-up.
+  refined genotypes — never gates `denovo_y_hemi`. **The same distortion reaches a male's
+  non-PAR chrX** (the father is haploid there too, so a son's hemizygous alt with a
+  hemizygous-ref father is a de novo under the prior and the cheapest repair lands on whichever
+  member has the fewest reads), so there Step 5 replaces ALL THREE members' refined classes by
+  the PL-favoured ones (`prior_free_classes`), runs the QC on the PL-derived GQ, flags whichever
+  GT was overruled (`child_/father_/mother_gt_refined_discordant`), and likewise reports but does
+  not gate on the `hiConfDeNovo` tag for `denovo_x_hemi`; Step 0's chrX het ratio counts the
+  PL-favoured genotype for the same reason. A callset WITHOUT FORMAT/PL falls back to the refined
+  GT everywhere and inherits the prior's distortions. A female's chrX is under a valid diploid
+  model and is left on the refined calls.
 - **`child_gt`/`mother_gt`/`father_gt` are cyvcf2 `gt_bases`, never `0/1`.** Step 5 writes allele
   STRINGS (`A/T`, `T/T`, `./.`). Any consumer that tests `gt in ("1/1", "1|1")` never matches, so
   Step 9's `genotype_qc` used to judge every hom-alt call on the het AB band and fail it; zygosity
@@ -818,7 +831,7 @@ two things that look identical in the output are not the same fact:
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **97 tests, no network and no VCF.**
+  **98 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**

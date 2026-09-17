@@ -8,11 +8,12 @@ inheritance mode with the refined-GQ genotype-QC gates and per-mode rarity gates
   * de novo (autosomal + X-hemizygous), with parental-cleanliness re-verification
     and (when present) the GATK hiConfDeNovo tag;
   * homozygous recessive;
-  * X-linked recessive (male hemizygous);
+  * X-linked recessive (male hemizygous) — on a male's non-PAR chrX every member's genotype is
+    read from the PRE-REFINEMENT likelihoods (FORMAT/PL), because the father is haploid there
+    and the genotype refinement's diploid pedigree prior distorts all three refined calls;
   * Y-linked (male proband, non-PAR chrY): father-to-son hemizygous transmission (`y_linked`)
-    and its de novo counterpart (`denovo_y_hemi`, secondary), judged on the PRE-REFINEMENT
-    likelihoods (FORMAT/PL) because the genotype refinement's diploid pedigree prior is invalid
-    on a haploid chromosome — the mother is never consulted (she has no Y), only measured;
+    and its de novo counterpart (`denovo_y_hemi`, secondary), judged on the same likelihoods
+    for the same reason — the mother is never consulted (she has no Y), only measured;
   * compound heterozygous in TRANS (parent-of-origin: mat + pat, or inherited + de novo).
 
 Emits one TSV of candidate calls across all trios: the curated columns (COLS) first, then a
@@ -327,15 +328,39 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
     # (an unpaired inherited het there fails the dominant gate and is emitted under no mode).
     n_plp_inert = 0
 
-    def _carrier_qc(v, idx, gtype):
+    def _carrier_qc(v, idx, gtype, gq_value=None):
         if gtype == G.HET:
-            return G.sample_qc(v, idx, thr, "het")
+            return G.sample_qc(v, idx, thr, "het", gq_value=gq_value)
         if gtype == G.HOM_ALT:
-            return G.sample_qc(v, idx, thr, "hom_alt")
+            return G.sample_qc(v, idx, thr, "hom_alt", gq_value=gq_value)
         return False
 
     def _hiconf_blocks(v):
         return require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name)
+
+    def prior_free_classes(v):
+        """On a MALE's non-PAR chrX, every member's genotype class as the LIKELIHOODS favour it.
+
+        The father is haploid on chrX exactly as on chrY, so the refinement's diploid pedigree
+        prior misbehaves the same way: a son's hemizygous alt with a hemizygous-ref father is a
+        de novo under it (~1e-8), and the cheapest repair — a son pushed to 0/1, a father or
+        mother imputed a het they have no reads for — lands on whichever member has the fewest
+        reads. The refined GT would then drop the son as a male X het, or credit the father with
+        an X allele he does not carry. Each member's class is the PL argmin where PL is present
+        and informative, the refined GT otherwise; a refined no-call stays a no-call; and the
+        row records whose GT was overruled (`*_gt_refined_discordant`).
+        """
+        out, fl = [], []
+        for idx, name in ((gt.c, "child"), (gt.d, "father"), (gt.m, "mother")):
+            refined = v.gt_types[idx]
+            from_pl = G.gt_from_pl(G.pl(v, idx)) if refined != G.UNKNOWN else None
+            if from_pl is None:
+                out.append(refined)
+                continue
+            out.append(from_pl)
+            if from_pl != refined:
+                fl.append(f"{name}_gt_refined_discordant")
+        return out[0], out[1], out[2], fl
 
     def y_flags(v, yc, yd):
         """The review flags every Y-linked row carries: whose refined GT the likelihoods
@@ -423,27 +448,27 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             if gd not in (G.HET, G.HOM_ALT) and gmm not in (G.HET, G.HOM_ALT):
                 return "parent_nocall"                    # no carrier, and not both hom-ref
             return "other"     # a carrier exists -> pooled with transmitting_parent_qc_fail, never here
-        # HOM_ALT child
+        # HOM_ALT child. On male chrX the classes are the PL-favoured ones (prior_free_classes)
+        # and QC runs on the PL-derived GQ; the hiConfDeNovo tag is not consulted (it is computed
+        # on the refined diploid genotypes, which is the distortion being corrected).
         if male_x_chrx:
             if gmm == G.UNKNOWN:
                 return "parent_nocall"
             if gmm == G.HOM_REF:                          # male-X de novo shape
                 if not emit_denovo:
                     return "mode_disabled"
-                if not G.sample_qc(v, c, thr, "hom_alt"):
+                if not G.sample_qc(v, c, thr, "hom_alt", gq_value=G.hemi_gq(v, c)):
                     return "qc_child"
-                if not G.sample_qc(v, m, thr, "clean_parent"):
+                if not G.sample_qc(v, m, thr, "clean_parent", gq_value=G.hemi_gq(v, m)):
                     return "qc_parent"
                 if not rare(v, dom_max):
                     return "rarity"
                 if (G.dp(v, c) or 0) < thr.denovo_min_dp:
                     return "qc_child"
-                if _hiconf_blocks(v):
-                    return "hiconf_tag"
                 return "other"
-            if not G.sample_qc(v, c, thr, "hom_alt"):
+            if not G.sample_qc(v, c, thr, "hom_alt", gq_value=G.hemi_gq(v, c)):
                 return "qc_child"
-            if not _carrier_qc(v, m, gmm):
+            if not _carrier_qc(v, m, gmm, gq_value=G.hemi_gq(v, m)):
                 return "qc_parent"
             if not rare(v, rec_max):
                 return "rarity"
@@ -511,6 +536,13 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         # `male_x` still guards the het-suppression rule below (hemizygous is true of BOTH
         # chromosomes); `male_x_chrx` guards anything the mother's genotype drives.
         male_x_chrx = G.is_x_nonpar(v) and gt.child_male
+        # On a male's non-PAR chrX the refined classes are replaced by the PL-favoured ones and
+        # every QC below runs on the PL-derived GQ (xq) — see prior_free_classes. Elsewhere the
+        # refined GT and GQ stand (the diploid prior is valid there), and xq is a no-op.
+        x_flags = []
+        if male_x_chrx:
+            gc, gd, gmm, x_flags = prior_free_classes(v)
+        xq = (lambda i: G.hemi_gq(v, i)) if male_x_chrx else (lambda i: None)
 
         # ---- Y-linked (non-PAR chrY; the proband is male here — a female's chrY records were
         #      skipped above). The father is the SOLE transmitter and the mother has no Y, so
@@ -563,7 +595,7 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             child_kind = "denovo_child" if not male_x else "hom_alt"
             # parental cleanliness: both parents for an autosomal de novo; only the transmitting
             # mother for a male-X de novo (father's chrX is not transmitted to a son).
-            parents_clean = G.sample_qc(v, m, thr, "clean_parent")
+            parents_clean = G.sample_qc(v, m, thr, "clean_parent", gq_value=xq(m))
             # A parent with NO allele-depth data passes clean_parent vacuously (the AD limbs fail
             # open while het/hom_alt fail closed — see genotype.sample_qc_ad_measured). Track it so
             # a de novo affirmed by an unmeasured parent is distinguishable from one affirmed by a
@@ -572,17 +604,24 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
             if not male_x:
                 parents_clean = parents_clean and G.sample_qc(v, d, thr, "clean_parent")
                 parents_ad = parents_ad and G.sample_qc_ad_measured(v, d, "clean_parent")
-            ok = (G.sample_qc(v, c, thr, child_kind) and parents_clean and rare(v, dom_max))
+            ok = (G.sample_qc(v, c, thr, child_kind, gq_value=xq(c)) and parents_clean
+                  and rare(v, dom_max))
             if male_x and (G.dp(v, c) or 0) < thr.denovo_min_dp:
                 ok = False  # X/Y-hemizygous de novo still needs the deeper de novo DP floor
             # The gnomAD-homozygote gate that used to sit here is gone with nhomalt: the VEP
             # cache carries no homozygote count. rare(v, dom_max) above still applies the
             # frequency gate, which is the bulk of what it did. De novo is secondary here
             # (dedicated machinery owns it), so this is the cheapest place to absorb the loss.
-            if require_hiconf and gt.has_hiconf and not A.is_hiconf_denovo_for(v, gt.child_name):
+            # The hiConfDeNovo tag gates AUTOSOMAL de novos only: on a male's chrX (as on chrY)
+            # GATK computes it on the refined diploid genotypes — the very calls the prior
+            # distorted — so there it is reported, never a gate.
+            if (not male_x_chrx and require_hiconf and gt.has_hiconf
+                    and not A.is_hiconf_denovo_for(v, gt.child_name)):
                 ok = False  # tag exists in this callset but not a hiConf de novo for THIS child
             if ok:
                 r = base_row(trio_id, v, gt, "denovo_x_hemi" if male_x else "denovo", cfg=cfg)
+                for fl in x_flags:
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + fl
                 if not parents_ad:
                     r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "parent_ad_unmeasured"
                 if crosscheck:
@@ -591,11 +630,11 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
 
         # a transmitting/carrier parent may be HET or (consanguinity, common-ish recessive allele,
         # affected parent) HOM_ALT — both carry a transmissible alt; QC per its own genotype.
-        def carrier_ok(idx, gtype):
+        def carrier_ok(idx, gtype, gq_value=None):
             if gtype == G.HET:
-                return G.sample_qc(v, idx, thr, "het")
+                return G.sample_qc(v, idx, thr, "het", gq_value=gq_value)
             if gtype == G.HOM_ALT:
-                return G.sample_qc(v, idx, thr, "hom_alt")
+                return G.sample_qc(v, idx, thr, "hom_alt", gq_value=gq_value)
             return False
 
         # ---- autosomal homozygous recessive: HOM_ALT child, both parents carriers (HET or HOM_ALT) ----
@@ -609,10 +648,15 @@ def screen_trio(trio_id, vcf, gt: Trio, cfg):
         #      transmits his Y (not his X) to a son, so his chrX genotype is IRRELEVANT and is not
         #      required — an affected/carrier father or a father chrX no-call must not drop the call. ----
         if male_x_chrx and gc == G.HOM_ALT and gmm in (G.HET, G.HOM_ALT):
-            if G.sample_qc(v, c, thr, "hom_alt") and carrier_ok(m, gmm) and rare(v, rec_max):
+            if (G.sample_qc(v, c, thr, "hom_alt", gq_value=xq(c)) and carrier_ok(m, gmm, xq(m))
+                    and rare(v, rec_max)):
                 r = base_row(trio_id, v, gt, "x_linked_recessive", cfg=cfg)
+                # ...on the father's PL-favoured class: a het the prior imputed to explain the
+                # son's 1/1 (his reads all reference) no longer credits him with the allele
                 if gd in (G.HET, G.HOM_ALT):
                     r["flags"] = (r["flags"] + ";" if r["flags"] else "") + "father_carries_x_allele"
+                for fl in x_flags:
+                    r["flags"] = (r["flags"] + ";" if r["flags"] else "") + fl
                 rows.append(tag_strict(r, v))
 
         # ---- X-linked recessive, affected female: HOM_ALT daughter, carrier mother, hemizygous-

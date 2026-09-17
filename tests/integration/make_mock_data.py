@@ -168,6 +168,16 @@ add(file="B", chrom="chrX", pos=2781600, gene="GENEX", csq="missense_variant", i
     af=1e-4,
     gts={"CH_B": ("1/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("0/1", 99, 40),
          "SIB_B": ("0/0", 99, 40)})
+# 10b) THE MALE-X RESCUE: CH_B's REFINED GT is 0/1 (the diploid prior: a 1/1 son of a 0/0
+#      father is a de novo under it), his reads are all alt and his PL says 1/1, carrier mother
+#      -> x_linked_recessive with child_gt_refined_discordant. This record ALSO guards Step 0: a
+#      GT-based chrX scan would count it as a het (1 of 6 -> ratio 0.167 > 0.10 -> CH_B reads
+#      FEMALE and every CH_B call gets sex_discordant_inference); the PL-based scan reads 0/6.
+add(file="B", chrom="chrX", pos=2782100, gene="GENEXPL", csq="missense_variant", impact="MODERATE",
+    af=1e-4,
+    gts={"CH_B": ("0/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("0/1", 99, 40),
+         "SIB_B": ("0/0", 99, 40)},
+    adov={"CH_B": "0,40"}, plov={"CH_B": "300,120,0"})
 # 11-13) chrX filler (common) so CH_B is inferred MALE (hemizygous alt -> low het ratio)
 for i, p in enumerate((2781700, 2781800, 2781900)):
     add(file="B", chrom="chrX", pos=p, gene=f"XFILL{i}", csq="missense_variant", impact="MODERATE",

@@ -18,7 +18,8 @@ flags trios that fail any of them:
     (the PED always states those): a male in the mother slot is the one direct detector of
     transposed parents. The inference is a HEURISTIC with a callset-dependent cutoff
     (`qc.x_het_male_max`): a diploid-called male's non-PAR chrX het ratio often sits well above
-    the 0.10 default, so the report carries every member's raw ratio (`x_het_ratio`,
+    the 0.10 default (mapping artifacts; the refinement prior's push of rare hemizygous alts to
+    het is removed by counting the PL-favoured genotype), so the report carries every member's raw ratio (`x_het_ratio`,
     `dad_x_het_ratio`, `mom_x_het_ratio`) for calibration, and a cohort where most fathers read
     female is reported as a miscalibrated cutoff, not as mass transposition.
   * chrY COVERAGE sex evidence for the proband — secondary and AUDIT-ONLY (it decides nothing:
@@ -253,6 +254,13 @@ def scan_sex(vcf_path, sample_id, thr, max_x):
     fully called genotype count: a filtered chrX record is enriched for exactly the mapping
     artifacts that render a hemizygous male as het, and cyvcf2's default reads a half-called
     `1/.` as HET — both inflate the male het ratio toward the female side of the cutoff.
+
+    The genotype counted is the PL-FAVOURED one where FORMAT/PL is present and informative
+    (`genotype.gt_from_pl`), the refined GT otherwise, and the GQ filter uses the PL-derived
+    quality: the genotype refinement's diploid pedigree prior pushes a male's rare hemizygous
+    alt calls to 0/1 (a 1/1 son of a 0/0 father is a de novo under that prior), which is one
+    of the reasons a diploid-called male's het ratio sat far above the cutoff. Mapping
+    artifacts remain, so `qc.x_het_male_max` still has to be calibrated on the run.
     """
     vcf = VCF(vcf_path, strict_gt=True)      # a half-called 1/. is UNKNOWN, never HET
     ci = {s: i for i, s in enumerate(vcf.samples)}.get(sample_id)
@@ -279,10 +287,14 @@ def scan_sex(vcf_path, sample_id, thr, max_x):
             continue
         if v.FILTER:                  # cyvcf2: None for PASS and '.'; anything else is filtered
             continue
-        gq, dp = G.gq(v, ci), G.dp(v, ci)
+        gq, dp = G.hemi_gq(v, ci), G.dp(v, ci)     # PL-derived GQ where PL exists (prior-free)
         if gq is None or gq < thr.min_gq or dp is None or dp < thr.min_dp:
             continue
         gt = v.gt_types[ci]
+        if gt != G.UNKNOWN:
+            from_pl = G.gt_from_pl(G.pl(v, ci))
+            if from_pl is not None:
+                gt = from_pl
         if gt == HET:
             x_het += 1
         elif gt == HOM_ALT:

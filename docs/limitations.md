@@ -328,14 +328,18 @@ limit, not a wrong call. See [inheritance_and_genotype_qc.md](inheritance_and_ge
   `y_female_reads`, `y_site_mixed_reads`, the male-het rule and the gnomAD chrY gate catch. A
   recurrence of one inherited Y variant across unrelated probands is haplogroup sharing unless
   its per-male frequency is tiny — read `p_recurrence_ylinked` with that in mind.
-- **The same diploid-prior distortion reaches male chrX, and there it is NOT yet corrected.** A
-  true hemizygous alt in a son whose father is `0/0` is a de novo under the diploid prior (1e-8),
-  so the refined GT is pushed to `0/1` unless the son's PL margin (~3 per all-alt read) beats the
-  prior — roughly 26 all-alt reads, more than a male's chrX carries at 30x — and Step 5 then files
-  it under `no_row.male_x_het`. The Y model's `genotype.hemi_call` is the ready-made fix; adopting
-  it for `male_x_chrx` is a deliberate follow-up, and the same effect inflates the chrX het ratio
-  Step 0 infers sex from for rare alleles (part of why `qc.x_het_male_max` reads every male as
-  female on this callset — which the chrY coverage check now exposes as `xy_agree=0`).
+- **The diploid-prior correction depends on FORMAT/PL being present, and applies to a male's
+  chrX and chrY only.** On a male's non-PAR chrX and on chrY Step 5 reads every member's genotype
+  class from PL and Step 0 counts the PL-favoured genotype for the chrX het ratio; a callset
+  delivered without PL falls back to the refined GT and inherits the prior's distortions (a son
+  pushed to `0/1` is then `no_row.male_x_het` / `male_y_het`, a het imputed into the father credits
+  him with `father_carries_x_allele`). A female's chrX and every autosome stay on the refined
+  calls, where the diploid prior is valid; the `*_gt_pl` columns still show the pre-refinement
+  genotype there for review. The PL argmin ignores the population prior as well as the pedigree
+  prior, so at very low depth it is slightly less confident than GATK's refined call would be on a
+  genuinely diploid site — which is why it is used only where the refined call is known to be
+  wrong. Mapping artifacts on a male's chrX (X-transposed and ampliconic sequence) still produce
+  genuine mixed reads, so `qc.x_het_male_max` still needs calibrating on the run's known males.
 
 ## Reading a negative result
 

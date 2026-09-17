@@ -226,7 +226,11 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   het calls; kid sex is the trios file's stated `kid_sex` (canonical; every call carries
   `child_sex`/`child_sex_source`), inferred from chrX heterozygosity only when the PED leaves it
   unknown, and a stated sex the inference disagrees with is kept and flagged
-  `sex_discordant_inference`. **X-dominant is not
+  `sex_discordant_inference`. On a male's non-PAR chrX every member's genotype is read from
+  the PRE-REFINEMENT likelihoods (FORMAT/PL), as on chrY: the refinement's diploid pedigree prior
+  pushes a son's hemizygous alt to `0/1` when his father is `0/0`, which the refined GT would
+  file as a male X het; the overruled member is flagged `*_gt_refined_discordant`, QC runs on the
+  PL-derived GQ, and the `hiConfDeNovo` tag does not gate `denovo_x_hemi`. **X-dominant is not
   a separate mode** (a female's X het is emitted as `dominant`, a male hemizygote as
   `x_linked_recessive`).
 - **Y-linked** (`y_linked`, `inheritance.emit_y_linked` **true**): a male proband's non-PAR chrY
@@ -247,7 +251,8 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   the less-curated trios via a **Mendelian-error rate < 2%** (`qc.mie_max`) measured on the first
   `qc.max_sites` (**200000**) QC-passing autosomal biallelic sites — a capped scan, not genome-wide —
   chrX-inferred sex vs. PED (het-ratio **< 0.10 → male**, `qc.x_het_male_max`, over FILTER-passing
-  fully-called non-PAR sites; needs **≥ 20** informative chrX calls, `qc.sex_min_sites`, else sex
+  fully-called non-PAR sites, counting the PL-favoured genotype where FORMAT/PL exists so the
+  refinement prior cannot inflate a male's het ratio; needs **≥ 20** informative chrX calls, `qc.sex_min_sites`, else sex
   is left unknown — a dedicated indexed chrX pass, capped by the same `max_sites`, so the
   autosomal MIE cap can't starve it) **for all three members**. The proband's PED sex (the trios
   file's `kid_sex`) is CANONICAL: the inference fills in only an unknown one (`sex_source`), and a

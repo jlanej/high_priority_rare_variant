@@ -374,7 +374,10 @@ filters:
   denovo:
     # De novo detection is SECONDARY here (retained only for cross-reference).
     # Dedicated de novo filtering + review lives in separate bespoke machinery.
-    use_hiconf_tag: true          # GATK hiConfDeNovo (child-membership checked)
+    use_hiconf_tag: true          # GATK hiConfDeNovo (child-membership checked) — gates AUTOSOMAL de
+                                  #   novos only: on a male's non-PAR chrX and on chrY GATK computes
+                                  #   it on the refined diploid genotypes the pedigree prior distorted,
+                                  #   so there it is reported, never a gate
     parent_max_alt_ad: 1          # parental "cleanliness"
     parent_min_dp: 10
     # (require_gnomad_absent_or_singleton removed: it was implemented as nhomalt > 1 — a
@@ -408,7 +411,9 @@ qc:
   # mothers form two separated modes; put the cutoff in the gap (typically 0.3-0.5 on diploid
   # WGS) and rm qc_report.tsv.done. Step 0 WARNs when more fathers read female than male. A
   # sex stated in the trios file is unaffected by this knob (it is canonical; the inference only
-  # checks it); a proband WITHOUT one has its chrX ploidy judged on this inference in Step 5.
+  # checks it); a proband WITHOUT one has its chrX ploidy judged on this inference in Step 5. The
+  # ratio counts the PL-favoured genotype where FORMAT/PL exists, so the refinement prior's push of
+  # a male's rare hemizygous alts to 0/1 no longer inflates it; mapping artifacts still do.
   x_het_male_max: 0.10
   sex_min_sites: 20               # need >= this many informative chrX calls to infer sex (else unknown)
                                   # (inferred for all THREE members: a father reading female or a
