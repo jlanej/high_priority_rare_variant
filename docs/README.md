@@ -282,7 +282,11 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   `sex_match_y` vs the PED, `xy_agree` vs the chrX inference, `y_flag`), WARNed on any disagreement,
   audited (medians by PED sex) — and it decides nothing: the PED is canonical, the chrX inference
   fills in an unknown, `overall_pass` does not read it. Genotypes are never read for the proband or
-  mother (on chrY the refined GT is the diploid prior's opinion).
+  mother (on chrY the refined GT is the diploid prior's opinion). Each member's RAW haploid-scaled
+  coverage (`*_y_cov_haploid`, median depth over every non-PAR chrY record over half the autosomal
+  median; a male ~1, a female ~0) checks BOTH PARENTS' roles under the same bands (`dad_y_sex`,
+  `mom_y_sex`, `parent_sex_flag_y` — a transposed pair reads dad=2/mom=1) and is the proband's
+  fallback basis (`y_basis=raw`) when the father yields no usable anchors.
 - **Failure mode**: gnomAD priors in CalculateGenotypePosteriors can suppress genuine ultra-rare
   pathogenic calls — cross-check pre-refinement `PL` for top candidates.
 

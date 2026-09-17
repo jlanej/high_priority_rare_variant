@@ -168,7 +168,16 @@ warned on any disagreement and recorded in the audit with the median ratio by pe
 the mothers' median; it decides nothing, since the pedigree is canonical and the chrX inference is
 what fills in an unknown, and it does not enter `overall_pass`. Genotypes are deliberately not read
 for the proband or the mother on chrY, because after genotype refinement a chrY genotype is the
-diploid pedigree prior's opinion (Section 11).
+diploid pedigree prior's opinion (Section 11). Beside the anchored statistic, each member's raw
+chrY coverage is reported: the median depth over every FILTER-passing non-pseudoautosomal chrY
+record, as a fraction of half that member's autosomal median depth (`kid_y_cov_haploid`,
+`dad_y_cov_haploid`, `mom_y_cov_haploid`), so that a male reads close to one and a female close
+to zero on the same scale. Under the same bands this reads both parents' sex against their roles
+(`dad_y_sex`, `mom_y_sex`, `parent_sex_flag_y`), the one parent check that involves no
+callset-dependent cutoff; a transposed father and mother read as dad=2 and mom=1, and the warning
+names a transposition only for that pattern. When the father yields fewer than
+`qc.y_min_anchor_sites` anchors, the proband is called on this raw ratio instead
+(`y_basis=raw`), with the mother's raw ratio as the control.
 
 The proband's sex is resolved by one precedence rule shared by Steps 0, 5 and 6: a sex stated in
 the trios file is canonical, and the inference fills in only when the pedigree leaves it unknown.

@@ -31,7 +31,12 @@ flags trios that fail any of them:
     pedigree or with the chrX inference, audited — and never folded into `overall_pass`. A few
     mismapped reads cannot read a female as male: the call is a median over
     >= `qc.y_min_anchor_sites` sites, and a trio whose mother herself shows chrY coverage is
-    refused a call (`mother_y_coverage`) rather than trusted.
+    refused a call (`mother_y_coverage`) rather than trusted. Beside it, each member's RAW chrY
+    coverage — the median depth over every non-PAR chrY record, as a fraction of half the
+    member's autosomal depth (`*_y_cov_haploid`; a male ~1, a female ~0) — checks BOTH PARENTS'
+    sex against their roles (`dad_y_sex`, `mom_y_sex`, `parent_sex_flag_y`): the one direct
+    detector of a transposed pair that does not depend on a chrX cutoff, and the fallback
+    basis for the proband's call when the father yields no usable anchors (`y_basis=raw`).
   * Per-member genotype no-call rate on the scanned sites. A jointly genotyped trio carries an
     affirmative `0/0` for a non-carrier parent; a merge of single-sample callsets carries `./.`
     there instead, and Step 5 then loses every de novo and marks every inherited call
@@ -136,20 +141,30 @@ def scan_y(vcf_path, kid, dad, mom, thr, max_y, min_reads):
         vcf.close()
         return None
     c, d, m = idx[kid], idx[dad], idx[mom]
-    out = {"anchors": 0, "kid_dp": [], "dad_dp": [], "mom_dp": [], "kid_cov": 0, "mom_cov": 0}
+    out = {"anchors": 0, "kid_dp": [], "dad_dp": [], "mom_dp": [], "kid_cov": 0, "mom_cov": 0,
+           # RAW coverage: every member's depth at EVERY passing non-PAR chrY record, whoever
+           # drove the record. A male has reads at (nearly) all of them, a female at few — the
+           # basis for checking the PARENTS' sex against their roles, which the father-anchored
+           # statistic above cannot do (it presumes the father slot holds a male).
+           "records": 0, "kid_all": [], "dad_all": [], "mom_all": []}
     for v in _region_iter(vcf, y):
         if not G.is_y_nonpar(v) or v.FILTER:
             continue
+        kd, dd, md = (G.dp(v, i) or 0 for i in (c, d, m))
+        if not max_y or out["records"] < max_y:
+            out["records"] += 1
+            out["kid_all"].append(kd)
+            out["dad_all"].append(dd)
+            out["mom_all"].append(md)
         if G.hemi_call(v, d)[0] != G.HEMI_ALT or not G.hemi_qc(v, d, thr, "alt"):
             continue
         out["anchors"] += 1
-        kd, dd, md = (G.dp(v, i) or 0 for i in (c, d, m))
         out["kid_dp"].append(kd)
         out["dad_dp"].append(dd)
         out["mom_dp"].append(md)
         out["kid_cov"] += kd >= min_reads
         out["mom_cov"] += md >= min_reads
-        if max_y and out["anchors"] >= max_y:
+        if max_y and out["anchors"] >= max_y and out["records"] >= max_y:
             break
     vcf.close()
     return out
@@ -162,6 +177,46 @@ def y_cov_ratio(member_y_med, member_auto_med, dad_y_med, dad_auto_med):
     if member_y_med is None or not member_auto_med or not dad_auto_med or not dad_y_med:
         return None
     return (member_y_med / member_auto_med) / (dad_y_med / dad_auto_med)
+
+
+def y_cov_haploid(member_y_all_med, member_auto_med):
+    """A member's median depth over every non-PAR chrY record as a fraction of HALF the member's
+    autosomal median — the haploid expectation — so a male reads ~1 (his single Y at half his
+    autosomal depth) and a female ~0, on the same scale as the father-normalised anchor ratio.
+    None when either median is unavailable."""
+    if member_y_all_med is None or not member_auto_med:
+        return None
+    return member_y_all_med / (0.5 * member_auto_med)
+
+
+def sex_from_y_cov(ratio, male_min, female_max):
+    """'1' / '2' / None from a haploid-scaled chrY coverage ratio (the same bands as the
+    proband's call)."""
+    if ratio is None:
+        return None
+    if ratio >= male_min:
+        return "1"
+    if ratio <= female_max:
+        return "2"
+    return None
+
+
+def parent_y_diagnosis(dad_y_sex, mom_y_sex) -> str:
+    """What a parent-sex mismatch on chrY COVERAGE can mean — the same taxonomy as the chrX
+    diagnosis, without the cutoff caveat: chrY coverage is near-binary, so a father with no Y
+    coverage is a female (or a Y-less) sample in the father slot, not a calibration artifact."""
+    if dad_y_sex == "2" and mom_y_sex == "1":
+        return ("the father slot has NO chrY coverage and the mother slot has FULL chrY coverage: "
+                "the trios-file father/mother roles for this trio are transposed (every "
+                "parent-of-origin call would be inverted, and Step 5's Y-linked model anchors on "
+                "the wrong parent)")
+    if dad_y_sex == "2":
+        return ("the father slot has no chrY coverage while the mother slot reads female too: a "
+                "sample swap/mislabel in the father slot, or a father with no Y (46,XX male, "
+                "Y loss) — the Y-linked model has no transmitter to anchor on for this trio")
+    return ("the mother slot has chrY coverage while the father slot reads male too: a sample "
+            "swap/mislabel in the mother slot, or a male sample in it — her reads are not a "
+            "female control, so no chrY sex call is made for the proband")
 
 
 def infer_sex_y(kid_ratio, mom_ratio, n_anchor, min_anchor, male_min, female_max):
@@ -324,7 +379,8 @@ def qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff=0.10, sex_min_sites=20, y_
     auto_med = {r: _med(auto_dp[r]) for r in ("kid", "dad", "mom")}
     if ys is not None:
         ys = dict(ys, kid_med=_med(ys["kid_dp"]), dad_med=_med(ys["dad_dp"]),
-                  mom_med=_med(ys["mom_dp"]))
+                  mom_med=_med(ys["mom_dp"]), kid_all_med=_med(ys["kid_all"]),
+                  dad_all_med=_med(ys["dad_all"]), mom_all_med=_med(ys["mom_all"]))
 
     return {
         "n_sites": considered, "mie_errors": errors, "mie_rate": mie_rate,
@@ -342,31 +398,66 @@ def qc_trio(vcf_path, ped, thr, max_sites, sex_cutoff=0.10, sex_min_sites=20, y_
 
 
 def y_evidence(res, min_anchor, male_min, female_max):
-    """Fold qc_trio's chrY scan into the report columns (blank = no evidence, never a value)."""
+    """Fold qc_trio's chrY scan into the report columns (blank = no evidence, never a value).
+
+    Two bases for the proband's call: `anchor` — the father-normalised depth at his hemizygous
+    sites (the cleanest, used whenever >= min_anchor anchors exist) — and `raw` — the haploid-
+    scaled depth over every chrY record, the fallback when the father yields no usable anchors
+    (a female or Y-less sample in the father slot, or an exome-sized callset). The same bands
+    apply to both, since both read ~1 for a male and ~0 for a female; `y_basis` says which. The
+    parents' raw ratios check their roles regardless (`dad_y_sex` / `mom_y_sex`).
+    """
     ys, am = res.get("y"), res.get("auto_dp_median") or {}
-    out = {"y_anchor_sites": "", "kid_y_dp_median": "", "dad_y_dp_median": "", "mom_y_dp_median": "",
-           "y_cov_ratio": "", "y_covered_frac": "", "mom_y_cov_ratio": "", "y_inferred_sex": "",
-           "y_flag": "no_chry_records", "_kid_ratio": None, "_mom_ratio": None}
+    out = {"y_anchor_sites": "", "y_records": "", "kid_y_dp_median": "", "dad_y_dp_median": "",
+           "mom_y_dp_median": "", "y_cov_ratio": "", "y_covered_frac": "", "mom_y_cov_ratio": "",
+           "kid_y_cov_haploid": "", "dad_y_cov_haploid": "", "mom_y_cov_haploid": "",
+           "dad_y_sex": "", "mom_y_sex": "", "parent_sex_flag_y": "",
+           "y_inferred_sex": "", "y_basis": "", "y_flag": "no_chry_records",
+           "_kid_ratio": None, "_mom_ratio": None, "_kid_h": None, "_dad_h": None, "_mom_h": None}
     if ys is None:
         out["y_flag"] = "no_chry_contig"
         return out
-    n = ys["anchors"]
-    out["y_anchor_sites"] = n
-    if n == 0:
-        out["y_flag"] = "father_y_anchors_low"
+    n, nrec = ys["anchors"], ys["records"]
+    out["y_anchor_sites"], out["y_records"] = n, nrec
+    if nrec == 0:
         return out
-    kid_r = y_cov_ratio(ys["kid_med"], am.get("kid"), ys["dad_med"], am.get("dad"))
-    mom_r = y_cov_ratio(ys["mom_med"], am.get("mom"), ys["dad_med"], am.get("dad"))
-    sex, flag = infer_sex_y(kid_r, mom_r, n, min_anchor, male_min, female_max)
+    # raw haploid-scaled coverage for all three members, and the parents' Y-derived sex
+    h = {r: y_cov_haploid(ys.get(f"{r}_all_med"), am.get(r)) for r in ("kid", "dad", "mom")}
+    dad_sex = sex_from_y_cov(h["dad"], male_min, female_max) if nrec >= min_anchor else None
+    mom_sex = sex_from_y_cov(h["mom"], male_min, female_max) if nrec >= min_anchor else None
     out.update({
-        "kid_y_dp_median": f"{ys['kid_med']:.4g}", "dad_y_dp_median": f"{ys['dad_med']:.4g}",
-        "mom_y_dp_median": f"{ys['mom_med']:.4g}",
-        "y_cov_ratio": ("" if kid_r is None else f"{kid_r:.3g}"),
-        "y_covered_frac": f"{ys['kid_cov'] / n:.3g}",
-        "mom_y_cov_ratio": ("" if mom_r is None else f"{mom_r:.3g}"),
-        "y_inferred_sex": sex or "", "y_flag": flag,
-        "_kid_ratio": kid_r, "_mom_ratio": mom_r,
+        "kid_y_cov_haploid": ("" if h["kid"] is None else f"{h['kid']:.3g}"),
+        "dad_y_cov_haploid": ("" if h["dad"] is None else f"{h['dad']:.3g}"),
+        "mom_y_cov_haploid": ("" if h["mom"] is None else f"{h['mom']:.3g}"),
+        "dad_y_sex": dad_sex or "", "mom_y_sex": mom_sex or "",
+        # only a POSITIVE reading against the role counts (too few records = no expectation)
+        "parent_sex_flag_y": ("1" if (dad_sex == "2" or mom_sex == "1") else
+                              "0" if (dad_sex or mom_sex) else ""),
+        "_kid_h": h["kid"], "_dad_h": h["dad"], "_mom_h": h["mom"],
     })
+    # the proband: father-anchored when the anchors suffice, raw otherwise
+    if n >= min_anchor:
+        kid_r = y_cov_ratio(ys["kid_med"], am.get("kid"), ys["dad_med"], am.get("dad"))
+        mom_r = y_cov_ratio(ys["mom_med"], am.get("mom"), ys["dad_med"], am.get("dad"))
+        basis = "anchor"
+    elif nrec >= min_anchor and h["kid"] is not None:
+        kid_r, mom_r, basis = h["kid"], h["mom"], "raw"
+    else:
+        kid_r, mom_r, basis = None, None, ""
+    sex, flag = infer_sex_y(kid_r, mom_r, (nrec if basis == "raw" else n), min_anchor,
+                            male_min, female_max)
+    if basis == "" and n < min_anchor:
+        flag = "father_y_anchors_low"
+    if n:
+        out.update({"kid_y_dp_median": f"{ys['kid_med']:.4g}",
+                    "dad_y_dp_median": f"{ys['dad_med']:.4g}",
+                    "mom_y_dp_median": f"{ys['mom_med']:.4g}",
+                    "y_covered_frac": f"{ys['kid_cov'] / n:.3g}"})
+        if basis == "anchor":
+            out.update({"y_cov_ratio": ("" if kid_r is None else f"{kid_r:.3g}"),
+                        "mom_y_cov_ratio": ("" if mom_r is None else f"{mom_r:.3g}")})
+    out.update({"y_inferred_sex": sex or "", "y_basis": (basis if sex else ""), "y_flag": flag,
+                "_kid_ratio": kid_r, "_mom_ratio": mom_r})
     return out
 
 
@@ -444,18 +535,27 @@ def main(argv=None) -> int:
             # chrY coverage evidence (audit-only; see the module docstring): the father-anchored
             # depth ratios, the resulting call, and its two comparisons — against the PED sex
             # (sex_match_y, three-state like sex_match) and against the chrX inference (xy_agree)
-            "y_anchor_sites", "kid_y_dp_median", "dad_y_dp_median", "mom_y_dp_median",
-            "y_cov_ratio", "y_covered_frac", "mom_y_cov_ratio", "y_inferred_sex", "sex_match_y",
-            "xy_agree", "y_flag",
+            "y_anchor_sites", "y_records", "kid_y_dp_median", "dad_y_dp_median", "mom_y_dp_median",
+            "y_cov_ratio", "y_covered_frac", "mom_y_cov_ratio", "y_inferred_sex", "y_basis",
+            "sex_match_y", "xy_agree", "y_flag",
+            # ...and the RAW haploid-scaled chrY coverage of all three members, from which BOTH
+            # PARENTS' sex is checked against their roles (a transposed pair reads dad=2/mom=1)
+            "kid_y_cov_haploid", "dad_y_cov_haploid", "mom_y_cov_haploid", "dad_y_sex", "mom_y_sex",
+            "parent_sex_flag_y",
             "overall_pass"]
     n_fail = n_done = 0
     n_flag = {"parent_sex": 0, "nocall": 0, "sex_discordant": 0, "sex_y_discordant": 0,
-              "xy_disagree": 0, "mother_y_coverage": 0}
+              "xy_disagree": 0, "mother_y_coverage": 0, "parent_sex_y": 0}
     n_source = {"ped": 0, "inferred": 0, "none": 0}
     n_y_sex = {"1": 0, "2": 0, "": 0}
+    n_y_basis = {"anchor": 0, "raw": 0}
     # the chrY calibration evidence: proband ratios by PED sex, and the mothers' (known females)
     y_ratio_by_ped = {"1": [], "2": []}
     mother_y_ratios, father_y_anchors = [], []
+    # ...and the parents' raw haploid coverage: fathers are known males, mothers known females
+    n_father_y = {"1": 0, "2": 0}
+    n_mother_y = {"1": 0, "2": 0}
+    father_y_hap, mother_y_hap = [], []
     # calibration evidence for qc.x_het_male_max: fathers are known males, mothers known females
     n_father = {"1": 0, "2": 0}
     n_mother = {"1": 0, "2": 0}
@@ -534,9 +634,19 @@ def main(argv=None) -> int:
             xy_agree = ("" if not ysex or res["inferred_sex"] not in ("1", "2") else
                         "1" if ysex == res["inferred_sex"] else "0")
             n_y_sex[ysex] += 1
+            if ye["y_basis"]:
+                n_y_basis[ye["y_basis"]] += 1
             n_flag["sex_y_discordant"] += sex_match_y == "0"
             n_flag["xy_disagree"] += xy_agree == "0"
             n_flag["mother_y_coverage"] += ye["y_flag"] == "mother_y_coverage"
+            n_flag["parent_sex_y"] += ye["parent_sex_flag_y"] == "1"
+            for sx, tally in ((ye["dad_y_sex"], n_father_y), (ye["mom_y_sex"], n_mother_y)):
+                if sx in tally:
+                    tally[sx] += 1
+            if ye["_dad_h"] is not None:
+                father_y_hap.append(ye["_dad_h"])
+            if ye["_mom_h"] is not None:
+                mother_y_hap.append(ye["_mom_h"])
             if ye["_kid_ratio"] is not None and ped_sex in y_ratio_by_ped:
                 y_ratio_by_ped[ped_sex].append(ye["_kid_ratio"])
             if ye["_mom_ratio"] is not None:
@@ -581,12 +691,17 @@ def main(argv=None) -> int:
                 "dad_y_dp_median": ye["dad_y_dp_median"], "mom_y_dp_median": ye["mom_y_dp_median"],
                 "y_cov_ratio": ye["y_cov_ratio"], "y_covered_frac": ye["y_covered_frac"],
                 "mom_y_cov_ratio": ye["mom_y_cov_ratio"], "y_inferred_sex": ysex,
+                "y_basis": ye["y_basis"], "y_records": ye["y_records"],
                 "sex_match_y": sex_match_y, "xy_agree": xy_agree, "y_flag": ye["y_flag"],
+                "kid_y_cov_haploid": ye["kid_y_cov_haploid"], "dad_y_cov_haploid": ye["dad_y_cov_haploid"],
+                "mom_y_cov_haploid": ye["mom_y_cov_haploid"], "dad_y_sex": ye["dad_y_sex"],
+                "mom_y_sex": ye["mom_y_sex"], "parent_sex_flag_y": ye["parent_sex_flag_y"],
             }
             out.write("\t".join(str(row[c]) for c in cols) + "\n")
             # Step 0 recorded nothing in the audit before; the flags are the useful part
             for metric in ("overall_pass", "mie_flag", "sex_match", "parent_sex_flag",
-                           "contam_flag", "nocall_flag", "sex_match_y", "xy_agree"):
+                           "contam_flag", "nocall_flag", "sex_match_y", "xy_agree",
+                           "parent_sex_flag_y"):
                 audit.record("00_qc", metric, row[metric], scope=tid)
             audit.record("00_qc", f"sex_source.{sex_source}", 1, scope=tid)
             audit.record("00_qc", f"y_inferred_sex.{ysex or 'none'}", 1, scope=tid)
@@ -611,6 +726,16 @@ def main(argv=None) -> int:
                     "and chrY coverage the more robust signal; a stated trios-file sex is unaffected, "
                     "but a proband WITHOUT one has its chrX ploidy judged on the chrX inference in "
                     "Step 5 — check this trio.\n")
+            if ye["parent_sex_flag_y"] == "1":
+                sys.stderr.write(
+                    f"WARN: {tid}: PARENT SEX MISMATCH ON chrY COVERAGE — the father slot reads "
+                    f"{ye['dad_y_sex'] or '?'} (dad_y_cov_haploid {ye['dad_y_cov_haploid'] or '?'}), "
+                    f"the mother slot reads {ye['mom_y_sex'] or '?'} (mom_y_cov_haploid "
+                    f"{ye['mom_y_cov_haploid'] or '?'}; 1=male, 2=female, a male ~1, a female ~0 over "
+                    f"{ye['y_records']} chrY records): "
+                    f"{parent_y_diagnosis(ye['dad_y_sex'], ye['mom_y_sex'])}. Unlike the chrX "
+                    "parent check this does not depend on a cutoff; overall_pass is unchanged "
+                    "(audit-only).\n")
             if ye["y_flag"] == "mother_y_coverage":
                 sys.stderr.write(
                     f"WARN: {tid}: the MOTHER shows chrY coverage (mom_y_cov_ratio "
@@ -655,6 +780,17 @@ def main(argv=None) -> int:
     audit.record("00_qc", "trios_sex_match_y_discordant", n_flag["sex_y_discordant"])
     audit.record("00_qc", "trios_xy_disagree", n_flag["xy_disagree"])
     audit.record("00_qc", "trios_mother_y_coverage", n_flag["mother_y_coverage"])
+    audit.record("00_qc", "trios_parent_sex_flag_y", n_flag["parent_sex_y"])
+    audit.record("00_qc", "y_sex_basis_anchor", n_y_basis["anchor"])
+    audit.record("00_qc", "y_sex_basis_raw", n_y_basis["raw"])
+    audit.record("00_qc", "fathers_y_male", n_father_y["1"])
+    audit.record("00_qc", "fathers_y_female", n_father_y["2"])
+    audit.record("00_qc", "mothers_y_female", n_mother_y["2"])
+    audit.record("00_qc", "mothers_y_male", n_mother_y["1"])
+    if father_y_hap:
+        audit.record("00_qc", "father_y_cov_haploid_median", f"{statistics.median(father_y_hap):.3g}")
+    if mother_y_hap:
+        audit.record("00_qc", "mother_y_cov_haploid_median", f"{statistics.median(mother_y_hap):.3g}")
     for sx, lbl in (("1", "ped_male"), ("2", "ped_female")):
         if y_ratio_by_ped[sx]:
             audit.record("00_qc", f"proband_y_cov_ratio_median.{lbl}",
@@ -682,7 +818,10 @@ def main(argv=None) -> int:
                      f"{n_y_sex['2']}, no call {n_y_sex['']}; contradicting the pedigree "
                      f"{n_flag['sex_y_discordant']}, contradicting the chrX inference "
                      f"{n_flag['xy_disagree']}, mothers with chrY coverage "
-                     f"{n_flag['mother_y_coverage']}"
+                     f"{n_flag['mother_y_coverage']}; parents' roles contradicted by chrY "
+                     f"coverage {n_flag['parent_sex_y']} (fathers reading male {n_father_y['1']} / "
+                     f"female {n_father_y['2']}, mothers reading female {n_mother_y['2']} / male "
+                     f"{n_mother_y['1']})"
                      + (f"; median proband y_cov_ratio: PED-male "
                         f"{statistics.median(y_ratio_by_ped['1']):.3g}" if y_ratio_by_ped["1"] else "")
                      + (f", PED-female {statistics.median(y_ratio_by_ped['2']):.3g}"

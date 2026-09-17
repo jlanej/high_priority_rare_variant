@@ -183,8 +183,9 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
                "from the proband's depth at the father's own hemizygous chrY sites, y_cov_ratio "
                "~1 for a son / ~0 for a daughter, the mother's mom_y_cov_ratio as the in-trio "
                "female control, sex_match_y vs the pedigree and xy_agree vs the chrX inference; "
-               "it decides nothing and never fails overall_pass), and contamination (verifyBamID "
-               "FREEMIX or VCF-only CHARR) — the garbage-in guard."),
+               "it decides nothing and never fails overall_pass; each member's raw haploid-scaled "
+               "coverage *_y_cov_haploid checks both parents' roles, parent_sex_flag_y), and "
+               "contamination (verifyBamID FREEMIX or VCF-only CHARR) — the garbage-in guard."),
         ("Audit counts", "Per-step input/output counts and funnel tallies (what went where, and why)."),
     ]:
         line(nm, desc)

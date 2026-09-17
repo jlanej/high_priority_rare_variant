@@ -168,7 +168,13 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   never fails `overall_pass`; the statistic is a median, and a mother above `y_cov_female_max`
   refuses the call (`mother_y_coverage`), so a few mismapped reads cannot read a female as male.
   Genotypes are never read for the proband or mother there — on chrY the refined GT is the
-  diploid prior's opinion.
+  diploid prior's opinion. Beside it, each member's RAW haploid-scaled chrY coverage
+  (`kid_/dad_/mom_y_cov_haploid`: the median depth over every non-PAR chrY record over half the
+  autosomal median — a male ~1, a female ~0) checks BOTH PARENTS' sex against their roles
+  (`dad_y_sex`, `mom_y_sex`, `parent_sex_flag_y`; a transposed pair reads dad=2/mom=1, and the
+  WARN says "transposed" only for that pattern) with no cutoff to calibrate — the one parent
+  check that works on a diploid-called callset — and is the proband's fallback basis
+  (`y_basis=raw`) when the father yields no usable anchors.
 - **Auditing**: every step calls `audit`/`hprv.audit.record` → `audit/counts.tsv`
   (timestamp, step, scope, metric, value; scope = `global` or trio_id). `python -m hprv.audit` assembles
   `audit/summary.md`. Step 3 tags kept variants with `hprv_keep_reason`.

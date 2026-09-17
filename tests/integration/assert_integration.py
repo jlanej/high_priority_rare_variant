@@ -110,9 +110,21 @@ def main(argv=None) -> int:
     check(yf not in ("", "0") and float(yf) < 0.5,
           f"CH_A: a few mismapped reads at a minority of anchors show in y_covered_frac ({yf}) but "
           "cannot move the median — a female with stray chrY reads is not read as male")
-    check(qc.get("CH_A", {}).get("overall_pass") == qc.get("CH_A", {}).get("overall_pass") and
-          all(c in qc.get("CH_B", {}) for c in ("kid_y_dp_median", "dad_y_dp_median", "mom_y_dp_median", "y_flag")),
+    check(all(c in qc.get("CH_B", {}) for c in ("kid_y_dp_median", "dad_y_dp_median", "mom_y_dp_median", "y_flag")),
           "qc_report carries the raw chrY depth medians beside the ratios (the calibration evidence)")
+    # BOTH PARENTS' roles are checked from their RAW haploid-scaled chrY coverage (a male ~1, a
+    # female ~0), independent of any chrX cutoff: every father reads male, every mother female,
+    # and the proband's call is father-anchored (y_basis=anchor) because the anchors suffice
+    for t in ("CH_A", "CH_B"):
+        q = qc.get(t, {})
+        check(q.get("dad_y_sex") == "1" and q.get("mom_y_sex") == "2" and q.get("parent_sex_flag_y") == "0",
+              f"{t}: the father reads male and the mother female from raw chrY coverage (no role contradiction)")
+        check(float(q.get("dad_y_cov_haploid") or 0) > 0.9 and q.get("mom_y_cov_haploid") == "0",
+              f"{t}: dad_y_cov_haploid ~1+ and mom_y_cov_haploid 0")
+        check(q.get("y_basis") == "anchor" and int(q.get("y_records") or 0) >= int(q.get("y_anchor_sites") or 0),
+              f"{t}: the proband's call is father-anchored and y_records >= y_anchor_sites")
+    check(float(qc.get("CH_B", {}).get("kid_y_cov_haploid") or 0) > 0.9 and qc.get("CH_A", {}).get("kid_y_cov_haploid") == "0",
+          "raw haploid coverage: the son reads ~1+, the daughter 0")
 
     # --- Step 5 provenance: the sex each trio's calls were judged under, and who said so ---
     calls_all = rows(os.path.join(W, "candidates.calls.tsv"))
@@ -854,6 +866,10 @@ def main(argv=None) -> int:
     check(am("00_qc", "mother_y_cov_ratio_median") == "0" and am("00_qc", "proband_y_cov_ratio_median.ped_female") == "0"
           and float(am("00_qc", "proband_y_cov_ratio_median.ped_male") or 0) > 0.9,
           "Step 0 audits the chrY calibration medians (mothers 0, PED-female proband 0, PED-male ~1)")
+    check(am("00_qc", "fathers_y_male") == "2" and am("00_qc", "fathers_y_female") == "0"
+          and am("00_qc", "mothers_y_female") == "2" and am("00_qc", "mothers_y_male") == "0"
+          and am("00_qc", "trios_parent_sex_flag_y") == "0" and am("00_qc", "y_sex_basis_anchor") == "2",
+          "Step 0 audits the chrY parent-role check (2 fathers male, 2 mothers female, no contradiction, both probands anchor-based)")
     # GENE7 is ClinVar P/LP at 1.6e-4: the old counter (>= recessive_max) reads 0 for it and the
     # complete one reads 1 — both are recorded so the band it sits in is unambiguous
     check(am("05_inheritance", "clinvar_plp_dropped_ge_recessive_max") == "0",

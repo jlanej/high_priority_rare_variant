@@ -427,6 +427,11 @@ qc:
   # (y_flag=mother_y_coverage) rather than trusted. Reported per trio (y_inferred_sex,
   # y_cov_ratio, y_covered_frac, sex_match_y, xy_agree, mom_y_cov_ratio), WARNed on disagreement
   # with the pedigree or with the chrX inference, and audited; overall_pass does NOT read it.
+  # Beside it, each member's RAW chrY coverage (median depth over every non-PAR chrY record as
+  # a fraction of half the autosomal median, *_y_cov_haploid: a male ~1, a female ~0) checks BOTH
+  # PARENTS' sex against their roles under the same bands (dad_y_sex / mom_y_sex /
+  # parent_sex_flag_y — a transposed pair reads dad=2/mom=1, no cutoff calibration involved) and
+  # is the proband's fallback basis (y_basis=raw) when the father yields no usable anchors.
   y_reads_min_dp: 3               # a member "has reads" at a chrY site at DP >= this (also Step
                                   #   5's y_female_reads flag on the mother — the ONE shared floor)
   y_min_anchor_sites: 50          # fewer father-hemizygous anchor sites -> no Y inference (blank)
