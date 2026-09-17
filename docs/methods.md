@@ -371,7 +371,8 @@ alternate-allele fraction of AD.
 Five predicates are used (defaults from `filters.genotype_qc` and `filters.denovo`). A
 heterozygous carrier requires GQ ≥ 20, depth ≥ 10 and AB within [0.25, 0.75]. A homozygous-alternate
 carrier requires GQ ≥ 20, depth ≥ 10 and AB ≥ 0.90. A de novo child requires GQ ≥ 20, depth ≥ 20
-and AB within [0.25, 0.75]. A homozygous-reference non-carrier requires GQ ≥ 20, depth ≥ 10 and
+(≥ 10 on a hemizygous site, `denovo_min_dp_hemizygous`, since a male's single X or Y carries half
+the autosomal depth) and AB within [0.25, 0.75]. A homozygous-reference non-carrier requires GQ ≥ 20, depth ≥ 10 and
 AB ≤ 0.10. A "clean" parent requires GQ ≥ 20, depth ≥ 10, at most one alternate-supporting read and
 AB ≤ 0.10. The carrier predicates fail when AD is absent; the two non-carrier predicates pass when
 AD is absent, because a GATK reference-block genotype (`GT:DP:GQ:MIN_DP:PL`, no AD) is the ordinary
@@ -408,21 +409,35 @@ homozygous reference, the child passing the de novo predicate, both parents pass
 predicate, and rarity at 1 × 10⁻⁴. A male X-hemizygous de novo requires a homozygous-alternate son
 with a homozygous-reference mother passing the clean-parent predicate (the father's X is not
 transmitted to a son and is not consulted), the son passing the homozygous predicate with depth
-≥ 20, and the same rarity. When the callset header declares `hiConfDeNovo`, the call additionally
+≥ 10 (the hemizygous floor), and the same rarity. When the callset header declares `hiConfDeNovo`, the call additionally
 requires that tag to list this child (`filters.denovo.use_hiconf_tag`); when the header lacks the
 tag, detection rests on genotypes and QC alone. De novo rows carry `review_prior_crosscheck`,
 a reminder that genotype refinement with population priors can suppress an ultra-rare call, and are
 never the pipeline's primary result.
 
-**Homozygous recessive.** An autosomal homozygous-alternate child with both parents carrying the
-allele (heterozygous or homozygous), the child passing the homozygous predicate, each parent passing
-the predicate matching its own genotype, and rarity at 1 × 10⁻². A homozygous child with a
-homozygous-reference parent is not called (a deletion in trans or uniparental disomy is outside the
-model) and is counted as Mendelian-inconsistent.
+**Homozygous recessive.** An autosomal homozygous-alternate child passing the homozygous predicate,
+at rarity 1 × 10⁻². The parents grade the support of the call and never veto it: with both parents
+carrying the allele (heterozygous or homozygous) and each passing the predicate matching its own
+genotype, the row carries no flag; a carrier parent failing its own predicate is flagged
+`transmitting_parent_qc_fail`; a parent that is confidently homozygous reference (allele balance
+≤ 0.10 at depth ≥ 10 and GQ ≥ 20; `parent_ad_unmeasured` added when the call rests on no allele
+depths) is flagged `noncarrier_parent=mat` or `pat`, the shape of a hemizygous deletion in trans,
+uniparental disomy or a parental allele dropout, which the genotypes alone cannot distinguish; a
+parent that is uncalled, or homozygous reference with alternate reads above that band, is flagged
+`parent_gt_uninformative=mat` or `pat`, with `mother_alt_reads=N` or `father_alt_reads=N` when it
+has any. Each of those shapes was previously a silent no-row; the child's homozygous genotype is
+the evidence, and Step 6 counts carriers that rest on an unsupporting parent apart.
 
 **X-linked recessive.** For a male proband, a homozygous (hemizygous) alternate call at a non-PAR
-chrX site with a heterozygous or homozygous mother, both passing QC, and rarity at 1 × 10⁻²; a
-father carrying the allele does not veto the call but is flagged (`father_carries_x_allele`). On a
+chrX site passing the hemizygous predicate, at rarity 1 × 10⁻². The mother grades the support as
+above: a carrier (or a carrier failing her own predicate, flagged) is the inherited shape; a mother
+who is confidently clean (homozygous reference, at most one alternate read, allele balance ≤ 0.10,
+depth ≥ 10) is the de novo shape, handled by the secondary de novo model below with its own gates; a
+mother who is homozygous reference but not clean, or uncalled, leaves the origin unestablished and
+the son's call stands, flagged `parent_gt_uninformative=mat` or `noncarrier_parent=mat`, since a
+hemizygous variant in an affected boy is causally self-sufficient and the maternal genotype only
+separates inherited from de novo. A father carrying the allele does not veto the call but is
+flagged (`father_carries_x_allele`). On a
 male proband's non-pseudoautosomal chrX every member's genotype class is the one the
 pre-refinement likelihoods favour (FORMAT/PL; the refined genotype where PL is absent or flat, a
 refined no-call kept as a no-call) and the genotype QC uses the likelihood-derived GQ, for the
@@ -433,9 +448,12 @@ call into the parent with the fewest reads. Whichever member's refined genotype 
 flagged (`child_gt_refined_discordant`, `father_gt_refined_discordant`,
 `mother_gt_refined_discordant`), and the `hiConfDeNovo` tag, computed on the refined genotypes, is
 reported but not consulted for the hemizygous de novo. A female proband's chrX is diploid and is
-judged on the refined genotypes. For a
-female proband, a homozygous-alternate call with a carrier mother and a hemizygous
-(homozygous-alternate) father, all three passing QC, and the same rarity.
+judged on the refined genotypes, except her father's, which is haploid and is read from the
+likelihoods. For a female proband, a homozygous-alternate call passing the homozygous predicate at
+the same rarity, with her mother graded as a diploid parent and her father as a hemizygous one (a
+father who is hemizygous reference is `noncarrier_parent=pat`, the same deletion or dropout shape
+as an autosomal non-carrier parent); in Step 6 such a daughter is a biallelic hit and is tested
+under the biallelic null rather than the hemizygous-male one.
 
 **Y-linked.** For a male proband, non-pseudoautosomal chrY records are judged on the
 pre-refinement likelihoods rather than on the refined genotype. GATK's genotype refinement
@@ -456,15 +474,17 @@ balance ≥ 0.90) with a father who is hemizygous alternate is emitted as `y_lin
 not veto the call but flags it (`transmitting_parent_qc_fail`, and `y_site_mixed_reads` for the
 latter, the signature of a paralogous site). A son who is hemizygous alternate with a father who is
 confidently reference (depth ≥ 10, at most one alternate read, allele balance ≤ 0.10) is emitted
-as `denovo_y_hemi`, a secondary de novo call requiring child depth ≥ 20 and rarity at 1 × 10⁻⁴;
+as `denovo_y_hemi`, a secondary de novo call requiring child depth ≥ 10 (`denovo_min_dp_hemizygous`,
+half the diploid floor because a haploid chromosome carries half the depth) and rarity at 1 × 10⁻⁴;
 GATK's `hiConfDeNovo` tag is reported but not consulted on chrY, because it is computed on the
 refined diploid genotypes, the imputed mother included. The mother's genotype is never read: she
 has no Y, so there is no maternal transmission and no Mendelian test. Her depth is recorded
 (`mother_dp`), and a mother with at least 3 reads (`qc.y_reads_min_dp`) at a male-specific chrY
 site flags the row `y_female_reads`, since reads in a female at such a site are X-derived
 mismapping and the son's allele there may be a mismapped maternal X allele. A son whose reads
-support both alleles is never a call (`male_y_het`); a father no-call leaves the sole transmitter
-unobserved (`parent_nocall`). Every row carries the likelihood-favoured genotype of all three
+support both alleles is never a call (`male_y_het`); a father who is uncalled, or reference but
+not clean, leaves the sole transmitter unobserved and the son's call stands, flagged
+`parent_gt_uninformative=pat` (with his alternate reads) or `noncarrier_parent=pat`. Every row carries the likelihood-favoured genotype of all three
 members (`child_gt_pl`, `mother_gt_pl`, `father_gt_pl`) beside the refined ones, and a chrY row
 whose refined genotype the likelihoods overruled carries `child_gt_refined_discordant` or
 `father_gt_refined_discordant`. Unlocalised chrY scaffolds are treated as chrY; pseudoautosomal
@@ -501,8 +521,13 @@ consumed by a confirmed compound-heterozygous pair and is rare at 1 × 10⁻⁴ 
 is the recurrence signal Step 6 consolidates. A variant may appear under more than one mode.
 
 **Accounting.** Every record examined is classified as skipped (FILTER, unresolved sex, female
-chrY), called, or assigned a no-row reason (child not a carrier, a male Y het, a male X het, child or parent
-QC failure, rarity, no gene, Mendelian inconsistency, parental no-call, the inert
+chrY), called, or assigned a no-row reason (child not a carrier, a male Y het, a male X het, a child
+depth or quality failure, a child allele balance below or above the band — the postzygotic-mosaic
+or contamination shape and the allelic-imbalance shape, counted apart — a parent whose depth or
+quality fell short, a parent with alternate reads under a de novo-shaped het — the parental-mosaic
+or contamination shape, counted apart — rarity, no gene, a heterozygous child of two
+homozygous-alternate parents (the one remaining Mendelian inconsistency), a parental no-call under
+a heterozygous child, the inert
 [1 × 10⁻⁴, 1 × 10⁻²) heterozygous band, a disabled mode, or the hiConf tag), so that per trio the
 number examined equals skipped plus called plus no-row. ClinVar P/LP alleles the child carried that
 yielded no row are counted separately.
@@ -571,7 +596,11 @@ is the number of resolved trios, or for the X-linked and Y-linked models the num
 probands, decided per trio by the same rule Step 5 applies (the trios file's stated sex, else
 Step 0's inference). Because every son of a carrier father carries his Y, a Y-linked recurrence
 across unrelated probands reflects haplogroup sharing unless the per-male frequency is very small,
-which is what this null measures. Benjamini–Hochberg *q*-values are computed within each
+which is what this null measures. A carrier whose transmitting parent did not support the call
+(`noncarrier_parent` or `parent_gt_uninformative` in its flags) is counted like any other and also
+in `n_carriers_parent_unsupported`, and the audit records the genes that are recurrent only through
+such carriers. Every flag token carried by the emitted calls is tallied in the audit, per trio and
+over the cohort, so the provenance of each call class is quotable. Benjamini–Hochberg *q*-values are computed within each
 model family over the nominated genes, and an exome-wide flag is set at *p* < 2.5 × 10⁻⁶. Because
 the null is built only from variants observed in the cohort, it saturates on private variants and
 is monotone in gene size; it is reported as a rank, not as a calibrated test.
@@ -850,7 +879,7 @@ toolchain and a mocked VEP call, and asserts the resolution, funnel and calls.
 | SpliceAI rung | max Δ ≥ 0.2 | Step 3 |
 | CADD rung | PHRED ≥ 25.3 | Step 3 |
 | GQ, depth (general) | ≥ 20, ≥ 10 | Steps 0, 5, 9 |
-| De novo child depth | ≥ 20 | Step 5 |
+| De novo child depth | ≥ 20 (hemizygous de novo ≥ 10) | Step 5 |
 | Het allele balance | 0.25–0.75 | Steps 5, 9 |
 | Hom-alt allele balance | ≥ 0.90 | Steps 5, 9 |
 | Hom-ref allele balance; clean-parent alt reads | ≤ 0.10; ≤ 1 | Step 5 |

@@ -67,6 +67,8 @@ Step 6 aggregates the per-family candidate calls (from the inheritance screen, s
 
 The dominant-het count is the **key new signal**: individually a rare inherited het is weak evidence, but a gene that accumulates such hets across **multiple distinct individuals** is a strong nomination.
 
+Two provenance rules on the recessive and hemizygous families. A carrier whose transmitting parent did **not** support the call — a confident non-carrier (`noncarrier_parent=`, the deletion-in-trans / uniparental-disomy / dropout shape) or an uninformative genotype (`parent_gt_uninformative=`) — is counted like any other carrier (the child's genotype is the evidence) **and** counted apart in `n_carriers_parent_unsupported`; the audit records `genes_with_parent_unsupported_carriers` and `genes_recurrent_only_with_parent_unsupported`, so a gene that reaches `min_carriers` only through such rows is visible. And a hom-alt **daughter's** `x_linked_recessive` call is a biallelic hit (two X alleles, one from each parent): it joins the biallelic family and its `(Σq)²` null, while the X-linked family and its single-allele null over the male probands keep the hemizygous sons they are sized for.
+
 ### Recurrence flag and ranking
 
 - A gene is **recurrent** when its distinct-individual carrier count reaches **`min_carriers` (default 2)**.

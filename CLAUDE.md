@@ -234,7 +234,14 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   keyed on the manifest. Step 1 keeps FILTER `PASS` **and** `.` (`--filter 'PASS,.'`), and Step 5's
   `filters.genotype_qc.require_pass` treats both as pass — it is not "PASS only".
 - **Step 5 output**: `candidates.calls.tsv` (one row per candidate; `mode` ∈ `dominant`
-  (inherited het; `flags=origin=mat|pat|both`), `hom_recessive`, `compound_het` (pairs share a
+  (inherited het; `flags=origin=mat|pat|both`), `hom_recessive` (a QC-confident hom-alt child —
+  the PARENTS GRADE THE SUPPORT AND NEVER VETO: `noncarrier_parent=mat|pat` for a confident
+  hom-ref parent, the hemizygous-deletion-in-trans / UPD / dropout shape; `parent_gt_uninformative=
+  mat|pat` for a no-call or an unclean hom-ref, with `mother_/father_alt_reads=N`;
+  `transmitting_parent_qc_fail` for a carrier failing its own band. The same grading applies to a
+  hom-alt daughter's and a hemizygous son's `x_linked_recessive` and to `y_linked`, so an
+  uninformative transmitting parent no longer drops a son's hemizygous call — the child's own
+  genotype decides whether a row exists. Step 6 counts such carriers apart), `compound_het` (pairs share a
   `pair_id`; a pair whose second hit is a de novo is unphaseable from trio genotypes and carries
   `flags=unphased_denovo_partner`, and does NOT suppress the dominant call; a pair whose
   non-transmitting parent was never affirmatively observed hom-ref carries `origin_unverified`;
@@ -287,7 +294,10 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   annotation could vanish — HGVSc/HGVSp were lifted in Step 2 and never reached a TSV — so keep
   both blocks intact. **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
-  `n_ylinked`/`n_denovo`), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
+  `n_ylinked`/`n_denovo`, plus `n_carriers_parent_unsupported` — carriers a parent did not support,
+  counted like any other AND apart, with `genes_recurrent_only_with_parent_unsupported` in the
+  audit; a hom-alt DAUGHTER's `x_linked_recessive` is a biallelic hit and joins the biallelic
+  family and null), `recurrent` flag (≥ `burden.min_carriers`), the case-only recurrence null
   (`p_recurrence`/`q_recurrence`/`*_exome_wide_sig` — a RANK, never a calibrated test: 2 carriers
   of private variants at N=200 give p≈3e-7 and 3 carriers at N=1000 give 4e-8, i.e. essentially
   "≥3 carriers of private hets"; `p_recurrence_xlinked` and `p_recurrence_ylinked` (the single-
@@ -831,7 +841,7 @@ two things that look identical in the output are not the same fact:
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
   CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **98 tests, no network and no VCF.**
+  **100 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
   workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**

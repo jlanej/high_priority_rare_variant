@@ -210,7 +210,9 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
 - **Do not** down-weight recessive candidates by pLoF constraint.
 
 ### Inheritance models (Step 5) & genotype QC (GATK-refined trios)
-- Trust **refined `PP`-derived GQ**. GQ ≥ 20; DP ≥ 10; het AB 0.25–0.75; hom-alt AB ≥ 0.90;
+- Trust **refined `PP`-derived GQ**. GQ ≥ 20; DP ≥ 10 (de novo **20**; a hemizygous de novo
+  **10**, `denovo_min_dp_hemizygous` — a male's single X or Y carries half the depth); het AB
+  0.25–0.75; hom-alt AB ≥ 0.90;
   hom-ref AB ≤ 0.10 (AB from AD); FILTER = `PASS` or `.` (`require_pass` **true** treats both as
   pass; Step 1 keeps `PASS,.` — it is not "PASS only").
 - **Dominant** (inherited): rare (`rarity_af` `< 1e-4` — the run's oracle value, faf95 by
@@ -220,6 +222,16 @@ planned ACMG tiering step. If tiering is built, ClinGen SVI says commit to **one
   (parent-of-origin from trio genotypes; read-backed **WhatsHap** phasing is a **TARGET**, not
   wired — a pair whose second hit is a de novo is emitted but flagged `unphased_denovo_partner`,
   since trio genotypes cannot phase a de novo against an inherited variant).
+- **Parental support is graded, never a veto** (recessive, X and Y, `flags`): a QC-confident
+  hom-alt or hemizygous child is the evidence. Two carriers is the textbook shape; a confidently
+  hom-ref parent is `noncarrier_parent=mat|pat` (the hemizygous-deletion-in-trans / uniparental-
+  disomy / dropout shape, an AD-less ref block adding `parent_ad_unmeasured`); a no-call or an
+  unclean hom-ref is `parent_gt_uninformative=mat|pat` with `mother_/father_alt_reads=N`; a
+  carrier failing its own band is `transmitting_parent_qc_fail`. Each was a silent no-row. Step 6
+  counts carriers that rest on such a parent apart (`n_carriers_parent_unsupported`), and the
+  no-row taxonomy names the two de novo shapes it does NOT emit — `parent_alt_reads` and
+  `child_ab_low` (parental / postzygotic mosaicism or contamination, sized for the de novo
+  machinery) — beside `child_ab_high` and the depth/quality `qc_child` / `qc_parent`.
 - **X-linked recessive**: affected male = hemizygous + carrier mother (the **father's chrX is not
   required** — he transmits Y to a son; flagged `father_carries_x_allele` if he carries); affected
   female = `1/1` + carrier mother + hemizygous-affected father. Sex-aware ploidy, drop male non-PAR
