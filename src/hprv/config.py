@@ -162,6 +162,7 @@ def validate_filters(cfg: dict):
         if ha <= 0:
             problems.append(f"{g}homalt_ab_min ({ha}) must be positive")
     for k, floor in ((g + "min_gq", 0), (g + "min_dp", 1), (g + "denovo_min_dp", 1),
+                     (g + "denovo_min_dp_hemizygous", 1),
                      ("filters.denovo.parent_min_dp", 1), ("filters.denovo.parent_max_alt_ad", 0)):
         v = get(cfg, k, None)
         if v is not None:

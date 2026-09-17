@@ -261,6 +261,40 @@ for i, p in enumerate((2796000, 2797000)):
         gts={"CH_A": ("0/0", 99, 0), "FA_A": ("1/1", 99, 40), "MO_A": ("0/0", 99, 0)},
         adov={"CH_A": "0,0", "MO_A": "0,0"})
 
+# --- PARENTAL SUPPORT is graded, never a veto. Four shapes that used to be silent no-rows:
+# S1) autosomal hom-alt child with a CONFIDENT hom-ref father (AD measured, 40 ref / 0 alt): the
+#     hemizygous-deletion-in-trans / uniparental-disomy / dropout shape -> hom_recessive with
+#     noncarrier_parent=pat (Step 6 counts the carrier apart as parent-unsupported).
+add(file="A", chrom="chr1", pos=19300, gene="GENEHRNC", csq="missense_variant", impact="MODERATE",
+    af=5e-4,
+    gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
+# S2) hom-alt DAUGHTER on non-PAR chrX with a father whose PL and reads say hemizygous REFERENCE
+#     (she needs his X) -> x_linked_recessive with noncarrier_parent=pat; Step 6 tests her under
+#     the BIALLELIC null (two X alleles), not the hemizygous-male one.
+add(file="A", chrom="chrX", pos=2782150, gene="GENEXF", csq="missense_variant", impact="MODERATE",
+    gts={"CH_A": ("1/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/1", 99, 40)})
+# S3) a het child whose father carries TWO alt reads at a de novo-shaped site: neither a clean de
+#     novo nor an inherited het. Not emitted (de novo is secondary; the mosaic / contamination
+#     question belongs to the de novo machinery) but counted as no_row.parent_alt_reads, apart
+#     from a parent whose depth or quality merely fell short.
+add(file="A", chrom="chr1", pos=19500, gene="GENEPAR", csq="missense_variant", impact="MODERATE",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)},
+    adov={"FA_A": "38,2"})
+# S4) a het child at allele fraction 0.15 with clean parents (the postzygotic-mosaic /
+#     contamination shape): counted as no_row.child_ab_low, not lumped into qc_child.
+add(file="A", chrom="chr1", pos=19700, gene="GENEABL", csq="missense_variant", impact="MODERATE",
+    gts={"CH_A": ("0/1", 99, 40), "FA_A": ("0/0", 99, 40), "MO_A": ("0/0", 99, 40)},
+    adov={"CH_A": "34,6"})
+# S5) a hemizygous SON on non-PAR chrX with a maternal NO-CALL: the call stands on his own
+#     genotype (a hemizygous LoF in an affected boy is causally self-sufficient), the mother
+#     only fails to separate inherited from de novo -> x_linked_recessive with
+#     parent_gt_uninformative=mat.
+add(file="B", chrom="chrX", pos=2782180, gene="GENEXNC", csq="stop_gained", impact="HIGH",
+    cadd="34",
+    gts={"CH_B": ("1/1", 99, 40), "FA_B": ("0/0", 99, 40), "MO_B": ("./.", 0, 0),
+         "SIB_B": ("0/0", 99, 40)},
+    adov={"MO_B": "."})
+
 # --- autosomal hom-recessive with a HOM-ALT parent (consanguinity-like): FA_A hom-alt, MO_A het,
 #     CH_A hom-alt -> hom_recessive via the {HET,HOM_ALT} carrier rule (tests carrier_ok HOM_ALT). ---
 add(file="A", chrom="chr1", pos=8500, gene="GENE2H", csq="missense_variant", impact="MODERATE",

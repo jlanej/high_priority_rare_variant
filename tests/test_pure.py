@@ -2529,6 +2529,7 @@ def test_prioritize_config_matches_canonical_defaults():
                       ("resources.vep.spliceai_rescore.distance", 4999),
                       ("resources.vep.spliceai_rescore.chunk_size", 1000),
                       ("inheritance.emit_y_linked", True), ("qc.y_reads_min_dp", 3),
+                      ("filters.genotype_qc.denovo_min_dp_hemizygous", 10),
                       ("qc.y_min_anchor_sites", 50), ("qc.y_cov_male_min", 0.30),
                       ("qc.y_cov_female_max", 0.10)):
         got = get(cfg, key, "__MISSING__")
@@ -2884,10 +2885,11 @@ def _load_step5():
     return m
 
 
-def _screen(variants, sex="2", header="", cfg=None):
+def _screen(variants, sex="2", header="", cfg=None, thr=None):
     s5 = _load_step5()
     vcf = _FakeVCF(variants, raw_header=header)
-    trio = s5.Trio(vcf, {"child": "C", "father": "D", "mother": "M", "sex": sex}, G.GtThresholds())
+    trio = s5.Trio(vcf, {"child": "C", "father": "D", "mother": "M", "sex": sex},
+                   thr or G.GtThresholds())
     cfg = cfg or {"resources": {"gnomad": {"oracle": "grpmax_proxy"}}}
     return s5.screen_trio("T1", vcf, trio, cfg)
 
@@ -2931,7 +2933,9 @@ def test_step5_recessive_and_compound_het_phasing():
     rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HA, _HET), af=5e-4)])
     assert _calls(rows) == [("hom_recessive", 100, "high_conf_rarity")], "HOM_ALT parent accepted"
     rows, _ = _screen([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)])
-    assert rows == [], "a 0/0 parent under a 1/1 child is a Mendelian error, not a call"
+    assert _calls(rows) == [("hom_recessive", 100, "noncarrier_parent=pat;high_conf_rarity")], \
+        "a confident 0/0 parent under a 1/1 child is the deletion-in-trans / UPD / dropout shape: " \
+        "called and flagged, never a silent Mendelian-error drop"
     # TRANS pair at 5e-3 (inside the recessive band, above the dominant gate): two legs, one
     # pair_id, and NO dominant rows — the phase-confirmed pair consumed its legs
     rows, _ = _screen([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-3),
@@ -3000,7 +3004,9 @@ def test_step5_sex_chromosomes_and_gates():
     rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HA, _HET), af=5e-3)], sex="2")
     assert _calls(rows) == [("x_linked_recessive", X, "")], "hom-alt daughter + hemizygous father"
     rows, _ = _screen([_v5("chrX", X, "GX", (_HA, _HR, _HET), af=5e-3)], sex="2")
-    assert rows == [], "a hom-alt daughter with a hom-ref father is not called"
+    assert _calls(rows) == [("x_linked_recessive", X, "noncarrier_parent=pat")], \
+        "a hom-alt daughter with a confidently hemizygous-reference father is called and flagged " \
+        "(the deletion-in-trans / dropout shape), never dropped as Mendelian-inconsistent"
     rows, _ = _screen([_v5("chrX", X, "GX", (_HET, _HR, _HET), af=5e-5)], sex="2")
     assert _calls(rows) == [("dominant", X, "origin=mat")], "female X het flows through dominant"
     rows, _ = _screen([_v5("chrY", 20_000_000, "GY", (_HA, _HA, _HR), dp=(40, 40, 0))], sex="1")
@@ -3070,7 +3076,11 @@ def test_step5_pedigree_sex_is_kept_and_a_disagreeing_inference_is_flagged():
                "sex_discordant": False}
     _, rows_inf, _ = run(ped_inf, variants)
     assert rows_inf and all(r["child_sex"] == "2" and r["child_sex_source"] == "inferred" for r in rows_inf)
-    assert "x_linked_recessive" not in {r["mode"] for r in rows_inf}      # judged as female
+    # judged as female, the chrX hom-alt is a DAUGHTER's call: she needs her father's X, and his
+    # hemizygous reference is flagged; judged as male (above) his chrX is irrelevant and no such flag
+    xl_f = [r for r in rows_inf if r["mode"] == "x_linked_recessive"]
+    assert xl_f and all("noncarrier_parent=pat" in r["flags"] for r in xl_f), _calls(rows_inf)
+    assert all("noncarrier_parent" not in r["flags"] for r in rows if r["mode"] == "x_linked_recessive")
     # a bare PED handed straight to Trio (no main()): a stated sex reads `ped`, unknown reads `none`
     assert s5.Trio(_FakeVCF([]), {"child": "C", "father": "D", "mother": "M", "sex": "2"},
                    G.GtThresholds()).child_sex_source == "ped"
@@ -3159,14 +3169,20 @@ def test_step5_accounts_for_every_examined_variant():
     # the rest of the taxonomy
     assert why([_v5("chr1", 100, "G1", (_HR, _HET, _HET), af=5e-5)]) == "child_not_carrier"
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=0.02)]) == "rarity"
-    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (38, 2)})]) == "qc_parent"
-    assert why([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)]) == "mendelian_inconsistent"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), ad={1: (38, 2)})]) == "parent_alt_reads"
+    assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR), dp=(40, 6, 40))]) == "qc_parent"
     assert why([_v5("chr1", 100, "G1", (_HET, _HA, _HA), af=5e-5)]) == "mendelian_inconsistent"
-    assert why([_v5("chr1", 100, "G1", (_HA, _UNK, _HET), af=5e-4)]) == "parent_nocall"
+    # a hom-alt child is never vetoed by a parent: the non-carrier / uncalled parent is a FLAG
+    rows, _ = st_of([_v5("chr1", 100, "G1", (_HA, _HR, _HET), af=5e-4)])
+    assert _calls(rows) == [("hom_recessive", 100, "noncarrier_parent=pat;high_conf_rarity")]
+    rows, _ = st_of([_v5("chr1", 100, "G1", (_HA, _UNK, _HET), af=5e-4)])
+    assert _calls(rows) == [("hom_recessive", 100, "parent_gt_uninformative=pat;high_conf_rarity")]
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HET), af=5e-5,
                     info={"vep_Gene": "", "vep_SYMBOL": ""})]) == "no_gene"
     assert why([_v5("chrY", 20_000_000, "GY", (_HET, _HA, _HR))], sex="1") == "male_y_het"
-    assert why([_v5("chrY", 20_000_000, "GY", (_HA, _UNK, _HR))], sex="1") == "parent_nocall"
+    rows, _ = st_of([_v5("chrY", 20_000_000, "GY", (_HA, _UNK, _HR))], sex="1")
+    assert len(rows) == 1 and rows[0]["mode"] == "y_linked" \
+        and "parent_gt_uninformative=pat" in rows[0]["flags"] and "origin=" not in rows[0]["flags"]
     assert why([_v5("chrX", 10_000_000, "GX", (_HET, _HR, _HET), af=5e-5)], sex="1") == "male_x_het"
     hdr = '##INFO=<ID=hiConfDeNovo,Number=1,Type=String,Description="x">'
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag"
@@ -3383,6 +3399,8 @@ def test_config_validation_refuses_the_knobs_that_silently_kill_a_rung():
     assert "percentage" in problems(**{"filters.genotype_qc.het_ab_min": 25})
     assert "no het could pass" in problems(**{"filters.genotype_qc.het_ab_min": 0.8})
     assert "denovo_min_dp" in problems(**{"filters.genotype_qc.denovo_min_dp": 5})
+    assert "denovo_min_dp_hemizygous" in problems(**{"filters.genotype_qc.denovo_min_dp_hemizygous": 0})
+    assert G.GtThresholds.from_config(with_(), get).denovo_min_dp_hemizygous == 10
     assert "keep_impacts" in problems(**{"filters.functional.keep_impacts": []})
     assert "emit_dominant" in problems(**{"inheritance.emit_dominant": "nope"})
     assert "emit_y_linked" in problems(**{"inheritance.emit_y_linked": "nope"})
@@ -4148,8 +4166,9 @@ def test_step5_y_linked_model_reads_the_likelihoods_not_the_refined_gt():
     assert why([yv((_HET, _HA, _HR))], sex="1") == "male_y_het"
     # ...also when the PL itself says het against a 1/1 refined GT
     assert why([yv((_HA, _HA, _HR), ad={0: (18, 22)}, pl={0: (200, 0, 200)})], sex="1") == "male_y_het"
-    # 6. the sole transmitter unobserved
-    assert why([yv((_HA, _UNK, _HR))], sex="1") == "parent_nocall"
+    # 6. the sole transmitter unobserved: the son's call stands, the origin is unestablished
+    r = one([yv((_HA, _UNK, _HR))], sex="1")
+    assert (r["mode"], r["flags"]) == ("y_linked", "parent_gt_uninformative=pat")
     # 7. a MIXED father: the site behaves diploid in him (paralogue / mismapping) — emitted, flagged
     r = one([yv((_HA, _HET, _HR))], sex="1")
     assert r["flags"] == "origin=pat;transmitting_parent_qc_fail;y_site_mixed_reads", r["flags"]
@@ -4162,9 +4181,19 @@ def test_step5_y_linked_model_reads_the_likelihoods_not_the_refined_gt():
     # 10. de novo Y: son 1/1, father confidently ref -> denovo_y_hemi (secondary), cross-check flag
     r = one([yv((_HA, _HR, _HR), dp=(40, 40, 0), ad={2: (None, None)})], sex="1")
     assert (r["mode"], r["flags"], r["review_prior_crosscheck"]) == ("denovo_y_hemi", "", "1")
-    assert why([yv((_HA, _HR, _HR), dp=(15, 40, 0))], sex="1") == "qc_child", \
-        "the hemizygous de novo keeps the deeper de novo depth floor"
-    assert why([yv((_HA, _HR, _HR), ad={1: (37, 3)})], sex="1") == "qc_parent"
+    # the hemizygous de novo floor is HALF the diploid one (a haploid chromosome at half depth)
+    assert one([yv((_HA, _HR, _HR), dp=(15, 40, 0))], sex="1")["mode"] == "denovo_y_hemi"
+    assert why([yv((_HA, _HR, _HR), dp=(8, 40, 0))], sex="1") == "qc_child"
+    assert why([yv((_HA, _HR, _HR), dp=(12, 40, 0))], sex="1",
+               thr=G.GtThresholds(denovo_min_dp_hemizygous=15)) == "qc_child", \
+        "filters.genotype_qc.denovo_min_dp_hemizygous is the floor the hemizygous de novo reads"
+    # a hom-ref father who is not CLEAN (3 alt reads) but within the non-carrier band: the son's
+    # hemizygous call stands, flagged noncarrier_parent=pat (no origin); above the band he is
+    # uninformative and his alt reads are reported
+    r = one([yv((_HA, _HR, _HR), ad={1: (37, 3)})], sex="1")
+    assert (r["mode"], r["flags"]) == ("y_linked", "noncarrier_parent=pat"), r["flags"]
+    r = one([yv((_HA, _HR, _HR), ad={1: (34, 6)})], sex="1")
+    assert r["flags"] == "parent_gt_uninformative=pat;father_alt_reads=6", r["flags"]
     r = one([yv((_HA, _HR, _HR), ad={1: (None, None), 2: (None, None)})], sex="1")
     assert r["mode"] == "denovo_y_hemi" and r["flags"] == "parent_ad_unmeasured"
     # the hiConfDeNovo tag is NOT a gate on chrY (GATK computes it on the refined diploid
@@ -4264,14 +4293,171 @@ def test_step5_male_x_reads_the_likelihoods_like_chry():
     assert (r["mode"], r["flags"], r["hiConfDeNovo"]) == ("denovo_x_hemi", "child_gt_refined_discordant", "")
     assert why([_v5("chr1", 100, "G1", (_HET, _HR, _HR))], header=hdr) == "hiconf_tag", \
         "the autosomal de novo still honours the tag"
-    # 7. a refined no-call stays a no-call whatever the PL says (the mother here)
-    assert why([xv((_HA, _HR, _UNK), af=5e-4, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1") == "parent_nocall"
+    # 7. a refined no-call stays a no-call whatever the PL says (the mother here) — and the son's
+    #    hemizygous call stands on its own, the origin unestablished
+    r = one([xv((_HA, _HR, _UNK), af=5e-4, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="1")
+    assert (r["mode"], r["flags"]) == ("x_linked_recessive", "parent_gt_uninformative=mat;high_conf_rarity"), r["flags"]
     # 8. a FEMALE proband's chrX is diploid: the refined GTs stand and no discordance flag appears
     r = one([xv((_HET, _HR, _HET), af=5e-5, pl={0: (60, 0, 60), 1: REF_PL, 2: HET_PL})], sex="2")
     assert (r["mode"], r["flags"]) == ("dominant", "origin=mat")
     r = one([xv((_HET, _HR, _HET), af=5e-5, pl={0: HOMALT_PL, 1: REF_PL, 2: HET_PL})], sex="2")
     assert r["mode"] == "dominant" and "discordant" not in r["flags"] and r["child_gt_pl"] == "T/T", \
         "a daughter's chrX is under a valid diploid model: her refined GT stands (the PL is reported only)"
+
+
+def test_step5_parental_support_is_graded_never_a_veto():
+    """A QC-confident hom-alt / hemizygous child is the evidence; the parents GRADE the support
+    and never veto. Two carriers is the textbook shape; a confidently hom-ref parent is the
+    hemizygous-deletion-in-trans / UPD / dropout shape (noncarrier_parent); an uncalled or unclean
+    one is uninformative (parent_gt_uninformative, alt reads reported); a carrier failing its own
+    band is flagged transmitting_parent_qc_fail as in the dominant model. Every one of those was a
+    silent no-row. The child's own QC and rarity still decide whether a row exists, and the no-row
+    taxonomy tells an allele-balance failure from a depth/quality one, and a parent WITH alt reads
+    from one whose depth fell short (the classes the de novo machinery needs sized)."""
+    def st_of(variants, **kw):
+        rows, st = _screen(variants, **kw)
+        assert st["examined"] == sum(st["skipped"].values()) + st["with_call"] + sum(st["no_row"].values())
+        return rows, st
+
+    def why(variants, **kw):
+        rows, st = st_of(variants, **kw)
+        assert not rows, _calls(rows)
+        assert sum(st["no_row"].values()) == 1, dict(st["no_row"])
+        return next(iter(st["no_row"]))
+
+    def one(variants, **kw):
+        rows, _ = st_of(variants, **kw)
+        assert len(rows) == 1, _calls(rows)
+        return rows[0]
+
+    def av(gts, **kw):
+        kw.setdefault("af", 5e-3)
+        return _v5("chr1", 100, "G1", gts, **kw)
+    # --- autosomal hom-alt: the parents grade, never veto ---
+    assert one([av((_HA, _HET, _HET))])["flags"] == ""
+    assert one([av((_HA, _HR, _HET))])["flags"] == "noncarrier_parent=pat"
+    assert one([av((_HA, _HET, _HR))])["flags"] == "noncarrier_parent=mat"
+    assert one([av((_HA, _HR, _HR))])["flags"] == "noncarrier_parent=pat;noncarrier_parent=mat"
+    # a ref-block father (no AD): a non-carrier by genotype, and the row says the AD was not measured
+    assert one([av((_HA, _HR, _HET), ad={1: (None, None)})])["flags"] == "noncarrier_parent=pat;parent_ad_unmeasured"
+    # a hom-ref father WITH alt reads (AB 0.15) is uninformative, and his reads are on the row
+    assert one([av((_HA, _HR, _HET), ad={1: (34, 6)})])["flags"] == "parent_gt_uninformative=pat;father_alt_reads=6"
+    assert one([av((_HA, _UNK, _HET))])["flags"] == "parent_gt_uninformative=pat"
+    assert one([av((_HA, _UNK, _UNK))])["flags"] == "parent_gt_uninformative=pat;parent_gt_uninformative=mat"
+    # a carrier parent failing its own band no longer drops the call (once, even when both fail)
+    assert one([av((_HA, _HET, _HET), ad={1: (36, 4)})])["flags"] == "transmitting_parent_qc_fail"
+    assert one([av((_HA, _HET, _HET), ad={1: (36, 4), 2: (36, 4)})])["flags"] == "transmitting_parent_qc_fail"
+    for r in (one([av((_HA, _HET, _HET))]), one([av((_HA, _HR, _HET))])):
+        assert r["mode"] == "hom_recessive"
+    # ...the CHILD's own QC and rarity still decide existence
+    assert why([av((_HA, _HR, _HET), ad={0: (8, 32)})]) == "child_ab_low"       # AB 0.8 < 0.9
+    assert why([av((_HA, _HR, _HET), gq=(12, 99, 99))]) == "qc_child"
+    assert why([av((_HA, _HR, _HET), af=0.02)]) == "rarity"
+    # --- the het-child taxonomy: allele balance apart from depth/quality, parental alt reads
+    #     apart from a parent whose depth fell short ---
+    assert why([av((_HET, _HR, _HR), ad={0: (34, 6)}, af=None)]) == "child_ab_low"
+    assert why([av((_HET, _HR, _HR), ad={0: (6, 34)}, af=None)]) == "child_ab_high"
+    assert why([av((_HET, _HR, _HR), ad={1: (38, 2)}, af=None)]) == "parent_alt_reads"
+    assert why([av((_HET, _HR, _HR), dp=(40, 6, 40), af=None)]) == "qc_parent"
+    assert why([av((_HET, _HA, _HA), af=5e-5)]) == "mendelian_inconsistent", "the het of 1/1 x 1/1 stays impossible"
+    # --- hom-alt daughter: her father is haploid, so his class comes from PL ---
+    X = 10_000_000
+
+    def xv(gts, **kw):
+        kw.setdefault("af", 5e-3)
+        return _v5("chrX", X, "GX", gts, **kw)
+    assert one([xv((_HA, _HA, _HET))], sex="2")["flags"] == ""
+    r = one([xv((_HA, _HET, _HET), ad={1: (0, 40)}, pl={1: (300, 120, 0)})], sex="2")
+    assert r["flags"] == "father_gt_refined_discordant", "a prior-pushed father is a carrier by his PL"
+    assert one([xv((_HA, _HET, _HET))], sex="2")["flags"] == "transmitting_parent_qc_fail", \
+        "a father with both alleles read on his single X (no PL) is a mixed site"
+    assert one([xv((_HA, _UNK, _HET))], sex="2")["flags"] == "parent_gt_uninformative=pat"
+    assert one([xv((_HA, _HA, _HR))], sex="2")["flags"] == "noncarrier_parent=mat"
+    # --- hemizygous son: the mother grades the support ---
+    assert one([xv((_HA, _HR, _UNK))], sex="1")["flags"] == "parent_gt_uninformative=mat"
+    assert one([xv((_HA, _HR, _HR), ad={2: (34, 6)})], sex="1")["flags"] == "parent_gt_uninformative=mat;mother_alt_reads=6"
+    assert one([xv((_HA, _HR, _HR), ad={2: (37, 3)})], sex="1")["flags"] == "noncarrier_parent=mat", \
+        "3 maternal alt reads: not CLEAN (so not the de novo shape) but within the non-carrier band"
+    assert one([xv((_HA, _HR, _HET), ad={2: (36, 4)})], sex="1")["flags"] == "transmitting_parent_qc_fail"
+    for gts in ((_HA, _HR, _UNK), (_HA, _HR, _HR), (_HA, _HR, _HET)):
+        assert one([xv(gts, ad={2: (34, 6)} if gts[2] == _HR else None)], sex="1")["mode"] == "x_linked_recessive"
+    # a CLEAN mother is the de novo shape, still owned by the (secondary) de novo path
+    assert one([xv((_HA, _HR, _HR), af=None)], sex="1")["mode"] == "denovo_x_hemi"
+    assert why([xv((_HA, _HR, _HR))], sex="1") == "rarity", "a clean mother + 5e-3 > dominant_max: the de novo gate"
+    # --- the hemizygous de novo depth floor is the haploid one ---
+    assert one([xv((_HA, _HR, _HR), af=None, dp=(12, 40, 40))], sex="1")["mode"] == "denovo_x_hemi"
+    assert why([xv((_HA, _HR, _HR), af=None, dp=(12, 40, 40))], sex="1",
+               thr=G.GtThresholds(denovo_min_dp_hemizygous=15)) == "qc_child"
+    # --- the audit tallies every flag token; a numeric-valued token by its key ---
+    s5 = _load_step5()
+    t = s5.flag_tally([{"flags": "origin=pat;mother_alt_reads=3"}, {"flags": "origin=pat"},
+                       {"flags": ""}, {"flags": "noncarrier_parent=mat;high_conf_rarity"}])
+    assert dict(t) == {"origin=pat": 2, "mother_alt_reads": 1, "noncarrier_parent=mat": 1, "high_conf_rarity": 1}
+
+
+def test_step6_parent_unsupported_carriers_and_daughter_biallelic_routing():
+    """Step 6 counts a carrier a parent did not support like any other AND apart
+    (n_carriers_parent_unsupported), audits the genes that are recurrent only through such
+    carriers, and tests a hom-alt DAUGHTER's x_linked_recessive call under the biallelic null."""
+    import csv as _csv
+    import shutil
+    import types
+    _requires("yaml")
+    spec = importlib.util.spec_from_file_location(
+        "s6pu", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    seen = []
+    m.binom = types.SimpleNamespace(sf=lambda k, n, p: seen.append(n) or 0.5)
+    m.poisson = types.SimpleNamespace(sf=lambda k, mu: 0.5)
+    d = tempfile.mkdtemp(prefix="_hprv_s6pu_")
+    old_adir = os.environ.get("HPRV_AUDIT_DIR")
+    try:
+        calls = os.path.join(d, "calls.tsv")
+        cols = ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene", "symbol",
+                "consequence", "rarity_af", "rarity_oracle", "child_sex", "flags"]
+
+        def row(t, mode, pos, gene, sex, flags):
+            return {"trio_id": t, "mode": mode, "pair_id": "", "chrom": "chrX", "pos": pos, "ref": "A",
+                    "alt": "T", "gene": "ENSG_" + gene, "symbol": gene, "consequence": "stop_gained",
+                    "rarity_af": "", "rarity_oracle": "faf95", "child_sex": sex, "flags": flags}
+        with open(calls, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=cols, delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerow(row("T1", "x_linked_recessive", 500, "GENEA", "2", "noncarrier_parent=pat"))   # daughter
+            w.writerow(row("T2", "x_linked_recessive", 600, "GENEA", "1", ""))                        # son
+            w.writerow(row("T3", "hom_recessive", 700, "GENEA", "1", "parent_gt_uninformative=mat"))
+            w.writerow(row("T4", "dominant", 100, "GENEB", "2", "origin=mat"))
+            w.writerow(row("T1", "denovo", 900, "GENEC", "2", "parent_ad_unmeasured"))
+        qc = os.path.join(d, "qc_report.tsv")
+        with open(qc, "w") as fh:
+            fh.write("trio_id\tped_sex\tinferred_sex\nT1\t2\t\nT2\t1\t\nT3\t1\t\nT4\t2\t\n")
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("burden: {min_carriers: 2}\n")
+        os.environ["HPRV_AUDIT_DIR"] = os.path.join(d, "audit")
+        out = os.path.join(d, "genes.ranked.tsv")
+        assert m.main(["--calls", calls, "--out", out, "--config", cfgp, "--n-trios", "4",
+                       "--qc-report", qc]) == 0
+        with open(out) as fh:
+            genes = {r["gene"]: r for r in _csv.DictReader(fh, delimiter="\t")}
+        ga = genes["GENEA"]
+        assert (ga["n_biallelic"], ga["n_xlinked"], ga["n_carriers"], ga["n_carriers_parent_unsupported"],
+                ga["recurrent"]) == ("2", "1", "3", "2", "1"), ga
+        assert ga["p_recurrence_biallelic"] == "0.5" and ga["p_recurrence_xlinked"] == "", \
+            "the daughter joins the biallelic family; one son alone is not X-linked recurrence"
+        assert genes["GENEB"]["n_carriers_parent_unsupported"] == "0"
+        assert genes["GENEC"]["n_carriers_parent_unsupported"] == "0", "de novo rows never count here"
+        a = audit._read(os.environ["HPRV_AUDIT_DIR"])
+        assert a.get(("06_burden", "global", "genes_with_parent_unsupported_carriers")) == "1"
+        assert a.get(("06_burden", "global", "genes_recurrent_only_with_parent_unsupported")) == "1", \
+            "GENEA is recurrent only through the two parent-unsupported carriers (3 - 2 < min_carriers)"
+    finally:
+        if old_adir is None:
+            os.environ.pop("HPRV_AUDIT_DIR", None)
+        else:
+            os.environ["HPRV_AUDIT_DIR"] = old_adir
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_step0_chry_coverage_sex_evidence():

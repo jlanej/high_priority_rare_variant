@@ -139,6 +139,16 @@ def summarize(adir, out_md=None):
         if plp != "":
             lines.append(f"- ClinVar P/LP alleles the child carried that yielded no row: {plp}")
         lines.append("")
+    # what the calls carried (all trios): the parental-support grading, the PL-overruled
+    # genotypes, the phasing caveats — one line per flag token, so the provenance of every call
+    # class is quotable
+    flags = sorted((m, v) for (s, sc, m), v in d.items()
+                   if s == "05_inheritance" and sc == "global" and m.startswith("flag."))
+    if flags:
+        lines.append("### Step 5: flags carried by the emitted calls (all trios)")
+        for m, v in flags:
+            lines.append(f"- {m[len('flag.'):]}: {v}")
+        lines.append("")
     lines += ["## Cross-pedigree gene burden",
               f"- genes nominated: {g('06_burden','genes_nominated')}; "
               f"recurrent: {g('06_burden','genes_recurrent')}",
@@ -146,7 +156,10 @@ def summarize(adir, out_md=None):
               f"FDR significant: {g('06_burden','genes_recurrence_fdr_sig')} "
               "(case-only null — a RANK, not a calibrated test; see docs/gene_burden.md)",
               f"- genes ranked by the size-normalised p_carrier_excess: "
-              f"{g('06_burden','genes_rank_mu_normalised')}", ""]
+              f"{g('06_burden','genes_rank_mu_normalised')}",
+              f"- genes with a carrier a parent did not support (non-carrier / uninformative): "
+              f"{g('06_burden','genes_with_parent_unsupported_carriers')}; recurrent ONLY through "
+              f"such carriers: {g('06_burden','genes_recurrent_only_with_parent_unsupported')}", ""]
 
     text = "\n".join(lines)
     if out_md:

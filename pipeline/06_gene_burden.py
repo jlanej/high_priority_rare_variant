@@ -61,6 +61,11 @@ BIALLELIC_MODES = {"hom_recessive", "compound_het"}
 XLINKED_MODES = {"x_linked_recessive"}
 YLINKED_MODES = {"y_linked"}
 DENOVO_MODES = {"denovo", "denovo_x_hemi", "denovo_y_hemi"}
+# Flags (Step 5) that mean a transmitting parent did NOT support the call — a confident non-carrier
+# (the deletion-in-trans / uniparental-disomy / dropout shape) or an uninformative genotype. Such
+# carriers are counted like any other (the child's genotype is the evidence) but ALSO counted
+# apart, so a gene whose recurrence rests on them is visible.
+PARENT_UNSUPPORTED_FLAGS = ("noncarrier_parent=", "parent_gt_uninformative=")
 
 
 def _open_text(path):
@@ -218,8 +223,18 @@ def main(argv=None) -> int:
                 "denovo_lof": 0, "denovo_mis": 0,
                 # per-trio SETS of variant keys, for same- vs distinct-variant recurrence
                 "dom_sets": {}, "bi_sets": {}, "x_sets": {}, "y_sets": {},
+                "unsupported": set(),   # trios whose carrier row a parent did not support
             })
             g["all"].add(trio)
+            # A hom-alt DAUGHTER's x_linked_recessive call is a BIALLELIC hit (two X alleles, one
+            # from each parent): its null is the biallelic q^2, not the hemizygous-male single-
+            # allele one over the male probands. Route her to the biallelic family; the X family
+            # keeps the hemizygous sons it is sized for. A calls table without child_sex (an
+            # older run) stays in the X family.
+            if mode in XLINKED_MODES and str(r.get("child_sex") or "") == "2":
+                mode = "hom_recessive"
+            if mode not in DENOVO_MODES and any(t in (r.get("flags") or "") for t in PARENT_UNSUPPORTED_FLAGS):
+                g["unsupported"].add(trio)
             # distinct qualifying variant per mode -> its gnomAD frequency, for the model null.
             # rarity_af is THE run oracle's value (annotations.frequency()): faf95 by default, the
             # grpmax point-estimate proxy when the run opted down. On the proxy arm the value sits
@@ -474,6 +489,7 @@ def main(argv=None) -> int:
             "gene": gene, "n_carriers": n_carriers, "n_dominant": len(g["dom"]),
             "n_biallelic": len(g["bi"]), "n_xlinked": len(g["x"]), "n_ylinked": len(g["y"]),
             "n_denovo": len(g["dn"]),
+            "n_carriers_parent_unsupported": len(g["unsupported"] & (g["dom"] | g["bi"] | g["x"] | g["y"])),
             "recurrent": "1" if n_carriers >= min_carriers else "0", "recurrence_kind": rec_kind,
             "exp_carriers": exp_car, "p_recurrence": p_recurrence, "best_p": best_p,
             "p_recurrence_biallelic": p_rec_bi, "p_recurrence_xlinked": p_rec_x,
@@ -533,7 +549,7 @@ def main(argv=None) -> int:
     rows.sort(key=rank_key)
 
     out_cols = ["gene", "n_carriers", "n_dominant", "n_biallelic", "n_xlinked", "n_ylinked",
-                "n_denovo",
+                "n_denovo", "n_carriers_parent_unsupported",
                 "recurrent", "recurrence_kind", "exp_carriers", "p_recurrence", "q_recurrence",
                 "recurrence_exome_wide_sig",
                 "p_recurrence_biallelic", "q_recurrence_biallelic", "recurrence_biallelic_exome_wide_sig",
@@ -573,6 +589,11 @@ def main(argv=None) -> int:
     if C_mu is not None:
         audit.record("06_burden", "mu_scaling_C", f"{C_mu:.6g}")
     audit.record("06_burden", "genes_nominated", len(rows))
+    audit.record("06_burden", "genes_with_parent_unsupported_carriers",
+                 sum(1 for r in rows if r["n_carriers_parent_unsupported"]))
+    audit.record("06_burden", "genes_recurrent_only_with_parent_unsupported",
+                 sum(1 for r in rows if r["recurrent"] == "1"
+                     and r["n_carriers"] - r["n_carriers_parent_unsupported"] < min_carriers))
     audit.record("06_burden", "genes_recurrent", n_recurrent)
     audit.record("06_burden", "genes_recurrent_constrained", n_rec_con)
     audit.record("06_burden", "genes_recurrence_exome_wide_sig", n_rec_sig)
