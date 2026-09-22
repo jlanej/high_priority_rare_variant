@@ -33,6 +33,7 @@ from hprv import annotations as A
 from hprv import audit
 from hprv import genotype as G
 from hprv import splice as _splice
+from hprv import tsv
 from hprv.config import get, get_bool, load_config, validate_filters
 from hprv.ped import parse_ped, resolve_child_sex
 
@@ -961,9 +962,8 @@ def main(argv=None) -> int:
     # is unknown, and a CHECK on one that is known (ped.resolve_child_sex — the PED wins)
     sex_map = {}
     if args.qc_report and __import__("os").path.exists(args.qc_report):
-        import csv as _csv
         with open(args.qc_report) as fh:
-            for r in _csv.DictReader(fh, delimiter="\t"):
+            for r in tsv.DictReader(fh, delimiter="\t"):
                 if r.get("inferred_sex"):
                     sex_map[r.get("trio_id")] = r["inferred_sex"]
 

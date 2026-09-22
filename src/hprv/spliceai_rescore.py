@@ -35,6 +35,7 @@ import sys
 
 from hprv import audit
 from hprv import splice
+from hprv import tsv
 
 # The window the Illumina precomputed files were generated with. A wide-window event further than
 # this from the variant is one the screen could not have seen — the `spliceai_wide_distal` flag.
@@ -62,7 +63,7 @@ def _fmt(x):
 
 def read_tsv(path):
     with open(path, newline="") as fh:
-        rows = list(csv.reader(fh, delimiter="\t"))
+        rows = list(tsv.reader(fh, delimiter="\t"))
     if not rows:
         return [], []
     return rows[0], rows[1:]
@@ -105,7 +106,7 @@ def load_scores(path, distance):
                 cached_d = tok.split("=", 1)[1]
         if cached_d is None or str(cached_d) != str(distance):
             return {}, "distance_mismatch"
-        reader = csv.DictReader(fh, delimiter="\t")
+        reader = tsv.DictReader(fh, delimiter="\t")
         out = {}
         for r in reader:
             out[(r["chrom"], r["pos"], r["ref"], r["alt"])] = r

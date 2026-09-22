@@ -4653,6 +4653,272 @@ def test_step6_y_linked_family_counts_carriers_against_male_probands():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# =============================================================================
+# hprv.tsv — csv's 128 KiB field cap vs Step 5's info_CSQ (a 1 MiB cell through every reader)
+# =============================================================================
+_CSV_STDLIB_FIELD_LIMIT = 131072        # csv.field_size_limit() in a fresh interpreter
+
+
+def _big_cell(n=1 << 20):
+    """A >= 1 MiB cell shaped like the raw CSQ of a many-transcript locus (one comma-joined block
+    per transcript) — what Step 5 writes verbatim as info_CSQ, and what broke Step 5b."""
+    block = ("T|missense_variant|MODERATE|GENE1|ENSG00000000001|Transcript|ENST00000000001.1|"
+             "protein_coding|5/12||ENST00000000001.1:c.100A>T|ENSP00000000001.1:p.Lys34Ter|"
+             "300/1500|100/900|34/299|K/*|Aag/Tag|||1||SNV|HGNC|HGNC:1|YES|NM_000001.1|"
+             "1e-06|0.9|likely_pathogenic|25.3|0.00|0.00|0.12|0.03|-3|2|14|-20")
+    s = ",".join([block] * (n // (len(block) + 1) + 1))
+    assert len(s) >= n and "\t" not in s and "\n" not in s
+    return s
+
+
+def _stdlib_field_limit():
+    """Put csv back at the default a FRESH interpreter starts with; returns the limit it replaced.
+
+    Each reader below is exercised straight after this. hprv.tsv's constructors re-apply the raised
+    limit, so a reader built through them takes the 1 MiB cell, while one that bypasses them raises
+    the real `_csv.Error: field larger than field limit (131072)`. The limit is process-global, so
+    without the reset whichever module raised it first would cover for every other one — and even
+    with it, inside ONE entry point that builds several readers the first still covers for the
+    rest. That residue is what the source scan (test_every_tsv_reader_goes_through_the_chokepoint)
+    is for; mutation-checked, the two together catch a bypass at every call site.
+    """
+    import csv as _csv
+    return _csv.field_size_limit(_CSV_STDLIB_FIELD_LIMIT)
+
+
+def test_every_tsv_reader_goes_through_the_chokepoint():
+    """No module in src/hprv/ or pipeline/ (nor the integration asserter) may build a csv reader
+    except through hprv.tsv: a direct csv.reader / csv.DictReader parses at the stdlib's 128 KiB
+    field cap and dies on the first info_CSQ past it — the Step-5b failure. A source scan, so a NEW
+    reader is caught too; the 1 MiB tests below prove the existing entry points by behaviour."""
+    import glob
+    import re
+    root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+    files = sorted(glob.glob(os.path.join(root, "src", "hprv", "*.py")) +
+                   glob.glob(os.path.join(root, "pipeline", "*.py")) +
+                   [os.path.join(root, "tests", "integration", "assert_integration.py")])
+    chokepoint = os.path.join(root, "src", "hprv", "tsv.py")
+    assert chokepoint in files and len(files) > 20, files      # the scan found the tree
+    offenders = []
+    for f in files:
+        if f == chokepoint:
+            continue
+        with open(f) as fh:
+            src = fh.read()
+        if re.search(r"^\s*from\s+csv\s+import\b[^\n]*\b(reader|DictReader)\b", src, re.M):
+            offenders.append(f"{os.path.relpath(f, root)}: from csv import reader/DictReader")
+        aliases = {"csv"} | set(re.findall(r"^\s*import\s+csv\s+as\s+(\w+)", src, re.M))
+        for a in sorted(aliases):
+            for m in re.finditer(rf"\b{re.escape(a)}\.(reader|DictReader)\s*\(", src):
+                line = src.count("\n", 0, m.start()) + 1
+                offenders.append(f"{os.path.relpath(f, root)}:{line}: {m.group(0)}")
+    assert not offenders, "csv readers built outside hprv.tsv:\n  " + "\n  ".join(offenders)
+    # ...and the chokepoint itself holds the limit above the stdlib default
+    from hprv import tsv
+    assert tsv.FIELD_SIZE_LIMIT >= 1 << 31, tsv.FIELD_SIZE_LIMIT
+
+
+def test_tsv_1mib_cell_round_trips_through_step5b_and_step8():
+    """Step 5 writes the raw multi-transcript CSQ verbatim as info_CSQ, and a many-transcript locus
+    runs it past csv's 128 KiB default. Step 5b is where that surfaced (read_tsv), and Step 8
+    re-reads the same table and must carry the cell into variants.tsv byte for byte — the review
+    table is dropless. Every other table these entry points read (the score cache, the manifest,
+    the NHF table, the QC report) carries a 1 MiB cell too, and each reader function that can be
+    called on its own is, from the stdlib default."""
+    import contextlib
+    import io
+    import shutil
+    from hprv import spliceai_rescore as R
+    from hprv import tsv
+    big = _big_cell()
+    d = tempfile.mkdtemp(prefix="_hprv_bigcell_")
+    old = _stdlib_field_limit()
+    try:
+        calls = os.path.join(d, "candidates.calls.tsv")
+        cols = ["trio_id", "mode", "chrom", "pos", "ref", "alt", "gene", "symbol", "rarity_af",
+                "rarity_oracle", "spliceai_ds", "spliceai_event", "flags", "info_CSQ"]
+        _write_tsv(calls, cols, [{
+            "trio_id": "T1", "mode": "dominant", "chrom": "chr1", "pos": "1000", "ref": "A",
+            "alt": "T", "gene": "ENSG00000000001", "symbol": "GENE1", "rarity_af": "1e-05",
+            "rarity_oracle": "faf95", "spliceai_ds": "0.55", "spliceai_event": "donor_loss",
+            "flags": "origin=mat", "info_CSQ": big}])
+        out = os.path.join(d, "rescore")
+
+        def rescore(cmd):
+            _stdlib_field_limit()
+            with contextlib.redirect_stdout(io.StringIO()):
+                return R._main([cmd, "--calls", calls, "--outdir", out, "--distance", "4999"])
+
+        # --- Step 5b: plan reads the calls table (the reported failure) ---
+        assert rescore("plan") == 0
+        chunks = open(os.path.join(out, "manifest.txt")).read().split()
+        assert len(chunks) == 1
+        with open(R.scored_path(chunks[0]), "w") as fh:
+            fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                     "chr1\t1000\t.\tA\tT\t.\t.\tSpliceAI=T|GENE1|0.00|0.00|0.40|0.70|-3|-2|14|2\n")
+        # ...gather reads it again and rewrites it with the wide block merged in
+        assert rescore("gather") == 0
+        _stdlib_field_limit()
+        header, body = R.read_tsv(calls)
+        assert body[0][header.index("info_CSQ")] == big, "Step 5b must rewrite the cell verbatim"
+        assert body[0][header.index("spliceai_wide_ds")] == "0.7"
+        # the per-variant score cache is a table too: a 1 MiB cell there, and the next plan must
+        # read it and find the variant cached (an empty manifest)
+        cache = os.path.join(out, "scores.tsv")
+        lines = open(cache).read().splitlines()
+        assert len(lines) == 3, lines
+        with open(cache, "w") as fh:
+            fh.write(f"{lines[0]}\n{lines[1]}\tnote\n{lines[2]}\t{big}\n")
+        _stdlib_field_limit()
+        scores, status = R.load_scores(cache, 4999)
+        assert status == "ok" and scores[("chr1", "1000", "A", "T")]["note"] == big
+        assert rescore("plan") == 0
+        assert open(os.path.join(out, "manifest.txt")).read() == "", "the cached variant re-planned"
+
+        # --- Step 8: the calls table (now 5b-augmented), manifest, NHF table and QC report ---
+        data = os.path.join(d, "igv")
+        os.makedirs(os.path.join(d, "nhf", "T1"))
+        os.makedirs(data)
+        manifest = os.path.join(d, "trios.resolved.tsv")
+        _write_tsv(manifest, ["trio_id", "vcf", "ped", "samples", "note"],
+                   [{"trio_id": "T1", "vcf": "x.vcf.gz", "ped": "x.ped", "samples": "KID,DAD,MOM",
+                     "note": big}])
+        nhf_tsv = os.path.join(d, "nhf", "T1", "KID.variant_nhf.tsv")
+        with open(nhf_tsv, "w") as fh:
+            fh.write(f"variant_key\tsupporting_reads\tnonhuman_fraction\tnote\n"
+                     f"chr1:999:A:T\t12\t0.25\t{big}\n")
+        _stdlib_field_limit()
+        assert igv._read_samples(manifest) == {"T1": ("KID", "DAD", "MOM")}
+        _stdlib_field_limit()
+        assert igv._load_nhf_tsv(nhf_tsv) == {"chr1:999:A:T": ("0.25", "12")}
+        vt = os.path.join(data, "variants.tsv")
+        _stdlib_field_limit()
+        assert igv.build_variants_tsv(calls, manifest, data, vt, nhf_dir=os.path.join(d, "nhf")) == 1
+        with open(vt) as fh:
+            got = next(tsv.DictReader(fh))
+        assert got["info_CSQ"] == big, "variants.tsv must carry info_CSQ byte for byte"
+        assert got["child_nhf"] == "0.25" and got["child_nhf_reads"] == "12", "the NHF table was read"
+        assert got["child_vcf_id"] == "KID", "the manifest was read"
+        qc = os.path.join(d, "qc_report.tsv")
+        _write_tsv(qc, ["trio_id", "mie_rate", "inferred_sex", "ped_sex", "note"],
+                   [{"trio_id": "T1", "mie_rate": "0.001", "inferred_sex": "1", "ped_sex": "1",
+                     "note": big}])
+        _stdlib_field_limit()
+        assert igv.write_sample_qc(qc, manifest, os.path.join(data, "sample_qc.tsv")) == 3
+    finally:
+        import csv as _csv
+        _csv.field_size_limit(old)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_tsv_1mib_cell_through_the_step_clis():
+    """Steps 0, 5, 6 and 9 read their tables inside main(), and each must take a 1 MiB cell, the
+    first read starting from the stdlib default limit — Step 0 its manifest, Step 5 the QC report,
+    Step 6 the calls table (info_CSQ) and then the QC report, Step 9 the Step-8 review table.
+    Step 9's --out-igv-variants copies every input column verbatim, so there the cell must also
+    come back byte for byte."""
+    import contextlib
+    import io
+    import shutil
+    import types
+    from hprv import tsv
+    _requires("yaml")
+    big = _big_cell()
+    d = tempfile.mkdtemp(prefix="_hprv_bigcli_")
+    old = _stdlib_field_limit()
+    old_adir = os.environ.get("HPRV_AUDIT_DIR")
+    os.environ["HPRV_AUDIT_DIR"] = os.path.join(d, "audit")
+    err = io.StringIO()
+    try:
+        cfgp = os.path.join(d, "cfg.yaml")
+        with open(cfgp, "w") as fh:
+            fh.write("project: {name: t}\nburden: {min_carriers: 2}\n"
+                     "prioritization:\n  gene_downweight: {min_control_genes: 1}\n")
+        qc = os.path.join(d, "qc_report.tsv")
+        _write_tsv(qc, ["trio_id", "ped_sex", "inferred_sex", "note"],
+                   [{"trio_id": "T1", "ped_sex": "1", "inferred_sex": "1", "note": big}])
+        nope = os.path.join(d, "absent.ped")         # every trio is skipped past the table read
+
+        # --- Step 0: the resolved manifest ---
+        s0 = _load_step0()
+        m0 = os.path.join(d, "trios.resolved.tsv")
+        _write_tsv(m0, ["trio_id", "vcf", "ped", "samples", "note"],
+                   [{"trio_id": "T1", "vcf": "x.vcf.gz", "ped": nope, "samples": "KID,DAD,MOM",
+                     "note": big}])
+        _stdlib_field_limit()
+        with contextlib.redirect_stderr(err):
+            assert s0.main(["--manifest", m0, "--config", cfgp,
+                            "--out", os.path.join(d, "qc_out.tsv")]) == 0
+        assert "no PED for T1" in err.getvalue(), "Step 0 never reached the manifest's row"
+
+        # --- Step 5: the Step-0 QC report (its sex fallback) ---
+        s5 = _load_step5()
+        m5 = os.path.join(d, "trios.candidates.tsv")
+        _write_tsv(m5, ["trio_id", "candidates_vcf", "ped"],
+                   [{"trio_id": "T1", "candidates_vcf": "x.vcf.gz", "ped": nope}])
+        _stdlib_field_limit()
+        with contextlib.redirect_stderr(err):
+            assert s5.main(["--manifest", m5, "--config", cfgp, "--qc-report", qc,
+                            "--out", os.path.join(d, "calls_out.tsv")]) == 0
+
+        # --- Step 6: the calls table (info_CSQ) and the QC report (the male proband count) ---
+        spec = importlib.util.spec_from_file_location(
+            "s6big", os.path.join(os.path.dirname(__file__), "..", "pipeline", "06_gene_burden.py"))
+        s6 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(s6)
+        s6.binom = types.SimpleNamespace(sf=lambda k, n, p: 0.5)     # a bare host has no scipy
+        s6.poisson = types.SimpleNamespace(sf=lambda k, mu: 0.5)
+        calls = os.path.join(d, "candidates.calls.tsv")
+        _write_tsv(calls, ["trio_id", "mode", "pair_id", "chrom", "pos", "ref", "alt", "gene",
+                           "symbol", "consequence", "rarity_af", "rarity_oracle", "info_CSQ"],
+                   [{"trio_id": "T1", "mode": "dominant", "chrom": "chr1", "pos": "1000",
+                     "ref": "A", "alt": "T", "gene": "ENSG00000000001", "symbol": "GENE1",
+                     "consequence": "missense_variant", "rarity_af": "1e-05",
+                     "rarity_oracle": "faf95", "info_CSQ": big}])
+        genes = os.path.join(d, "genes.ranked.tsv")
+        _stdlib_field_limit()
+        with contextlib.redirect_stderr(err):
+            assert s6.main(["--calls", calls, "--out", genes, "--config", cfgp, "--n-trios", "1",
+                            "--qc-report", qc]) == 0
+        with open(genes) as fh:
+            g = {r["gene"]: r for r in tsv.DictReader(fh)}
+        assert g["GENE1"]["n_dominant"] == "1", g
+        assert audit._read(os.environ["HPRV_AUDIT_DIR"]).get(
+            ("06_burden", "global", "n_male_trios")) == "1", "the QC report was not read"
+
+        # --- Step 9: a Step-8-shaped review table; --out-igv-variants returns every input cell ---
+        p9 = _load_p9()
+        vcols = ["chrom", "pos", "ref", "alt", "trio_id", "gene", "consequence", "impact",
+                 "inheritance", "grpmax_af", "cadd", "spliceai_ds", "child_GQ", "child_DP",
+                 "child_AB", "child_file", "info_CSQ"]
+        vin = os.path.join(d, "variants.tsv")
+        _write_tsv(vin, vcols, [{
+            "chrom": "chr1", "pos": "1000", "ref": "A", "alt": "T", "trio_id": "T1",
+            "gene": "GENE1", "consequence": "missense_variant", "impact": "MODERATE",
+            "inheritance": "dominant", "grpmax_af": "2e-6", "cadd": "28", "spliceai_ds": "0.02",
+            "child_GQ": "99", "child_DP": "40", "child_AB": "0.5",
+            "child_file": "crams/T1/KID.cram", "info_CSQ": big}])
+        outi = os.path.join(d, "igv.variants.prioritized.tsv")
+        _stdlib_field_limit()
+        with contextlib.redirect_stderr(err):
+            assert p9.main(["--variants", vin, "--config", cfgp, "--n-trios", "1",
+                            "--out-variants", os.path.join(d, "vp.tsv"),
+                            "--out-genes", os.path.join(d, "gp.tsv"),
+                            "--out-igv-variants", outi]) == 0
+        with open(outi) as fh:
+            rows = list(tsv.DictReader(fh))
+        assert len(rows) == 1 and rows[0]["info_CSQ"] == big, "Step 9 must return the cell verbatim"
+        assert rows[0]["child_file"] == "crams/T1/KID.cram" and rows[0]["rank_agnostic"] == "1"
+    finally:
+        import csv as _csv
+        _csv.field_size_limit(old)
+        if old_adir is None:
+            os.environ.pop("HPRV_AUDIT_DIR", None)
+        else:
+            os.environ["HPRV_AUDIT_DIR"] = old_adir
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run_all():
     import inspect
     fns = [f for n, f in sorted(globals().items())

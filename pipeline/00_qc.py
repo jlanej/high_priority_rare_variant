@@ -61,7 +61,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import itertools
 import statistics
 import sys
@@ -71,6 +70,7 @@ from cyvcf2 import VCF
 from hprv import audit
 from hprv import contamination as C
 from hprv import genotype as G
+from hprv import tsv
 from hprv.config import get, load_config
 from hprv.ped import parse_ped, resolve_child_sex
 
@@ -531,7 +531,7 @@ def main(argv=None) -> int:
     y_female_max = float(get(cfg, "qc.y_cov_female_max", 0.10))
 
     with open(args.manifest) as fh:
-        rows = list(csv.DictReader(fh, delimiter="\t"))
+        rows = list(tsv.DictReader(fh, delimiter="\t"))
 
     # sex_source: which sex Step 5 will judge the proband's chrX ploidy under — `ped` (the trios
     # file stated it; canonical), `inferred` (it did not; Step 0's chrX call fills in) or `none`

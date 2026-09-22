@@ -9,7 +9,6 @@ are no spreadsheet formulas to recalculate.
 
 from __future__ import annotations
 
-import csv
 import gzip
 import math
 import os
@@ -20,6 +19,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from hprv import annotations as A
+from hprv import tsv
 from hprv.config import get
 
 FONT = "Calibri"
@@ -79,7 +79,7 @@ def _read_tsv(path):
     if not path or not os.path.exists(path):
         return None, []
     with open(path) as fh:
-        rows = list(csv.reader(fh, delimiter="\t"))
+        rows = list(tsv.reader(fh, delimiter="\t"))
     if not rows:
         return None, []
     return rows[0], rows[1:]

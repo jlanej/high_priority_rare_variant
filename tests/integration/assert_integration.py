@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 
 from cyvcf2 import VCF
+
+# The pipeline's own reader chokepoint (PYTHONPATH=src, set by run_integration.sh): the tables
+# asserted on here carry the info_* pass-through, whose info_CSQ cell can exceed csv's 128 KiB cap.
+from hprv import tsv
 
 FAILS = []
 
@@ -21,7 +24,7 @@ def check(cond, msg):
 
 def rows(path):
     with open(path) as fh:
-        return list(csv.DictReader(fh, delimiter="\t"))
+        return list(tsv.DictReader(fh, delimiter="\t"))
 
 
 def main(argv=None) -> int:
@@ -978,7 +981,7 @@ def main(argv=None) -> int:
     if check(os.path.exists(vpath), "igv variants.tsv written"):
         vh, vrows = None, []
         with open(vpath) as fh:
-            rr = list(csv.reader(fh, delimiter="\t"))
+            rr = list(tsv.reader(fh, delimiter="\t"))
         vh, vrows = rr[0], rr[1:]
         for col in ("chrom", "pos", "ref", "alt", "inheritance", "child_file", "child_gt"):
             check(col in vh, f"variants.tsv has '{col}' column")
@@ -993,7 +996,7 @@ def main(argv=None) -> int:
         check(not missing_v,
               f"variants.tsv carries every unmapped calls column ({len(expect)} expected; missing: {missing_v[:6]})")
         with open(vpath) as fh:
-            vd = list(csv.DictReader(fh, delimiter="\t"))
+            vd = list(tsv.DictReader(fh, delimiter="\t"))
         pairs = list(zip(calls, vd))
         check(bool(pairs) and all(v["hgvsc"] == c["hgvsc"] and v["hgvsp"] == c["hgvsp"] for c, v in pairs),
               "hgvsc/hgvsp in variants.tsv equal candidates.calls.tsv row for row")
