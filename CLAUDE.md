@@ -125,7 +125,8 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   apptainer/docker. So the same scripts work in both modes. `HPRV_BIND` carries the dirs that
   must be visible to wrapped calls.
 - **Shared python** in `src/hprv/`: `config` (YAML+env), `annotations` (the INFO-field contract
-  from Step 2), `genotype` (refined-GQ QC), `ped` (trio parsing). Steps import these so selection
+  from Step 2), `genotype` (refined-GQ QC), `ped` (trio parsing), `tsv` (the ONE place a csv
+  reader is built — raises csv's 128 KiB field cap; see Gotchas). Steps import these so selection
   / inheritance / burden read annotations identically.
 
 ## Data contract between steps
@@ -292,7 +293,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   Float keeps the VCF's digits). The prefix is load-bearing: the raw `hiConfDeNovo` (a comma list
   of children) would otherwise collide with the curated flag. This projection was the ONE place an
   annotation could vanish — HGVSc/HGVSp were lifted in Step 2 and never reached a TSV — so keep
-  both blocks intact. **Step 6 output**: `genes.ranked.tsv` —
+  both blocks intact. `info_CSQ` STAYS although the curated columns parse the CSQ: they hold only
+  the block `+split-vep` selected, and `--flag_pick` keeps every other transcript's block, which no
+  other column carries. It is also the one unbounded cell (one block per overlapping transcript),
+  which runs past csv's 128 KiB default field cap at a many-transcript locus — hence `hprv.tsv`.
+  **Step 6 output**: `genes.ranked.tsv` —
   distinct-individual carrier counts per gene per model (`n_dominant`/`n_biallelic`/`n_xlinked`/
   `n_ylinked`/`n_denovo`, plus `n_carriers_parent_unsupported` — carriers a parent did not support,
   counted like any other AND apart, with `genes_recurrent_only_with_parent_unsupported` in the
@@ -315,7 +320,11 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   `prioritization.excess.offset.mu_lof_impute_factor`, recorded in `dn_mu_src`
   (`gnomad`|`imputed`|`none`).
 - **Step 7 output**: `hprv_summary.xlsx` (openpyxl; `src/hprv/report.py`) — documented workbook:
-  About/legend + Gene consolidation + Candidate calls + Trio resolution + QC + Audit counts.
+  About/legend + Gene consolidation + Candidate calls + Trio resolution + QC + Audit counts. A
+  cell over Excel's 32,767-character limit (in practice `info_CSQ`) is cut VISIBLY — the kept
+  prefix ends in `...[TRUNCATED from N chars: ...; the full value is in <tsv>]`, the count is on
+  the About sheet and in the audit (`07_report` / `cells_truncated_excel_limit`) — because
+  openpyxl otherwise slices it SILENTLY. The TSVs always carry the full value.
 - **Step 8 output**: `igv/` for the jlanej/igv.js variant-review server (`src/hprv/igv.py` +
   `08_igv_export.sh`): `variants.tsv` — its headline `frequency` column IS `rarity_af`, the value
   the run's oracle produced and every gate applied; it must never be a different quantity from the
@@ -323,7 +332,12 @@ a dedicated mtDNA pipeline). De novo is detected here only as a lightweight cros
   does not already represent is appended verbatim after the track columns
   (`igv.passthrough_columns`: `flags`, `hiConfDeNovo`, `review_prior_crosscheck`, the Ensembl
   `gene` as `gene_id`, the whole `info_*` block) — the review table is dropless with respect to
-  `candidates.calls.tsv`, and it used to be a second silent projection. (Only
+  `candidates.calls.tsv`, and it used to be a second silent projection. That includes `info_CSQ`,
+  so a `variants.tsv` cell can run to megabytes: the igv.js server splits on tabs (no per-field
+  cap) but reads the WHOLE file into one JavaScript string, so the table's total size is bounded
+  by Node's `buffer.constants.MAX_STRING_LENGTH`, and each page of rows it serves carries every
+  row's `info_CSQ` to the browser; a Python reader of it must go through `hprv.tsv` (or raise
+  `csv.field_size_limit` itself), and Excel cannot hold such a cell at all. (Only
   `chrom/pos/ref/alt` required; extra columns are
   filterable; per-member `*_file`/`*_index` + `*_vcf*` track paths are RELATIVE to the data-dir
   `igv/`), mini-CRAMs `crams/<trio>/<sample>.cram` sliced around candidate loci via a `sample→CRAM`
@@ -626,6 +640,21 @@ two things that look identical in the output are not the same fact:
   said `gnomad`; and `frequency()`'s old proxy fallback. All three are fixed, and the rule is
   general: if you write `_num(x) or 0.0`, you have almost certainly just made absence into
   evidence.
+- **csv's 128 KiB field cap vs `info_CSQ` — build every reader through `hprv.tsv`.** Python's
+  `csv` refuses a field longer than `csv.field_size_limit()` (131,072 characters by default) with
+  `_csv.Error: field larger than field limit (131072)`, and Step 5's `info_CSQ` — the raw
+  multi-transcript CSQ, one block per overlapping transcript, longer still since `--numbers
+  --total_length`, NMD and SpliceVault — crosses it at a many-transcript locus. Step 5b died on it
+  first; Steps 6, 7, 8 and 9 re-read the same table. `hprv.tsv.reader` / `DictReader` raise the cap
+  to the platform maximum (`sys.maxsize`, halved on OverflowError where a C `long` is 32-bit) and
+  RE-APPLY it on every construction, because the limit is process-global: raised only at import,
+  an entry point would work merely because another module had imported `hprv.tsv` first. Never
+  call `csv.reader` / `csv.DictReader` directly in `src/hprv/` or `pipeline/` —
+  `test_every_tsv_reader_goes_through_the_chokepoint` scans the source for it, and the 1 MiB
+  round-trip tests reset the stdlib default before each entry point. The integration suite CANNOT
+  catch a regression here: the mock's longest `info_CSQ` is under 400 characters. The same cell
+  meets a second cap in Step 7 — openpyxl silently slices a string at Excel's 32,767 characters —
+  so `report.py` cuts it visibly instead. Writers are unaffected; the cap is the parser's.
 - **Two tables can carry the same constraint column, and the precedence must be ONE direction.**
   `--constraint` and `--mutrate` both carry `pLI`/`oe_lof_upper`/`oe_syn`. The old code resolved
   them with `_find(ccols,…) or _find(mcols,…)`, which gave oe_syn mutrate-first and pLI/LOEUF
@@ -840,13 +869,15 @@ two things that look identical in the output are not the same fact:
   chrY coverage evidence, Step-6
   helpers **and its counting/ranking through `main()` with a stubbed scipy**, and the Step-9
   prioritization layer — the NB fit/tail/BH-FDR, the never-drop invariant end-to-end through the
-  CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating).
-  **100 tests, no network and no VCF.**
+  CLI, the positive-control guard, both tier ceilings, blank-vs-zero NHF, mechanism gating), and
+  the `hprv.tsv` reader chokepoint (a 1 MiB cell through every reader entry point, from the stdlib
+  default limit, plus a source scan for direct `csv` readers).
+  **104 tests, no network and no VCF.**
   **Two documented exceptions to "no heavy deps":** the tests that drive `09_prioritize.py:main()`
   or `06_gene_burden.py:main()` need `yaml` transitively (`load_config` does `import yaml`), and the
-  workbook test needs `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
+  workbook tests need `openpyxl`. They declare it at the `_requires()` chokepoint and **SKIP**
   without it — and `_run_all` then refuses to print "All N passed", instead reporting
-  `76 passed, 13 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
+  `86 passed, 18 SKIPPED ... NOT full coverage`, because the skipped set holds the never-drop and
   cache-invalidation guards. **CI installs pyyaml + openpyxl AND fails the job on that
   "NOT full coverage" line**, so a skipped test can never read as a green run. Before calling this
   suite green, run it the way CI does — with those two installed, not an env that happens to carry

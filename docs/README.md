@@ -508,7 +508,12 @@ yield, synonymous-λ calibration.
   (now including `hgvsc`/`hgvsp`) come first, then every calls column Step 8 does not already
   represent rides through verbatim (`flags`, `hiConfDeNovo`, `review_prior_crosscheck`, the
   Ensembl `gene` as `gene_id`, and Step 5's `info_<ID>` block — every INFO field of the per-trio
-  VCF). Any extra column is filterable in the review server.
+  VCF). Any extra column is filterable in the review server. That block includes `info_CSQ`, the
+  raw multi-transcript VEP record (every transcript's block, not only the picked one), so a
+  `variants.tsv` cell can run to megabytes at a many-transcript locus: Python readers go through
+  `src/hprv/tsv.py` (csv's default field cap is 128 KiB), the review server holds the whole file in
+  one JavaScript string, and Excel cannot hold the cell at all — see
+  [pipeline_design.md](pipeline_design.md) ("`info_CSQ` is kept").
 - **Step 8b** (non-human-fraction — *optional review aid, outside the VEP-only annotation contract;
   never a selection filter*): `outputs.igv.nonhuman_screen.enabled` **true** — but activates only
   when `resources.kraken2_db` is set (else warns + skips, NHF columns blank). `members` **carriers**

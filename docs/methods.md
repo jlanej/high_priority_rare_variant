@@ -756,7 +756,10 @@ and is never mapped to a pathogenicity class.
 Step 7 writes an `.xlsx` workbook with an About sheet (purpose, sheet legend, run summary, the
 thresholds and frequency oracle read from the configuration, the VEP header line and the pipeline
 commit), followed by the gene consolidation table, the candidate calls, the trio resolution table,
-the QC report and the raw audit counts.
+the QC report and the raw audit counts. A cell longer than Excel's limit of 32,767 characters — in
+practice only the complete VEP consequence string of a variant overlapping many transcripts — is
+truncated in the workbook with an explicit marker giving its full length, and the number of such
+cells is reported on the About sheet; the tab-separated tables retain the complete value.
 
 ### 14.2 IGV review export
 
