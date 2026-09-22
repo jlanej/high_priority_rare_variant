@@ -167,6 +167,29 @@ flowchart TD
 
 *(Planned, not yet delivered: an ACMG-SF / pediatric-cancer overlay + phenotype-ranked tiered report — see [CLAUDE.md](../CLAUDE.md) Open TODOs.)*
 
+**`info_CSQ` is kept, and it is the one unbounded cell in the tables.** Step 5's curated columns
+parse the CSQ, but only the consequence block `bcftools +split-vep` selected (`PICK=1`, else the
+worst); Step 2 runs VEP with `--flag_pick`, which keeps every other transcript's block too, and
+`info_CSQ` is the only column that carries them — dropping it would reopen the silent projection
+the dropless `info_<ID>` block exists to close. One block per overlapping transcript means the
+cell can pass Python `csv`'s 128 KiB default field cap at a many-transcript locus, and it rides
+into every table downstream of Step 5:
+
+- **Every Python reader** of these tables is built through `src/hprv/tsv.py`, which raises that
+  cap to the platform maximum (Step 5b died on such a row, and Steps 6, 7, 8 and 9 read the same
+  table with the same stdlib default). An external Python script reading `candidates.calls.tsv`
+  or `igv/variants.tsv` must raise `csv.field_size_limit` itself.
+- **The igv.js review table** (`igv/variants.tsv`, and Step 9's `igv/variants.prioritized.tsv`)
+  carries the cell verbatim — the review table is dropless. The server splits rows on tabs, so it
+  has no per-field cap, but it reads the WHOLE file into one JavaScript string: the table's total
+  size is bounded by Node's `buffer.constants.MAX_STRING_LENGTH` (engine-dependent; print it with
+  `node -p "require('buffer').constants.MAX_STRING_LENGTH"`), and every page of rows it serves
+  sends each row's `info_CSQ` to the browser.
+- **Spreadsheets** cannot hold it: Excel's limit is 32,767 characters per cell. Step 7's workbook
+  cuts such a cell visibly (`...[TRUNCATED from N chars: ...]`, counted on the About sheet and as
+  `cells_truncated_excel_limit` in the audit); openpyxl would otherwise slice it silently. Open the
+  TSVs themselves in a tool without that limit.
+
 **Step 8 is resumable without re-reading source CRAMs.** There is deliberately no step-level `.done`
 (Step 8 must re-run to pick up a re-curated candidate set), so each mini-CRAM self-guards: a re-run
 reuses a valid prior slice for the **same** candidate region set — keyed to the content of the
