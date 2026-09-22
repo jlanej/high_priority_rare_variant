@@ -4919,6 +4919,54 @@ def test_tsv_1mib_cell_through_the_step_clis():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_report_cuts_a_cell_over_excels_limit_visibly():
+    """Step 7 reads the calls table like everything else (a 1 MiB info_CSQ, from the stdlib default
+    limit) and then meets a second cap: Excel holds at most 32,767 characters per cell, and openpyxl
+    enforces that by SILENTLY slicing the string. The workbook must cut it VISIBLY — the kept prefix
+    plus a marker naming the full length and the TSV that has it — and state the count on the About
+    sheet and in the audit. A cell exactly AT the limit is untouched."""
+    _requires("openpyxl")
+    import shutil
+    from openpyxl import load_workbook
+    from hprv import report as R
+    big = _big_cell()
+    at_limit = "x" * R.EXCEL_CELL_MAX
+    d = tempfile.mkdtemp(prefix="_hprv_repbig_")
+    old = _stdlib_field_limit()
+    old_adir = os.environ.get("HPRV_AUDIT_DIR")
+    os.environ["HPRV_AUDIT_DIR"] = os.path.join(d, "audit")
+    try:
+        _write_tsv(os.path.join(d, "candidates.calls.tsv"),
+                   ["trio_id", "mode", "chrom", "pos", "info_CSQ", "info_AT_LIMIT"],
+                   [{"trio_id": "T1", "mode": "dominant", "chrom": "chr1", "pos": "1000",
+                     "info_CSQ": big, "info_AT_LIMIT": at_limit}])
+        _write_tsv(os.path.join(d, "genes.ranked.tsv"), ["gene", "recurrent"],
+                   [{"gene": "GENE1", "recurrent": "0"}])
+        out = os.path.join(d, "summary.xlsx")
+        _stdlib_field_limit()
+        R.build(d, out, {})
+        wb = load_workbook(out, read_only=True)
+        header, row = [[c.value for c in r] for r in wb["Candidate calls"].iter_rows(max_row=2)]
+        cell = row[header.index("info_CSQ")]
+        assert len(cell) <= R.EXCEL_CELL_MAX, len(cell)
+        assert cell.endswith(f"[TRUNCATED from {len(big)} chars: Excel's cell limit is "
+                             f"{R.EXCEL_CELL_MAX}; the full value is in candidates.calls.tsv]"), cell[-160:]
+        assert big.startswith(cell[:cell.index(" ...[TRUNCATED")]), "the kept prefix must be the value's own"
+        assert row[header.index("info_AT_LIMIT")] == at_limit, "a cell AT the limit must be untouched"
+        about = " ".join(str(c.value) for r in wb["About"].iter_rows() for c in r if c.value is not None)
+        assert "Cells over Excel's limit 1 (cut short" in about, about[:400]
+        assert audit._read(os.environ["HPRV_AUDIT_DIR"]).get(
+            ("07_report", "global", "cells_truncated_excel_limit")) == "1"
+    finally:
+        import csv as _csv
+        _csv.field_size_limit(old)
+        if old_adir is None:
+            os.environ.pop("HPRV_AUDIT_DIR", None)
+        else:
+            os.environ["HPRV_AUDIT_DIR"] = old_adir
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run_all():
     import inspect
     fns = [f for n, f in sorted(globals().items())
