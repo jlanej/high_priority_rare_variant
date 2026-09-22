@@ -13,12 +13,14 @@ import gzip
 import math
 import os
 import subprocess
+import sys
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from hprv import annotations as A
+from hprv import audit
 from hprv import tsv
 from hprv.config import get
 
@@ -85,6 +87,27 @@ def _read_tsv(path):
     return rows[0], rows[1:]
 
 
+# Excel cannot hold a cell longer than 32,767 characters, and openpyxl enforces that by SILENTLY
+# slicing the string (openpyxl.cell.cell.check_string). An `info_CSQ` cell at a many-transcript
+# locus can run far past it (see hprv.tsv), so the workbook would show a cut-short CSQ with nothing
+# to say so. Cut it here instead, visibly: the kept prefix plus a marker naming the full length and
+# the TSV that carries the whole value.
+EXCEL_CELL_MAX = 32767
+
+
+def _fit_to_excel(rows, source):
+    """Truncate, in place and with a marker, every cell over EXCEL_CELL_MAX. Returns the count."""
+    n = 0
+    for r in rows:
+        for i, x in enumerate(r):
+            if len(x) > EXCEL_CELL_MAX:
+                marker = (f" ...[TRUNCATED from {len(x)} chars: Excel's cell limit is "
+                          f"{EXCEL_CELL_MAX}; the full value is in {source}]")
+                r[i] = x[:EXCEL_CELL_MAX - len(marker)] + marker
+                n += 1
+    return n
+
+
 def _style_data_sheet(ws, header, rows, freeze=True):
     ws.append(header)
     for r in rows:
@@ -128,7 +151,20 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     genes_h, genes = _read_tsv(p("genes.ranked.tsv"))
     res_h, res = _read_tsv(p("trio_resolution.tsv"))
     qc_h, qc = _read_tsv(p("qc_report.tsv"))
-    audit_h, audit = _read_tsv(p("audit", "counts.tsv"))
+    audit_h, audit_rows = _read_tsv(p("audit", "counts.tsv"))
+
+    # Excel's per-cell limit (EXCEL_CELL_MAX): cut VISIBLY here, before any sheet is written, so
+    # the About sheet can state the count. Recorded after the audit table was read, so the
+    # workbook's Audit sheet is the run as it stood when Step 7 began.
+    n_truncated = sum(_fit_to_excel(rows, src) for rows, src in (
+        (genes, "genes.ranked.tsv"), (calls, "candidates.calls.tsv"), (res, "trio_resolution.tsv"),
+        (qc, "qc_report.tsv"), (audit_rows, "audit/counts.tsv")))
+    if n_truncated:
+        sys.stderr.write(f"WARN: Step 7: {n_truncated} cell(s) exceed Excel's {EXCEL_CELL_MAX}-character "
+                         "cell limit (in practice info_CSQ at a many-transcript locus); each is cut "
+                         "short in the workbook with a [TRUNCATED ...] marker. The TSVs carry the full "
+                         "values.\n")
+    audit.record("07_report", "cells_truncated_excel_limit", n_truncated)
 
     # Per-run annotation provenance (P9): derive from artifacts/config rather than hardcoding, so the
     # frequency oracle (golden rule 2) is RECORDED, not asserted. The ##VEP= line lands at the same
@@ -173,7 +209,10 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
                             "annotations (gnomAD rarity — rarity_af, with rarity_oracle / "
                             "rarity_basis saying which quantity and how it arose — HGVS, CADD, "
                             "SpliceAI, ClinVar), then every INFO field of the per-trio VCF verbatim "
-                            "as info_<ID> (dropless)."),
+                            "as info_<ID> (dropless). A cell over Excel's 32,767-character limit "
+                            "(in practice only info_CSQ, the raw multi-transcript VEP record, at a "
+                            "many-transcript locus) is cut short here and ends in a [TRUNCATED ...] "
+                            "marker; candidates.calls.tsv carries the full value."),
         ("Trio resolution", "Which VCF each kid/dad/mom trio resolved to; unresolved trios + why."),
         ("QC", "Per-trio Mendelian-error rate, chrX-inferred sex for all three members (the "
                "proband's checked against the trios file's stated sex, which is canonical: "
@@ -203,6 +242,8 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
     line("Calls by mode", ", ".join(f"{k}={v}" for k, v in sorted(modes.items())) or "(none)")
     line("Genes nominated", str(len(genes)))
     line("Recurrent genes", f"{n_recurrent} (>= {get(cfg, 'burden.min_carriers', 2)} distinct individuals)")
+    line("Cells over Excel's limit", f"{n_truncated} (cut short in this workbook with a [TRUNCATED ...] "
+                                     "marker; the TSVs carry the full values)")
     # significant in ANY inherited family (dominant / biallelic / X-linked), matching genes.ranked.tsv
     _sig_cols = [c for c in ("recurrence_exome_wide_sig", "recurrence_biallelic_exome_wide_sig",
                              "recurrence_xlinked_exome_wide_sig") if genes_h and c in genes_h]
@@ -285,7 +326,7 @@ def build(work_dir, out_xlsx, cfg, run_label=""):
         ("Candidate calls", calls_h, calls),
         ("Trio resolution", res_h, res),
         ("QC", qc_h, qc),
-        ("Audit counts", audit_h, audit),
+        ("Audit counts", audit_h, audit_rows),
     ]:
         if not header:
             continue
