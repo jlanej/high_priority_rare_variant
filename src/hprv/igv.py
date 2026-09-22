@@ -22,6 +22,8 @@ from __future__ import annotations
 import csv
 import os
 
+from hprv import tsv
+
 # Flag a call when this fraction of some screened member's ALT-supporting reads classify
 # non-human (over >= min_reads reads). Both numbers come from the config
 # (outputs.igv.nonhuman_screen.flag_fraction / .min_reads) so `nhf_flag` here and Step 9's
@@ -124,7 +126,7 @@ def _read_samples(manifest):
     """trio_id -> (kid, dad, mom) from the resolved manifest's `samples` column."""
     out = {}
     with open(manifest) as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
+        for r in tsv.DictReader(fh, delimiter="\t"):
             s = (r.get("samples") or "").split(",")
             if r.get("trio_id") and len(s) == 3:
                 out[r["trio_id"]] = (s[0], s[1], s[2])
@@ -141,7 +143,7 @@ def _load_nhf_tsv(path):
         return None
     m = {}
     with open(path) as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
+        for r in tsv.DictReader(fh, delimiter="\t"):
             k = r.get("variant_key")
             if k:
                 m[k] = (r.get("nonhuman_fraction", ""), r.get("supporting_reads", ""))
@@ -197,7 +199,7 @@ def build_variants_tsv(calls_tsv, manifest, data_dir, out_tsv, nhf_dir=None, nhf
 
     n = 0
     with open(calls_tsv) as fh, open(out_tsv, "w", newline="") as out:
-        reader = csv.DictReader(fh, delimiter="\t")
+        reader = tsv.DictReader(fh, delimiter="\t")
         # Dropless: every calls column not represented below rides through verbatim after the
         # track columns (passthrough_columns). The curated COLUMNS keep their positions.
         extra = passthrough_columns(reader.fieldnames)
@@ -292,7 +294,7 @@ def write_sample_qc(qc_report, manifest, out_tsv):
     rows = []
     if qc_report and os.path.exists(qc_report):
         with open(qc_report) as fh:
-            for r in csv.DictReader(fh, delimiter="\t"):
+            for r in tsv.DictReader(fh, delimiter="\t"):
                 tid = r.get("trio_id")
                 if tid not in samples:
                     continue

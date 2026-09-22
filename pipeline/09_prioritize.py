@@ -46,7 +46,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
 import io
 import json
@@ -57,6 +56,7 @@ import sys
 
 from hprv import audit
 from hprv import prioritize as P
+from hprv import tsv
 from hprv.config import get, get_bool, load_config
 
 GENE_KEYS = ("gene", "gene_symbol", "symbol")
@@ -173,7 +173,7 @@ def _read_tsv(path):
         sniff = fh.readline()
         delim = "\t" if "\t" in sniff else ","
         fh.seek(0)
-        return list(csv.DictReader(fh, delimiter=delim))
+        return list(tsv.DictReader(fh, delimiter=delim))
 
 
 def _keyed_by_gene(path, label):

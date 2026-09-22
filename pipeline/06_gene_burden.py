@@ -41,13 +41,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
 import io
 import sys
 
 from hprv import annotations as A
 from hprv import audit
+from hprv import tsv
 from hprv.config import get, get_bool, load_config
 from hprv.ped import resolve_child_sex
 
@@ -83,7 +83,7 @@ def _open_keyed(path, key_names):
         sniff = fh.readline()
         delim = "\t" if "\t" in sniff else ","
         fh.seek(0)
-        reader = csv.DictReader(fh, delimiter=delim)
+        reader = tsv.DictReader(fh, delimiter=delim)
         cols = reader.fieldnames or []
         keycol = next((c for c in cols if c.lower() in key_names), None)
         if keycol is None:
@@ -209,7 +209,7 @@ def main(argv=None) -> int:
     # audit surface was otherwise outputs only (genes_nominated, ...).
     n_calls_in = n_no_gene = 0
     with open(args.calls) as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
+        for r in tsv.DictReader(fh, delimiter="\t"):
             n_calls_in += 1
             gene = r.get("symbol") or r.get("gene")
             if not gene:
@@ -284,7 +284,7 @@ def main(argv=None) -> int:
     n_male = args.n_male_trios or 0
     if not n_male and args.qc_report and __import__("os").path.exists(args.qc_report):
         with open(args.qc_report) as fh:
-            n_male = sum(1 for r in csv.DictReader(fh, delimiter="\t")
+            n_male = sum(1 for r in tsv.DictReader(fh, delimiter="\t")
                          if resolve_child_sex(r.get("ped_sex"), r.get("inferred_sex"))[0] == "1")
     n_x = n_male if n_male > 0 else n_trios
     if n_trios and not n_male:
